@@ -23,6 +23,7 @@ import queue
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, date, timedelta
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -231,7 +232,6 @@ class KeyState:
         """
         if self.period_start and self.period_end:
             try:
-                from datetime import datetime, timezone
                 start = datetime.fromisoformat(self.period_start.replace("Z", "+00:00"))
                 end = datetime.fromisoformat(self.period_end.replace("Z", "+00:00"))
                 now = datetime.now(timezone.utc)
@@ -2426,7 +2426,6 @@ def main():
     cfg = load_config()
 
     # Allow env var overrides from CLI
-    import os
     if os.environ.get("LLAMAHERD_ADMIN_TOKEN"):
         cfg["admin_token"] = os.environ["LLAMAHERD_ADMIN_TOKEN"]
     if os.environ.get("LLAMAHERD_HOST"):

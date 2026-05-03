@@ -38,6 +38,11 @@ dev = [
     "ruff>=0.1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/bennybuoy/llamaherd"
+Repository = "https://github.com/bennybuoy/llamaherd"
+Issues = "https://github.com/bennybuoy/llamaherd/issues"
+
 [project.scripts]
 llamaherd = "llamaherd.cli:main"
 
