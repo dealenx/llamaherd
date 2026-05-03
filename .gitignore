@@ -1,0 +1,26 @@
+# Runtime / data files
+config.yaml
+usage.db
+proxy.db
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.venv/
+venv/
+.env

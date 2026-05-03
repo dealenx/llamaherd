@@ -1,0 +1,71 @@
+# LlamaHerd Configuration
+# Copy this file to config.yaml and fill in your details.
+#
+# Then start: llamaherd --config config.yaml
+# Or:       python -m llamaherd.proxy
+
+# --- Upstream Ollama Cloud subscriptions ---
+# Each key is an Ollama Cloud API key from https://ollama.com/settings/keys
+# Stagger cycle_day across keys so there's always a fresh subscription available.
+keys:
+  - token: "sk-ollama-your-first-key-here"
+    max_concurrent: 15          # Tested ~15-20 before hard 429s
+    cycle_day: 1                # Billing reset day (1-28)
+    label: "Subscription 1"
+    # Optional: cookies for usage scraping from ollama.com/settings
+    # Extract from browser DevTools → Application → Cookies → ollama.com
+    # Required for session/weekly usage tracking
+    cookies:
+      secure_session: ""        # __Secure-session (REQUIRED, per-account)
+      aid: ""                   # aid account ID (shared across accounts)
+      cf_clearance: ""          # Cloudflare bypass (optional but recommended)
+      stripe_mid: ""            # __stripe_mid (optional)
+
+  - token: "sk-ollama-your-second-key-here"
+    max_concurrent: 15
+    cycle_day: 15
+    label: "Subscription 2"
+    cookies:
+      secure_session: ""
+      aid: ""
+      cf_clearance: ""
+      stripe_mid: ""
+
+# --- Client API keys (one per consumer, for usage attribution) ---
+# These are NOT real Ollama keys — they're internal tokens for tracking which
+# service is making requests. Also manageable via /admin/clients API.
+clients:
+  - id: my-gateway
+    label: "My Gateway Service"
+    token: ocp-gateway-token-here
+
+  - id: my-cli
+    label: "My CLI Tool"
+    token: ocp-cli-token-here
+
+# --- Proxy settings ---
+host: 127.0.0.1              # Bind address (0.0.0.0 for all interfaces)
+port: 8399                    # Bind port
+upstream: https://ollama.com/v1  # Ollama Cloud upstream URL
+admin_token: "change-me-to-a-secure-random-string"  # Dashboard/API auth
+
+# --- Health check & model refresh ---
+health_check_interval: 300    # Seconds between model discovery refreshes
+
+# --- Request handling ---
+request_timeout: 120          # Seconds before giving up on upstream
+queue_timeout: 60             # Seconds before giving up on queued request
+retry_on_429: true            # Auto-retry on another key after 429
+max_retries: 2                # Max retries per request
+
+# --- Usage tracking ---
+usage_db: ~/llamaherd/usage.db   # SQLite database path
+
+# --- Subscription polling ---
+# How often to poll /api/me for subscription status (seconds)
+sub_poll_interval: 21600      # 6 hours
+
+# --- Usage scraping ---
+# How often to scrape ollama.com/settings for usage data (seconds)
+# Requires cookies to be set for each key
+usage_scrape_interval: 1800  # 30 minutes
