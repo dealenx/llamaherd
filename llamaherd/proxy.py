@@ -834,6 +834,131 @@ class ModelRegistry:
         return None
 
 # ---------------------------------------------------------------------------
+# Fallback Provider — secondary upstream (e.g. NVIDIA Build) for unmapped or
+# overflow traffic. Speaks OpenAI /v1/chat/completions.
+# ---------------------------------------------------------------------------
+
+VALID_FALLBACK_PRIORITIES = ("after", "before", "only")
+
+
+class FallbackProvider:
+    """Routes selected models to a secondary OpenAI-compatible upstream.
+
+    Config shape (under top-level ``fallback:`` in config.yaml):
+
+        fallback:
+          provider: nvidia-build
+          base_url: https://integrate.api.nvidia.com/v1
+          api_key: nvapi-...
+          default_model: deepseek-ai/deepseek-v4-flash
+          priority: after        # after | before | only
+          model_map:
+            glm-5.1: z-ai/glm-5.1
+            glm5:
+              nvidia_model: z-ai/glm5
+              priority: before
+    """
+
+    def __init__(self, config: Optional[dict]):
+        cfg = config or {}
+        self.provider: str = cfg.get("provider", "fallback")
+        self.base_url: str = (cfg.get("base_url") or "").rstrip("/")
+        self.api_key: str = cfg.get("api_key", "") or ""
+        self.default_model: Optional[str] = cfg.get("default_model")
+        self.priority: str = cfg.get("priority", "after")
+        if self.priority not in VALID_FALLBACK_PRIORITIES:
+            log.warning(f"Invalid fallback priority {self.priority!r}; defaulting to 'after'")
+            self.priority = "after"
+        self._model_map: dict[str, dict] = {}
+        for alias, value in (cfg.get("model_map") or {}).items():
+            if isinstance(value, str):
+                self._model_map[alias] = {"nvidia_model": value, "priority": None}
+            elif isinstance(value, dict):
+                self._model_map[alias] = {
+                    "nvidia_model": value.get("nvidia_model") or value.get("model"),
+                    "priority": value.get("priority"),
+                }
+        # Models discovered from the fallback's /v1/models on startup.
+        self.discovered_models: list[dict] = []
+        self.enabled: bool = bool(self.base_url and self.api_key)
+
+    @property
+    def label(self) -> str:
+        return self.provider
+
+    def resolve_model(self, ollama_model: str) -> Optional[str]:
+        """Map an Ollama-style model name to the fallback's model name.
+
+        Returns None when the model isn't in the explicit map.
+        """
+        entry = self._model_map.get(ollama_model)
+        if not entry:
+            return None
+        return entry.get("nvidia_model")
+
+    def priority_for(self, ollama_model: str) -> str:
+        """Effective priority for ``ollama_model``: per-model override or global default."""
+        entry = self._model_map.get(ollama_model) or {}
+        per_model = entry.get("priority")
+        if per_model in VALID_FALLBACK_PRIORITIES:
+            return per_model
+        return self.priority
+
+    def should_try(self, priority: str, model_available_on_ollama: bool) -> bool:
+        """Decide whether to try the fallback for a model.
+
+        ``priority`` is the per-model effective priority. ``model_available_on_ollama``
+        indicates whether the model exists on the Ollama Cloud registry.
+        """
+        if not self.enabled:
+            return False
+        if priority == "only":
+            return True
+        if priority == "before":
+            return True
+        # after: only fallback if Ollama doesn't have the model (or all keys exhausted —
+        # the caller handles the exhaustion path separately).
+        return not model_available_on_ollama
+
+    def set_priority(self, priority: str) -> str:
+        """Update the global priority at runtime. Returns the active value."""
+        if priority in VALID_FALLBACK_PRIORITIES:
+            self.priority = priority
+        return self.priority
+
+    async def discover_models(self, timeout: float = 5.0):
+        """Query the fallback's /v1/models. Best-effort, doesn't block startup."""
+        if not self.enabled:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(
+                    f"{self.base_url}/models",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                if resp.status_code != 200:
+                    log.warning(f"Fallback /models returned {resp.status_code}")
+                    return
+                data = resp.json().get("data") or []
+                self.discovered_models = data
+                log.info(f"Fallback {self.provider}: discovered {len(data)} models")
+        except Exception as e:
+            log.warning(f"Fallback model discovery failed: {e}")
+
+    def model_aliases(self) -> list[dict]:
+        """Return the configured aliases as model entries (for /v1/models, /admin/models)."""
+        out = []
+        for alias, entry in self._model_map.items():
+            out.append({
+                "id": alias,
+                "nvidia_model": entry.get("nvidia_model"),
+                "priority": entry.get("priority") or self.priority,
+                "provider": self.provider,
+            })
+        return out
+
+
+# ---------------------------------------------------------------------------
 # Usage DB — full token tracking with client attribution
 # ---------------------------------------------------------------------------
 
@@ -1140,6 +1265,7 @@ registry: Optional[ModelRegistry] = None
 usage_db: Optional[UsageDB] = None
 client_registry: Optional[ClientRegistry] = None
 usage_scraper: Optional[UsageScraper] = None
+fallback_provider: Optional[FallbackProvider] = None
 upstream_url: str = ""
 retry_on_429: bool = True
 max_retries: int = 2
@@ -1238,9 +1364,9 @@ def _verify_admin(request: Request) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, registry, usage_db, client_registry, usage_scraper
+    global manager, registry, usage_db, client_registry, usage_scraper, fallback_provider
     global upstream_url, retry_on_429, max_retries, queue_timeout, request_timeout
-    global admin_token
+    global admin_token, NATIVE_BRIDGE_MODELS
 
     cfg = load_config()
     admin_token = cfg.get("admin_token", "")
@@ -1255,6 +1381,11 @@ async def lifespan(app: FastAPI):
     max_retries = cfg.get("max_retries", 2)
     queue_timeout = cfg.get("queue_timeout", 60)
     request_timeout = cfg.get("request_timeout", 120)
+
+    # Native bridge: models whose /v1 endpoint misreports truncation
+    NATIVE_BRIDGE_MODELS = cfg.get("native_bridge_models", [])
+    if NATIVE_BRIDGE_MODELS:
+        log.info(f"Native bridge enabled for models: {NATIVE_BRIDGE_MODELS}")
 
     usage_db = UsageDB(cfg.get("usage_db", "~/ollama-cloud-proxy/usage.db"))
     registry = ModelRegistry(manager, upstream_url)
@@ -1278,6 +1409,20 @@ async def lifespan(app: FastAPI):
     # Start periodic usage scraping (every 30 min)
     usage_scrape_interval = cfg.get("usage_scrape_interval", 1800)
     usage_task = asyncio.create_task(_scrape_usage_loop(usage_scraper, manager, usage_scrape_interval))
+    # Fallback provider (NVIDIA Build, etc.)
+    fallback_provider = FallbackProvider(cfg.get("fallback") or {})
+    if fallback_provider.enabled:
+        # Best-effort discovery — don't block startup if it's slow.
+        try:
+            await asyncio.wait_for(fallback_provider.discover_models(timeout=5.0), timeout=6.0)
+        except asyncio.TimeoutError:
+            log.warning("Fallback model discovery timed out")
+        except Exception as e:
+            log.warning(f"Fallback model discovery error: {e}")
+        log.info(f"Fallback enabled: {fallback_provider.provider} ({len(fallback_provider._model_map)} mapped, priority={fallback_provider.priority})")
+    else:
+        log.info("Fallback provider not configured")
+
     log.info(f"Proxy started: {len(manager.keys)} upstream keys ({len(usage_scraper.cookie_map)} with usage cookies), {len(registry.models)} models, {len(client_registry.clients)} clients")
 
     yield
@@ -1387,6 +1532,13 @@ async def _proxy_request(request: Request, path: str) -> Response:
                 "Content-Type": "application/json",
             }
 
+            # Native bridge: re-route GLM models via /api/chat to get correct
+            # done_reason: "length" instead of the buggy finish_reason: "stop"
+            if is_stream and _should_bridge_to_native(model):
+                bridge_body = _convert_openai_to_ollama_body(req_json)
+                log.info(f"Bridge: {model} via native /api/chat (client={client_id})")
+                return await _proxy_bridge_stream(client_id, key, bridge_body, model, start)
+
             if is_stream:
                 return await _proxy_stream(client_id, key, path, headers, body, model, start)
 
@@ -1492,6 +1644,104 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
             _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms, 200)
             usage_src = "usage" if usage_captured else "estimate"
             log.info(f"{client_id} -> {model} via {key.label}: stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src})")
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Fallback routing (e.g. NVIDIA Build) — same OpenAI /v1 protocol
+# ---------------------------------------------------------------------------
+
+async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
+                              body: bytes, req_json: dict, original_model: str,
+                              is_stream: bool) -> Response:
+    """Forward an OpenAI-style request to the fallback provider.
+
+    Rewrites the model name in the request body using fp.resolve_model().
+    Returns a Response (or StreamingResponse for is_stream).
+    """
+    mapped = fp.resolve_model(original_model) or fp.default_model
+    if not mapped:
+        raise RuntimeError(f"no fallback model mapping for {original_model}")
+    new_req = dict(req_json)
+    new_req["model"] = mapped
+    new_body = json.dumps(new_req).encode()
+    headers = {
+        "Authorization": f"Bearer {fp.api_key}",
+        "Content-Type": "application/json",
+    }
+    url = f"{fp.base_url}{path}"
+    upstream_label = f"fb:{fp.label}"
+    start = time.time()
+
+    if is_stream:
+        return await _proxy_fallback_stream(
+            client_id, fp, url, headers, new_body, original_model, mapped, start, upstream_label,
+        )
+
+    async with httpx.AsyncClient(timeout=request_timeout) as ch:
+        resp = await ch.post(url, content=new_body, headers=headers)
+    elapsed_ms = int((time.time() - start) * 1000)
+    tokens_in = tokens_out = 0
+    if resp.status_code == 200:
+        try:
+            data = resp.json()
+            usage = data.get("usage") or {}
+            tokens_in = usage.get("prompt_tokens", 0) or 0
+            tokens_out = usage.get("completion_tokens", 0) or 0
+        except Exception:
+            pass
+    _record_and_broadcast(client_id, upstream_label, original_model,
+                          tokens_in, tokens_out, elapsed_ms, resp.status_code)
+    log.info(f"{client_id} -> {original_model} via {upstream_label}({mapped}): "
+             f"{tokens_in}+{tokens_out}tok {elapsed_ms}ms")
+    if resp.status_code >= 400:
+        log.warning(f"{resp.status_code} from {fp.label} for {original_model}: {resp.text[:200]}")
+    safe_headers = {k: v for k, v in resp.headers.items()
+                    if k.lower() not in ("content-encoding", "content-length", "transfer-encoding", "connection")}
+    return Response(content=resp.content, status_code=resp.status_code, headers=safe_headers)
+
+
+async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
+                                  headers: dict, body: bytes, original_model: str,
+                                  mapped: str, start: float, upstream_label: str) -> StreamingResponse:
+    async def generate():
+        tokens_in = 0
+        tokens_out = 0
+        usage_captured = False
+        status_code = 200
+        try:
+            async with httpx.AsyncClient(timeout=request_timeout) as ch:
+                async with ch.stream("POST", url, content=body, headers=headers) as resp:
+                    status_code = resp.status_code
+                    if resp.status_code >= 400:
+                        err = await resp.aread()
+                        yield f'data: {err.decode(errors="replace")}\n\n'
+                        return
+                    async for line in resp.aiter_lines():
+                        yield (line + "\n\n") if line.startswith("data:") else (line + "\n")
+                        if line.startswith("data:"):
+                            try:
+                                payload_text = line[5:].strip()
+                                if payload_text == "[DONE]":
+                                    continue
+                                chunk = json.loads(payload_text)
+                                chunk_usage = chunk.get("usage")
+                                if chunk_usage and chunk_usage.get("total_tokens", 0) > 0:
+                                    tokens_in = chunk_usage.get("prompt_tokens", 0)
+                                    tokens_out = chunk_usage.get("completion_tokens", 0)
+                                    usage_captured = True
+                            except (json.JSONDecodeError, IndexError, KeyError):
+                                pass
+        except Exception as e:
+            log.error(f"Fallback stream error for {original_model}: {e}")
+        finally:
+            elapsed_ms = int((time.time() - start) * 1000)
+            _record_and_broadcast(client_id, upstream_label, original_model,
+                                  tokens_in, tokens_out, elapsed_ms, status_code)
+            src = "usage" if usage_captured else "estimate"
+            log.info(f"{client_id} -> {original_model} via {upstream_label}({mapped}): "
+                     f"stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({src})")
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -1831,6 +2081,245 @@ async def api_show(request: Request):
 async def api_ps():
     """Native Ollama /api/ps — return empty models list (we don't track running models)."""
     return {"models": []}
+
+
+# ---------------------------------------------------------------------------
+# Native Bridge — Re-route /v1 requests via Ollama native /api to fix
+# GLM truncation misreports (done_reason: "length" vs finish_reason: "stop")
+# ---------------------------------------------------------------------------
+
+# Models whose /v1/chat/completions endpoint misreports truncation as "stop".
+# The Ollama native /api/chat endpoint correctly reports done_reason: "length".
+NATIVE_BRIDGE_MODELS: list[str] = []  # populated from config in lifespan()
+
+
+def _should_bridge_to_native(model: str) -> bool:
+    """Check if a /v1 request should be internally routed through /api/chat."""
+    if not NATIVE_BRIDGE_MODELS:
+        return False
+    model_lower = model.lower()
+    # Strip :cloud suffix for comparison
+    model_base = model_lower.replace(":cloud", "")
+    for prefix in NATIVE_BRIDGE_MODELS:
+        prefix = prefix.lower().strip()
+        if prefix.endswith("*"):
+            if model_base.startswith(prefix[:-1]):
+                return True
+        elif model_base == prefix:
+            return True
+    return False
+
+
+def _convert_openai_to_ollama_body(req_json: dict) -> bytes:
+    """Convert an OpenAI /v1/chat/completions request body to Ollama /api/chat format.
+
+    Maps: messages, tools, max_tokens→options.num_predict, temperature→options.temperature,
+    top_p→options.top_p, stream, model.  OpenAI-specific fields (stream_options, n, etc.)
+    are dropped.
+    """
+    ollama: dict = {"model": req_json.get("model", "")}
+    if "messages" in req_json:
+        ollama["messages"] = req_json["messages"]
+    if "stream" in req_json:
+        ollama["stream"] = req_json["stream"]
+    if "tools" in req_json:
+        ollama["tools"] = req_json["tools"]
+
+    # Pack OpenAI kwargs into Ollama options dict
+    options: dict = {}
+    if "max_tokens" in req_json:
+        options["num_predict"] = req_json["max_tokens"]
+    if "temperature" in req_json:
+        options["temperature"] = req_json["temperature"]
+    if "top_p" in req_json:
+        options["top_p"] = req_json["top_p"]
+    if "frequency_penalty" in req_json:
+        options["frequency_penalty"] = req_json["frequency_penalty"]
+    if "presence_penalty" in req_json:
+        options["presence_penalty"] = req_json["presence_penalty"]
+    if "seed" in req_json:
+        options["seed"] = req_json["seed"]
+    if "stop" in req_json:
+        # Ollama uses 'stop' directly at top level
+        ollama["stop"] = req_json["stop"]
+    if options:
+        ollama["options"] = options
+
+    return json.dumps(ollama).encode()
+
+
+def _convert_ollama_tool_calls(ollama_tools: list[dict]) -> list[dict]:
+    """Convert Ollama tool_calls format to OpenAI streaming format.
+
+    Ollama: {"function": {"name": "x", "arguments": {dict}}}
+    OpenAI: {"index": 0, "id": "call_xxx", "type": "function",
+             "function": {"name": "x", "arguments": "{json_string}"}}
+    """
+    openai_tools = []
+    for i, tc in enumerate(ollama_tools or []):
+        fn = tc.get("function", {})
+        args = fn.get("arguments", {})
+        # Ollama returns arguments as a dict; OpenAI wants a JSON string
+        args_str = json.dumps(args) if isinstance(args, dict) else str(args)
+        openai_tools.append({
+            "index": i,
+            # Generate a deterministic-ish call ID from function name
+            "id": f"call_{fn.get('name', 'unknown')}_{i}",
+            "type": "function",
+            "function": {
+                "name": fn.get("name", ""),
+                "arguments": args_str,
+            },
+        })
+    return openai_tools
+
+
+def _ollama_chunk_to_sse(ollama_chunk: dict, chunk_id: str, model: str) -> str | None:
+    """Convert a single Ollama /api/chat NDJSON chunk to an OpenAI SSE data line.
+
+    Returns None for chunks that shouldn't be emitted (empty content, non-message chunks).
+    Returns the SSE line WITHOUT the trailing \\n\\n (caller adds SSE framing).
+    """
+    # Only process chunks with a "message" field (content or tool_calls chunks)
+    if "message" not in ollama_chunk and not ollama_chunk.get("done", False):
+        return None
+
+    done = ollama_chunk.get("done", False)
+    message = ollama_chunk.get("message", {})
+
+    # Build the OpenAI streaming chunk
+    choices: list[dict] = []
+    usage: dict | None = None
+
+    if done:
+        # Final chunk: emit finish_reason and usage
+        done_reason = ollama_chunk.get("done_reason", "stop")
+        # Map Ollama done_reason to OpenAI finish_reason
+        finish_reason = "length" if done_reason == "length" else (
+            "tool_calls" if message.get("tool_calls") else "stop"
+        )
+        delta: dict = {}
+        # If the final chunk has tool_calls, include them
+        if message.get("tool_calls"):
+            delta["tool_calls"] = _convert_ollama_tool_calls(message["tool_calls"])
+        choices.append({"index": 0, "delta": delta, "finish_reason": finish_reason})
+
+        # Usage from final NDJSON chunk
+        pev = ollama_chunk.get("prompt_eval_count")
+        ev = ollama_chunk.get("eval_count")
+        if pev is not None or ev is not None:
+            usage = {
+                "prompt_tokens": int(pev or 0),
+                "completion_tokens": int(ev or 0),
+                "total_tokens": int(pev or 0) + int(ev or 0),
+            }
+    else:
+        # Content chunk
+        content = message.get("content", "")
+        delta: dict = {}
+        if content:
+            delta["content"] = content
+        # Tool calls chunk
+        if message.get("tool_calls"):
+            delta["tool_calls"] = _convert_ollama_tool_calls(message["tool_calls"])
+            delta["content"] = None  # OpenAI: content is null when tool_calls present
+        if not delta:
+            return None  # Empty delta, skip
+        choices.append({"index": 0, "delta": delta, "finish_reason": None})
+
+    chunk: dict = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": choices,
+    }
+    if usage:
+        chunk["usage"] = usage
+
+    return f"data: {json.dumps(chunk)}"
+
+
+async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
+                                model: str, start: float) -> StreamingResponse:
+    """Bridge stream: receive NDJSON from /api/chat, emit SSE for /v1/chat/completions client.
+
+    This is the core of the native bridge. It re-routes the upstream request
+    from the Ollama /v1 endpoint to the native /api/chat endpoint, which
+    correctly reports done_reason: "length" for truncated responses. The
+    NDJSON response is converted chunk-by-chunk to SSE format so the client
+    (Hermes) sees a standard OpenAI-compatible stream.
+    """
+    api_upstream = _native_api_upstream()
+    chunk_id = f"chatcmpl-bridge-{uuid.uuid4().hex[:8]}"
+
+    async def generate():
+        tokens_out = 0
+        tokens_in = 0
+        usage_captured = False
+        bridge_reason = "stop"  # default
+        try:
+            async with httpx.AsyncClient(timeout=request_timeout) as client_http:
+                async with client_http.stream("POST", f"{api_upstream}/chat",
+                                              content=body, headers={
+                                                  "Authorization": f"Bearer {key.token}",
+                                                  "Content-Type": "application/json",
+                                              }) as resp:
+                    if resp.status_code == 429:
+                        await manager.mark_429(key)
+                        _record_and_broadcast(client_id, key.token[:8], model, 0, 0, 0, 429)
+                        yield 'data: {"error": "429 from upstream"}\n\n'
+                        return
+                    if resp.status_code == 402:
+                        await manager.mark_402(key)
+                        _record_and_broadcast(client_id, key.token[:8], model, 0, 0, 0, 402)
+                        yield 'data: {"error": "402 from upstream"}\n\n'
+                        return
+                    if resp.status_code >= 400:
+                        error_body = await resp.aread()
+                        err = error_body.decode(errors="replace").strip()
+                        # Try to format as OpenAI error
+                        yield f'data: {json.dumps({"error": {"message": err, "type": "upstream_error", "code": resp.status_code}})}\n\n'
+                        return
+
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            ollama_chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        # Convert and emit SSE
+                        sse_line = _ollama_chunk_to_sse(ollama_chunk, chunk_id, model)
+                        if sse_line:
+                            yield sse_line + "\n\n"
+
+                        # Capture usage from final chunk
+                        if ollama_chunk.get("done", False):
+                            done_reason = ollama_chunk.get("done_reason", "stop")
+                            bridge_reason = done_reason
+                            pev = ollama_chunk.get("prompt_eval_count")
+                            ev = ollama_chunk.get("eval_count")
+                            if pev is not None:
+                                tokens_in = int(pev)
+                            if ev is not None:
+                                tokens_out = int(ev)
+                            if tokens_in > 0 or tokens_out > 0:
+                                usage_captured = True
+                            # Emit [DONE] after final chunk
+                            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            log.error(f"Bridge stream error for {model} (client={client_id}): {e}")
+        finally:
+            elapsed_ms = int((time.time() - start) * 1000)
+            await manager.release(key, tokens_out)
+            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms, 200)
+            usage_src = "usage" if usage_captured else "estimate"
+            log.info(f"{client_id} -> {model} via {key.label}: bridge {tokens_in}+{tokens_out}tok {elapsed_ms}ms done={bridge_reason} ({usage_src})")
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------------------
