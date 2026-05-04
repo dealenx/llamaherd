@@ -625,6 +625,31 @@ MODEL_CONTEXT_LENGTHS: dict[str, int] = {
 }
 
 
+def fmt_param_count(n: Optional[int]) -> str:
+    """Format a parameter count as a B/T-suffixed string.
+
+    Uses T when n >= 1 trillion, otherwise B. Drops the decimal when the
+    value rounds cleanly to an integer (e.g. 8_000_000_000 -> '8B').
+    """
+    if n is None:
+        return ""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return ""
+    if n >= 1_000_000_000_000:
+        v = n / 1_000_000_000_000
+        suffix = "T"
+    else:
+        v = n / 1_000_000_000
+        suffix = "B"
+    if abs(v - round(v)) < 0.05:
+        return f"{int(round(v))}{suffix}"
+    return f"{v:.1f}{suffix}"
+
+
 class ModelRegistry:
     def __init__(self, manager: KeyManager, upstream: str):
         self.manager = manager
@@ -700,6 +725,8 @@ class ModelRegistry:
         for key in ("modified_at", "size", "digest", "capabilities", "family", "parameter_count", "quantization_level"):
             if meta.get(key) is not None:
                 entry[key] = meta[key]
+        if entry.get("parameter_count") is not None:
+            entry["parameter_count"] = fmt_param_count(entry["parameter_count"])
         return entry
 
     async def refresh(self):
@@ -1875,6 +1902,7 @@ async def admin_models():
     models_data = []
     for model_id, keys in registry.models.items():
         meta = registry.model_metadata.get(model_id, {})
+        param_count = meta.get("parameter_count")
         models_data.append({
             "id": model_id,
             "context_length": meta.get("context_length") or MODEL_CONTEXT_LENGTHS.get(model_id),
@@ -1884,7 +1912,8 @@ async def admin_models():
             "digest": meta.get("digest"),
             "capabilities": meta.get("capabilities") or [],
             "family": meta.get("family"),
-            "parameter_count": meta.get("parameter_count"),
+            "parameter_count": param_count,
+            "parameter_count_display": fmt_param_count(param_count),
             "quantization_level": meta.get("quantization_level"),
         })
     models_data.sort(key=lambda m: m["id"])
@@ -2525,7 +2554,7 @@ function renderModelsGrid() {
     const ctxStr = m.context_length ? `<span class="mc-ctx">${fmtCtx(m.context_length)} ctx</span>` : '';
     const keyStr = `<span class="mc-keys">${m.available_on||0} key${m.available_on!==1?'s':''}</span>`;
     const caps = (m.capabilities||[]).map(c => `<span class="badge">${c}</span>`).join(' ');
-    const params = m.parameter_count ? `${fmt(m.parameter_count)} params` : '';
+    const params = m.parameter_count_display ? `${m.parameter_count_display} params` : (m.parameter_count ? `${fmt(m.parameter_count)} params` : '');
     const updated = m.modified_at ? `updated ${m.modified_at.slice(0,10)}` : '';
     const metaBits = [ctxStr, keyStr, m.family||'', params, updated].filter(Boolean).join(' · ');
     const usageLine = u ? `<div class="mc-usage">${fmt(u.requests)} calls · ${fmt(u.tokens_total)} tokens · ${Math.round(u.avg_latency_ms||0)}ms</div>` : '<div class="mc-usage" style="color:var(--dim)">No usage (7d)</div>';

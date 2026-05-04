@@ -228,15 +228,16 @@ def _models_table(data):
     if not models:
         print("No models discovered.")
         return
-    print(f"{'Model':<35} {'Context':>10} {'Keys':>5} {'Updated':<10} {'Family':<14} {'Capabilities'}")
-    print("-" * 100)
+    print(f"{'Model':<35} {'Context':>10} {'Params':>8} {'Keys':>5} {'Updated':<10} {'Family':<14} {'Capabilities'}")
+    print("-" * 110)
     for m in models:
         cl = m.get('context_length') or '?'
         ao = m.get('available_on') or '?'
         updated = (m.get('modified_at') or '')[:10]
         family = m.get('family') or ''
         caps = ','.join(m.get('capabilities') or [])
-        print(f"{m['id']:<35} {str(cl):>10} {str(ao):>5} {updated:<10} {family:<14} {caps}")
+        params = m.get('parameter_count_display') or ''
+        print(f"{m['id']:<35} {str(cl):>10} {params:>8} {str(ao):>5} {updated:<10} {family:<14} {caps}")
     print(f"\nTotal: {data.get('count', len(models))} models")
 
 
