@@ -1318,10 +1318,41 @@ class EventBroadcaster:
 
 broadcaster = EventBroadcaster()
 
+# In-flight request tracker — keyed by request_id, populated by _request_start
+# and removed by _record_and_broadcast (which also fires request_end).
+_in_flight: dict[str, dict] = {}
+
+
+def _new_request_id() -> str:
+    """Generate a short, unique request id used to correlate start/end events."""
+    return secrets.token_hex(8)
+
+
+def _request_start(request_id: str, client_id: str, model: str,
+                    target_key: str, target_provider: str) -> None:
+    """Register an in-flight request and broadcast a request_start SSE event."""
+    entry = {
+        "request_id": request_id,
+        "client_id": client_id,
+        "model": model,
+        "target_key": target_key,
+        "target_provider": target_provider,
+        "started_at": time.time(),
+    }
+    _in_flight[request_id] = entry
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(broadcaster.broadcast("request_start", entry))
+    except RuntimeError:
+        pass
+
 
 def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
-                           tokens_in: int, tokens_out: int, latency_ms: int, status: int):
-    """Record usage to DB and broadcast the event to SSE subscribers."""
+                           tokens_in: int, tokens_out: int, latency_ms: int, status: int,
+                           *, request_id: Optional[str] = None,
+                           provider: Optional[str] = None):
+    """Record usage to DB and broadcast call + request_end events to SSE subscribers."""
     usage_db.record(client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status)
     call_data = {
         "ts": time.time(),
@@ -1333,16 +1364,27 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
         "latency_ms": latency_ms,
         "status": status,
     }
-    # Use asyncio.run_coroutine_threadsafe? No — we're in async context normally.
-    # But _record_and_broadcast is called from sync proxy code, so we schedule the broadcast.
+    end_data: Optional[dict] = None
+    if request_id:
+        entry = _in_flight.pop(request_id, None)
+        end_data = {
+            **call_data,
+            "request_id": request_id,
+            "provider": provider or (entry.get("target_provider") if entry else "ollama-cloud"),
+        }
+
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             asyncio.ensure_future(broadcaster.broadcast("call", call_data))
+            if end_data is not None:
+                asyncio.ensure_future(broadcaster.broadcast("request_end", end_data))
             if manager:
                 asyncio.ensure_future(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url}))
         else:
             loop.run_until_complete(broadcaster.broadcast("call", call_data))
+            if end_data is not None:
+                loop.run_until_complete(broadcaster.broadcast("request_end", end_data))
             if manager:
                 loop.run_until_complete(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url}))
     except RuntimeError:
@@ -1488,6 +1530,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
     if rate_limit_response is not None:
         return rate_limit_response
 
+    request_id = _new_request_id()
     body = await request.body()
     req_json = json.loads(body) if body else {}
 
@@ -1517,17 +1560,18 @@ async def _proxy_request(request: Request, path: str) -> Response:
 
     # priority=only — fallback only for mapped models; Ollama for others.
     if has_fallback and priority == "only" and fp_mapped:
-        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream)
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
     # priority=before — try fallback first when a mapping exists.
     if has_fallback and priority == "before" and fp_mapped:
-        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream)
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
     # priority=after — model unknown to Ollama but fallback can serve it.
     if has_fallback and priority == "after" and not ollama_has_model and fp_can_serve:
-        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream)
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
 
     prefer_key = registry.get_preferred_key(model) if registry else None
 
     last_error = None
+    start_emitted = False
     for attempt in range(max_retries + 1):
         key = None
         deadline = time.time() + queue_timeout
@@ -1541,12 +1585,17 @@ async def _proxy_request(request: Request, path: str) -> Response:
             # All keys at capacity — fall back if priority allows it.
             if has_fallback and fp_can_serve and priority in ("after", "before"):
                 log.warning(f"Ollama keys at capacity for {model}; falling back to {fp.label}")
-                return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream)
-            _record_and_broadcast(client_id, "none", model, 0, 0, 0, 503)
+                return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
+            _record_and_broadcast(client_id, "none", model, 0, 0, 0, 503,
+                                  request_id=request_id, provider="ollama-cloud")
             return JSONResponse(
                 status_code=503,
                 content={"error": "all keys at capacity, queue timeout exceeded"},
             )
+
+        if not start_emitted:
+            _request_start(request_id, client_id, model, key.label, "ollama-cloud")
+            start_emitted = True
 
         try:
             start = time.time()
@@ -1560,10 +1609,10 @@ async def _proxy_request(request: Request, path: str) -> Response:
             if is_stream and _should_bridge_to_native(model):
                 bridge_body = _convert_openai_to_ollama_body(req_json)
                 log.info(f"Bridge: {model} via native /api/chat (client={client_id})")
-                return await _proxy_bridge_stream(client_id, key, bridge_body, model, start)
+                return await _proxy_bridge_stream(client_id, key, bridge_body, model, start, request_id)
 
             if is_stream:
-                return await _proxy_stream(client_id, key, path, headers, body, model, start)
+                return await _proxy_stream(client_id, key, path, headers, body, model, start, request_id)
 
             async with httpx.AsyncClient(timeout=request_timeout) as client_http:
                 resp = await client_http.post(
@@ -1593,7 +1642,8 @@ async def _proxy_request(request: Request, path: str) -> Response:
             tokens_in = usage.get("prompt_tokens", 0)
             tokens_out = usage.get("completion_tokens", 0)
             await manager.release(key, tokens_out)
-            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms, resp.status_code)
+            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+                                  resp.status_code, request_id=request_id, provider="ollama-cloud")
 
             log.info(f"{client_id} -> {model} via {key.label}: {tokens_in}+{tokens_out}tok {elapsed_ms}ms")
 
@@ -1617,9 +1667,12 @@ async def _proxy_request(request: Request, path: str) -> Response:
     # Ollama exhausted retries — try fallback as a last resort.
     if has_fallback and fp_can_serve and priority in ("after", "before"):
         log.warning(f"Ollama exhausted retries for {model}; falling back to {fp.label}")
-        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream)
+        # Pop the Ollama in-flight entry so the fallback emits a fresh start.
+        _in_flight.pop(request_id, None)
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
 
-    _record_and_broadcast(client_id, "none", model, 0, 0, 0, 502)
+    _record_and_broadcast(client_id, "none", model, 0, 0, 0, 502,
+                          request_id=request_id, provider="ollama-cloud")
     return JSONResponse(
         status_code=502,
         content={"error": f"all retries exhausted: {last_error}"},
@@ -1627,24 +1680,26 @@ async def _proxy_request(request: Request, path: str) -> Response:
 
 
 async def _proxy_stream(client_id: str, key: KeyState, path: str,
-                         headers: dict, body: bytes, model: str, start: float) -> StreamingResponse:
+                         headers: dict, body: bytes, model: str, start: float,
+                         request_id: Optional[str] = None) -> StreamingResponse:
 
     async def generate():
         tokens_out = 0
         tokens_in = 0
         usage_captured = False
+        final_status = 200
         try:
             async with httpx.AsyncClient(timeout=request_timeout) as client_http:
                 async with client_http.stream("POST", f"{upstream_url}{path}",
                                               content=body, headers=headers) as resp:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
-                        _record_and_broadcast(client_id, key.token[:8], model, 0, 0, 0, 429)
+                        final_status = 429
                         yield f'data: {{"error": "429 from upstream"}}\n\n'
                         return
                     if resp.status_code == 402:
                         await manager.mark_402(key)
-                        _record_and_broadcast(client_id, key.token[:8], model, 0, 0, 0, 402)
+                        final_status = 402
                         yield f'data: {{"error": "402 from upstream"}}\n\n'
                         return
 
@@ -1669,7 +1724,8 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
         finally:
             elapsed_ms = int((time.time() - start) * 1000)
             await manager.release(key, tokens_out)
-            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms, 200)
+            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+                                  final_status, request_id=request_id, provider="ollama-cloud")
             usage_src = "usage" if usage_captured else "estimate"
             log.info(f"{client_id} -> {model} via {key.label}: stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src})")
 
@@ -1682,7 +1738,7 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
 
 async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
                               body: bytes, req_json: dict, original_model: str,
-                              is_stream: bool) -> Response:
+                              is_stream: bool, request_id: Optional[str] = None) -> Response:
     """Forward an OpenAI-style request to the fallback provider.
 
     Rewrites the model name in the request body using fp.resolve_model().
@@ -1702,9 +1758,14 @@ async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
     upstream_label = f"fb:{fp.label}"
     start = time.time()
 
+    if request_id is None:
+        request_id = _new_request_id()
+    _request_start(request_id, client_id, original_model, upstream_label, fp.provider)
+
     if is_stream:
         return await _proxy_fallback_stream(
             client_id, fp, url, headers, new_body, original_model, mapped, start, upstream_label,
+            request_id,
         )
 
     async with httpx.AsyncClient(timeout=request_timeout) as ch:
@@ -1720,7 +1781,8 @@ async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
         except Exception:
             pass
     _record_and_broadcast(client_id, upstream_label, original_model,
-                          tokens_in, tokens_out, elapsed_ms, resp.status_code)
+                          tokens_in, tokens_out, elapsed_ms, resp.status_code,
+                          request_id=request_id, provider=fp.provider)
     log.info(f"{client_id} -> {original_model} via {upstream_label}({mapped}): "
              f"{tokens_in}+{tokens_out}tok {elapsed_ms}ms")
     if resp.status_code >= 400:
@@ -1732,7 +1794,8 @@ async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
 
 async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
                                   headers: dict, body: bytes, original_model: str,
-                                  mapped: str, start: float, upstream_label: str) -> StreamingResponse:
+                                  mapped: str, start: float, upstream_label: str,
+                                  request_id: Optional[str] = None) -> StreamingResponse:
     async def generate():
         tokens_in = 0
         tokens_out = 0
@@ -1766,7 +1829,8 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
         finally:
             elapsed_ms = int((time.time() - start) * 1000)
             _record_and_broadcast(client_id, upstream_label, original_model,
-                                  tokens_in, tokens_out, elapsed_ms, status_code)
+                                  tokens_in, tokens_out, elapsed_ms, status_code,
+                                  request_id=request_id, provider=fp.provider)
             src = "usage" if usage_captured else "estimate"
             log.info(f"{client_id} -> {original_model} via {upstream_label}({mapped}): "
                      f"stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({src})")
@@ -1791,13 +1855,14 @@ def _native_api_upstream() -> str:
 
 async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
                                 headers: dict, body: bytes, model: str,
-                                start: float) -> StreamingResponse:
+                                start: float, request_id: Optional[str] = None) -> StreamingResponse:
     """Stream NDJSON from the native Ollama API, capturing usage from the final chunk."""
 
     async def generate():
         tokens_out = 0
         tokens_in = 0
         usage_captured = False
+        final_status = 200
         api_upstream = _native_api_upstream()
         try:
             async with httpx.AsyncClient(timeout=request_timeout) as client_http:
@@ -1805,17 +1870,17 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
                                               content=body, headers=headers) as resp:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
-                        _record_and_broadcast(client_id, key.token[:8], model, 0, 0, 0, 429)
-                        # Yield an NDJSON error line
+                        final_status = 429
                         yield json.dumps({"error": "429 from upstream"}) + "\n"
                         return
                     if resp.status_code == 402:
                         await manager.mark_402(key)
-                        _record_and_broadcast(client_id, key.token[:8], model, 0, 0, 0, 402)
+                        final_status = 402
                         yield json.dumps({"error": "402 from upstream"}) + "\n"
                         return
                     if resp.status_code >= 400:
                         # For non-2xx, read the body and yield as a single NDJSON line
+                        final_status = resp.status_code
                         error_body = await resp.aread()
                         yield error_body.decode(errors="replace").strip() + "\n"
                         return
@@ -1845,7 +1910,8 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
         finally:
             elapsed_ms = int((time.time() - start) * 1000)
             await manager.release(key, tokens_out)
-            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms, 200)
+            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+                                  final_status, request_id=request_id, provider="ollama-cloud")
             usage_src = "usage" if usage_captured else "estimate"
             log.info(f"{client_id} -> {model} via {key.label}: ndjson {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src})")
 
@@ -1860,6 +1926,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
     client = _resolve_client(request)
     client_id = client["id"]
 
+    request_id = _new_request_id()
     body = await request.body()
     req_json = json.loads(body) if body else {}
     model = req_json.get("model", "unknown")
@@ -1868,6 +1935,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
     prefer_key = registry.get_preferred_key(model) if registry else None
 
     last_error = None
+    start_emitted = False
     for attempt in range(max_retries + 1):
         key = None
         deadline = time.time() + queue_timeout
@@ -1878,11 +1946,16 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             await asyncio.sleep(0.5)
 
         if not key:
-            _record_and_broadcast(client_id, "none", model, 0, 0, 0, 503)
+            _record_and_broadcast(client_id, "none", model, 0, 0, 0, 503,
+                                  request_id=request_id, provider="ollama-cloud")
             return JSONResponse(
                 status_code=503,
                 content={"error": "all keys at capacity, queue timeout exceeded"},
             )
+
+        if not start_emitted:
+            _request_start(request_id, client_id, model, key.label, "ollama-cloud")
+            start_emitted = True
 
         try:
             start = time.time()
@@ -1893,7 +1966,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             api_upstream = _native_api_upstream()
 
             if is_stream:
-                return await _proxy_ndjson_stream(client_id, key, path, headers, body, model, start)
+                return await _proxy_ndjson_stream(client_id, key, path, headers, body, model, start, request_id)
 
             # Non-streaming: regular JSON response
             async with httpx.AsyncClient(timeout=request_timeout) as client_http:
@@ -1924,7 +1997,8 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             tokens_in = resp_data.get("prompt_eval_count", 0) or 0
             tokens_out = resp_data.get("eval_count", 0) or 0
             await manager.release(key, tokens_out)
-            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms, resp.status_code)
+            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+                                  resp.status_code, request_id=request_id, provider="ollama-cloud")
 
             log.info(f"{client_id} -> {model} via {key.label}: {tokens_in}+{tokens_out}tok {elapsed_ms}ms (native)")
 
@@ -1945,7 +2019,8 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             log.error(f"Native proxy error for {model} (client={client_id}): {e}")
             continue
 
-    _record_and_broadcast(client_id, "none", model, 0, 0, 0, 502)
+    _record_and_broadcast(client_id, "none", model, 0, 0, 0, 502,
+                          request_id=request_id, provider="ollama-cloud")
     return JSONResponse(
         status_code=502,
         content={"error": f"all retries exhausted: {last_error}"},
@@ -2306,7 +2381,8 @@ def _ollama_chunk_to_sse(ollama_chunk: dict, chunk_id: str, model: str) -> str |
 
 
 async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
-                                model: str, start: float) -> StreamingResponse:
+                                model: str, start: float,
+                                request_id: Optional[str] = None) -> StreamingResponse:
     """Bridge stream: receive NDJSON from /api/chat, emit SSE for /v1/chat/completions client.
 
     This is the core of the native bridge. It re-routes the upstream request
@@ -2323,6 +2399,7 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
         tokens_in = 0
         usage_captured = False
         bridge_reason = "stop"  # default
+        final_status = 200
         try:
             async with httpx.AsyncClient(timeout=request_timeout) as client_http:
                 async with client_http.stream("POST", f"{api_upstream}/chat",
@@ -2332,17 +2409,18 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
                                               }) as resp:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
-                        _record_and_broadcast(client_id, key.token[:8], model, 0, 0, 0, 429)
+                        final_status = 429
                         yield 'data: {"error": "429 from upstream"}\n\n'
                         return
                     if resp.status_code == 402:
                         await manager.mark_402(key)
-                        _record_and_broadcast(client_id, key.token[:8], model, 0, 0, 0, 402)
+                        final_status = 402
                         yield 'data: {"error": "402 from upstream"}\n\n'
                         return
                     if resp.status_code >= 400:
                         error_body = await resp.aread()
                         err = error_body.decode(errors="replace").strip()
+                        final_status = resp.status_code
                         # Try to format as OpenAI error
                         yield f'data: {json.dumps({"error": {"message": err, "type": "upstream_error", "code": resp.status_code}})}\n\n'
                         return
@@ -2380,7 +2458,8 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
         finally:
             elapsed_ms = int((time.time() - start) * 1000)
             await manager.release(key, tokens_out)
-            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms, 200)
+            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+                                  final_status, request_id=request_id, provider="ollama-cloud")
             usage_src = "usage" if usage_captured else "estimate"
             log.info(f"{client_id} -> {model} via {key.label}: bridge {tokens_in}+{tokens_out}tok {elapsed_ms}ms done={bridge_reason} ({usage_src})")
 
@@ -2513,6 +2592,20 @@ async def admin_models():
             "discovered_count": len(fp.discovered_models) if fp_enabled else 0,
         },
     }
+
+
+@app.get("/admin/in-flight", dependencies=[Depends(_verify_admin)])
+async def admin_in_flight():
+    """Return currently in-flight requests with elapsed time."""
+    now = time.time()
+    rows = []
+    for entry in _in_flight.values():
+        rows.append({
+            **entry,
+            "elapsed_ms": int((now - entry["started_at"]) * 1000),
+        })
+    rows.sort(key=lambda r: r["started_at"])
+    return {"in_flight": rows, "count": len(rows)}
 
 
 @app.get("/admin/fallback", dependencies=[Depends(_verify_admin)])
@@ -2933,6 +3026,29 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .key-mgmt-card .km-row span:last-child { color: var(--text); }
 .cookie-bad { color: var(--red); }
 .cookie-ok { color: var(--green); }
+/* In-flight panel */
+@keyframes inflight-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(88,166,255,0.45); border-color: var(--accent); }
+  70% { box-shadow: 0 0 0 6px rgba(88,166,255,0); border-color: var(--accent); }
+  100% { box-shadow: 0 0 0 0 rgba(88,166,255,0); border-color: var(--accent); }
+}
+@keyframes flash-green { 0% { background: rgba(63,185,80,0.35); } 100% { background: transparent; } }
+@keyframes flash-red   { 0% { background: rgba(248,81,73,0.35); } 100% { background: transparent; } }
+.inflight-row { display: grid; grid-template-columns: minmax(160px,1fr) minmax(220px,2fr) 110px 90px 90px;
+  gap: 10px; align-items: center; padding: 8px 12px; border: 1px solid var(--border);
+  border-radius: 6px; margin-bottom: 6px; background: var(--surface);
+  animation: inflight-pulse 1.6s ease-out infinite; font-size: 13px; }
+.inflight-row.ending-ok  { animation: flash-green 0.4s ease-out forwards; }
+.inflight-row.ending-err { animation: flash-red 0.4s ease-out forwards; }
+.inflight-row .if-client { color: var(--text); }
+.inflight-row .if-model  { color: var(--accent); font-family: monospace; }
+.inflight-row .if-target { color: var(--dim); font-size: 12px; }
+.inflight-row .if-elapsed { font-variant-numeric: tabular-nums; color: var(--yellow); text-align: right; }
+.inflight-row .if-provider { font-size: 11px; }
+.provider-badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; }
+.provider-ollama-cloud { background: #1a3a3a; color: #7fdcdc; }
+.provider-fallback { background: #3a2a1a; color: #f0a878; }
+#inflight-empty { color: var(--dim); font-size: 12px; padding: 8px 12px; }
 </style>
 </head>
 <body>
@@ -3005,6 +3121,11 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     <div style="overflow-x:auto"><table id="daily-table"><thead><tr>
       <th>Day</th><th>Calls</th><th>Tokens In</th><th>Tokens Out</th><th>Total Tokens</th>
     </tr></thead><tbody></tbody></table></div>
+  </div>
+
+  <div class="section">
+    <h2>In-Flight Requests <span class="badge live" id="inflight-count">0</span></h2>
+    <div id="inflight-list"><div id="inflight-empty">No requests in flight</div></div>
   </div>
 
   <div class="section">
@@ -3122,12 +3243,69 @@ function connectSSE() {
     try {
       const m=JSON.parse(e.data);
       if(m.type==='call') { addCallToFeed(m.data); if(callInCurrentRange(m.data)) schedulePeriodRefresh(); }
+      else if(m.type==='request_start') { addInFlight(m.data); }
+      else if(m.type==='request_end') { removeInFlight(m.data); }
       else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; }
       else if(m.type==='models') updateModelInfo(m.data||{});
       else if(m.type==='fallback_priority') { const sel=document.getElementById('fb-priority'); if(m.data && m.data.priority) sel.value = m.data.priority; }
     } catch(err){}
   };
 }
+
+// --- In-Flight Panel ---
+const inFlight = {};  // request_id -> { client_id, model, target_key, target_provider, started_at }
+function fmtElapsed(ms) {
+  if (ms < 1000) return ms + 'ms';
+  if (ms < 60000) return (ms/1000).toFixed(1) + 's';
+  const m = Math.floor(ms/60000), s = Math.floor((ms%60000)/1000);
+  return m + 'm' + s + 's';
+}
+function providerBadge(p) {
+  const cls = p === 'ollama-cloud' ? 'provider-ollama-cloud' : 'provider-fallback';
+  return `<span class="provider-badge ${cls}">${p || '?'}</span>`;
+}
+function renderInFlight() {
+  const list = document.getElementById('inflight-list');
+  const ids = Object.keys(inFlight);
+  document.getElementById('inflight-count').textContent = ids.length;
+  if (!ids.length) { list.innerHTML = '<div id="inflight-empty">No requests in flight</div>'; return; }
+  const now = Date.now() / 1000;
+  list.innerHTML = ids.map(id => {
+    const r = inFlight[id];
+    const elapsed = Math.max(0, Math.round((now - r.started_at) * 1000));
+    const cls = r._ending ? 'inflight-row ending-' + (r._ending === 'ok' ? 'ok' : 'err') : 'inflight-row';
+    return `<div class="${cls}" id="if-${id}" data-rid="${id}">
+      <div class="if-client">${r.client_id}</div>
+      <div><span class="if-model">${r.model}</span></div>
+      <div class="if-target">${r.target_key || '-'}</div>
+      <div class="if-provider">${providerBadge(r.target_provider)}</div>
+      <div class="if-elapsed" data-started="${r.started_at}">${fmtElapsed(elapsed)}</div>
+    </div>`;
+  }).join('');
+}
+function addInFlight(d) {
+  if (!d || !d.request_id) return;
+  inFlight[d.request_id] = d;
+  renderInFlight();
+}
+function removeInFlight(d) {
+  if (!d || !d.request_id) return;
+  const cur = inFlight[d.request_id];
+  if (!cur) return;
+  cur._ending = (d.status >= 200 && d.status < 300) ? 'ok' : 'err';
+  renderInFlight();
+  setTimeout(() => { delete inFlight[d.request_id]; renderInFlight(); }, 350);
+}
+// Tick elapsed counters every 250ms without re-rendering rows.
+setInterval(() => {
+  const now = Date.now() / 1000;
+  document.querySelectorAll('.if-elapsed').forEach(el => {
+    const started = parseFloat(el.dataset.started);
+    if (!started) return;
+    const ms = Math.max(0, Math.round((now - started) * 1000));
+    el.textContent = fmtElapsed(ms);
+  });
+}, 250);
 
 function callInCurrentRange(c) {
   const r=getDateRange(); if(!r.start||!r.end||!c.ts) return false;
@@ -3460,9 +3638,18 @@ document.getElementById('filter-client').addEventListener('change',()=>fetchPeri
 document.getElementById('filter-model').addEventListener('change',()=>fetchPeriodData());
 document.getElementById('feed-limit').addEventListener('change',()=>fetchPeriodData());
 
+async function loadInFlightInitial() {
+  try {
+    const r = await loadJSON('/admin/in-flight');
+    (r.in_flight || []).forEach(e => { inFlight[e.request_id] = e; });
+    renderInFlight();
+  } catch (e) { /* ignore */ }
+}
+
 // --- Init ---
 fetchPeriodData();
 loadFallbackStatus();
+loadInFlightInitial();
 connectSSE();
 </script>
 </body>
