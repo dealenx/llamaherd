@@ -2515,6 +2515,47 @@ async def admin_models():
     }
 
 
+@app.get("/admin/fallback", dependencies=[Depends(_verify_admin)])
+async def admin_fallback_status():
+    """Inspect the fallback provider's runtime state."""
+    fp = fallback_provider
+    if not fp or not fp.enabled:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "provider": fp.provider,
+        "base_url": fp.base_url,
+        "default_model": fp.default_model,
+        "priority": fp.priority,
+        "valid_priorities": list(VALID_FALLBACK_PRIORITIES),
+        "model_map": fp.model_aliases(),
+        "discovered_count": len(fp.discovered_models),
+    }
+
+
+@app.post("/admin/fallback-priority", dependencies=[Depends(_verify_admin)])
+async def admin_set_fallback_priority(request: Request):
+    """Change the fallback provider's global priority at runtime (in-memory only).
+
+    Body: {"priority": "after" | "before" | "only"}
+    """
+    fp = fallback_provider
+    if not fp or not fp.enabled:
+        raise HTTPException(status_code=400, detail="fallback provider not configured")
+    body = await request.json()
+    requested = (body or {}).get("priority")
+    if requested not in VALID_FALLBACK_PRIORITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"priority must be one of {list(VALID_FALLBACK_PRIORITIES)}",
+        )
+    previous = fp.priority
+    fp.set_priority(requested)
+    log.info(f"Fallback priority changed at runtime: {previous} -> {fp.priority}")
+    await broadcaster.broadcast("fallback_priority", {"priority": fp.priority, "previous": previous})
+    return {"priority": fp.priority, "previous": previous}
+
+
 @app.post("/admin/refresh", dependencies=[Depends(_verify_admin)])
 async def admin_refresh():
     if registry:
@@ -2924,6 +2965,15 @@ tr:hover td { background: rgba(88,166,255,0.04); }
   <span>Refreshed: <span class="mi-val" id="mi-refresh">-</span></span>
   <span id="mi-new" class="new-models" style="display:none"></span>
   <button id="btn-refresh-models">🔄 Refresh</button>
+  <span id="fallback-control" style="display:none; margin-left:auto; display:flex; align-items:center; gap:6px;">
+    <span class="badge" id="fb-provider-badge">fallback</span>
+    <label style="font-size:11px; color:var(--dim)">Priority:</label>
+    <select id="fb-priority" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:12px">
+      <option value="after">after (Ollama first)</option>
+      <option value="before">before (Fallback first)</option>
+      <option value="only">only (Fallback only)</option>
+    </select>
+  </span>
 </div>
 
 <div class="tab-bar">
@@ -3074,6 +3124,7 @@ function connectSSE() {
       if(m.type==='call') { addCallToFeed(m.data); if(callInCurrentRange(m.data)) schedulePeriodRefresh(); }
       else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; }
       else if(m.type==='models') updateModelInfo(m.data||{});
+      else if(m.type==='fallback_priority') { const sel=document.getElementById('fb-priority'); if(m.data && m.data.priority) sel.value = m.data.priority; }
     } catch(err){}
   };
 }
@@ -3094,6 +3145,26 @@ let modelState = {count:0,last_refresh:0,new_models:[]};
 function updateModelInfo(d) { modelState=d; document.getElementById('mi-count').textContent=d.count; document.getElementById('mi-refresh').textContent=relTime(d.last_refresh); const n=document.getElementById('mi-new'); if(d.new_models&&d.new_models.length){n.textContent='✨ New: '+d.new_models.join(', ');n.style.display='';}else{n.style.display='none';} }
 document.getElementById('btn-refresh-models').addEventListener('click', async function(){ this.disabled=true;this.textContent='Refreshing...'; try{await postJSON('/admin/refresh');}catch(e){} this.disabled=false;this.textContent='🔄 Refresh'; });
 setInterval(()=>{ if(modelState.last_refresh) document.getElementById('mi-refresh').textContent=relTime(modelState.last_refresh); },30000);
+
+// --- Fallback Priority Control ---
+async function loadFallbackStatus() {
+  try {
+    const fb = await loadJSON('/admin/fallback');
+    const ctl = document.getElementById('fallback-control');
+    if (!fb || !fb.enabled) { ctl.style.display = 'none'; return; }
+    ctl.style.display = 'flex';
+    document.getElementById('fb-provider-badge').textContent = fb.provider;
+    const sel = document.getElementById('fb-priority');
+    sel.value = fb.priority;
+  } catch (e) { /* fallback not configured */ }
+}
+document.getElementById('fb-priority').addEventListener('change', async function(){
+  const requested = this.value;
+  try {
+    const r = await postJSON('/admin/fallback-priority', { priority: requested });
+    if (r && r.priority) this.value = r.priority;
+  } catch (e) { alert('Failed to set priority: ' + e.message); }
+});
 
 // --- Key Status ---
 function renderKeyStatus(keys) {
@@ -3391,6 +3462,7 @@ document.getElementById('feed-limit').addEventListener('change',()=>fetchPeriodD
 
 // --- Init ---
 fetchPeriodData();
+loadFallbackStatus();
 connectSSE();
 </script>
 </body>

@@ -97,3 +97,41 @@ def test_model_aliases_includes_priority():
 
 def test_valid_priorities_const():
     assert set(VALID_FALLBACK_PRIORITIES) == {"after", "before", "only"}
+
+
+def test_fallback_priority_endpoint(monkeypatch):
+    """End-to-end: /admin/fallback-priority swaps the runtime priority in-memory."""
+    from fastapi.testclient import TestClient
+
+    from llamaherd import proxy
+
+    fp = _provider()
+    monkeypatch.setattr(proxy, "fallback_provider", fp)
+    monkeypatch.setattr(proxy, "admin_token", "test-token")
+
+    # Bypass the lifespan (which loads config.yaml + starts background tasks).
+    client = TestClient(proxy.app)
+
+    r = client.get("/admin/fallback?token=test-token")
+    assert r.status_code == 200
+    assert r.json()["priority"] == "after"
+
+    r = client.post(
+        "/admin/fallback-priority?token=test-token",
+        json={"priority": "before"},
+    )
+    assert r.status_code == 200
+    assert r.json()["priority"] == "before"
+    assert fp.priority == "before"
+
+    # Invalid value rejected.
+    r = client.post(
+        "/admin/fallback-priority?token=test-token",
+        json={"priority": "garbage"},
+    )
+    assert r.status_code == 400
+    assert fp.priority == "before"  # unchanged
+
+    # Unauthorized — no token.
+    r = client.post("/admin/fallback-priority", json={"priority": "after"})
+    assert r.status_code == 401
