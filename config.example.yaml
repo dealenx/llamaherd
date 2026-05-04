@@ -38,6 +38,10 @@ clients:
   - id: my-gateway
     label: "My Gateway Service"
     token: ocp-gateway-token-here
+    # Optional rate limits (null or omit = unlimited)
+    # daily_token_limit: 100000     # Max tokens (in+out) per day
+    # daily_request_limit: 500      # Max requests per day
+    # rpm_limit: 30                 # Max requests per minute
 
   - id: my-cli
     label: "My CLI Tool"

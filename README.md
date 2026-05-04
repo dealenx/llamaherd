@@ -93,6 +93,121 @@ docker run -p 8399:8399 \
   llamaherd
 ```
 
+## 🤖 CLI (Agent-Friendly)
+
+LlamaHerd has a full CLI designed for agents and scripts. All commands output **JSON by default** (pipe to `jq` for filtering). Use `--format table` for human-readable output.
+
+```bash
+# List clients with rate limits
+llamaherd clients list -f table
+
+# Create a client with rate limits
+llamaherd clients create my-app --label "My App" --daily-token-limit 100000 --rpm-limit 30
+
+# Update limits (null = unlimited)
+llamaherd clients update my-app --daily-request-limit 500
+
+# Clear all limits (set to unlimited)
+llamaherd clients update my-app --clear-limits
+
+# Regenerate a compromised token
+llamaherd clients regenerate-token my-app
+
+# Delete a client
+llamaherd clients delete my-app
+
+# Show proxy status
+llamaherd status -f table
+
+# List upstream keys
+llamaherd keys -f table
+
+# List discovered models
+llamaherd models -f table
+
+# Usage stats
+llamaherd usage --days 7
+
+# Connection options (defaults to 127.0.0.1:8399)
+llamaherd --host 10.0.0.1 --port 8399 -t YOUR_ADMIN_TOKEN clients list
+```
+
+### Rate Limiting
+
+Each client key can have optional rate limits:
+
+| Limit | Field | Unit | Example |
+|-------|-------|------|---------|
+| Daily tokens | `daily_token_limit` | tokens (in+out) per day | `100000` |
+| Daily requests | `daily_request_limit` | requests per day | `500` |
+| RPM | `rpm_limit` | requests per minute | `30` |
+
+When a limit is exceeded, the proxy returns `429` with a JSON body:
+```json
+{
+  "error": "rate_limit_exceeded",
+  "detail": "Daily token limit of 100000 exceeded for client 'my-app'",
+  "limit_type": "daily_tokens",
+  "limit": 100000,
+  "used": 104312,
+  "reset_at": 1719792000
+}
+```
+
+Set limits via API or CLI. `null` means unlimited (default).
+
+## 🔌 Connecting Agents
+
+### Hermes Agent
+
+Add LlamaHerd as a custom provider in `~/.hermes/config.yaml`:
+
+```yaml
+model:
+  default: deepseek-v3.2:cloud
+  provider: custom
+  base_url: http://127.0.0.1:8399/v1
+  api_key: ocp-hermes-gateway-XXXXXXXX
+```
+
+Or via CLI:
+```bash
+hermes config set model.provider custom
+hermes config set model.base_url http://127.0.0.1:8399/v1
+hermes config set model.api_key ocp-hermes-gateway-XXXXXXXX
+```
+
+Create the client key first:
+```bash
+llamaherd clients create hermes-gateway --label "Hermes Gateway" --rpm-limit 60
+```
+
+### OpenClaw
+
+Point OpenClaw at LlamaHerd the same way — it's OpenAI-compatible:
+
+```yaml
+# In your OpenClaw config
+base_url: http://127.0.0.1:8399/v1
+api_key: ocp-openclaw-gateway-XXXXXXXX
+```
+
+### Any OpenAI Client
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:8399/v1",
+    api_key="ocp-my-app-XXXXXXXX",
+)
+
+response = client.chat.completions.create(
+    model="deepseek-v3.2",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+```
+
 ## 📡 API Endpoints
 
 | Endpoint | Method | Purpose |

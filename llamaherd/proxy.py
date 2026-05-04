@@ -75,10 +75,19 @@ class ClientRegistry:
                 label TEXT NOT NULL,
                 token TEXT UNIQUE NOT NULL,
                 created REAL NOT NULL,
-                notes TEXT DEFAULT ''
+                notes TEXT DEFAULT '',
+                daily_token_limit INTEGER DEFAULT NULL,
+                daily_request_limit INTEGER DEFAULT NULL,
+                rpm_limit INTEGER DEFAULT NULL
             )
         """)
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_clients_token ON clients(token)")
+        # Safe migration: add rate limit columns if they don't exist (existing DBs)
+        for col, typ in [("daily_token_limit", "INTEGER"), ("daily_request_limit", "INTEGER"), ("rpm_limit", "INTEGER")]:
+            try:
+                self._conn.execute(f"ALTER TABLE clients ADD COLUMN {col} {typ} DEFAULT NULL")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         self._conn.commit()
 
         # In-memory cache — initialize BEFORE any _insert/_reload calls
@@ -89,7 +98,10 @@ class ClientRegistry:
         if seed_clients and self._count() == 0:
             for c in seed_clients:
                 self._insert(c["id"], c.get("label", c["id"]), c["token"],
-                             notes=c.get("notes", "seeded from config"))
+                             notes=c.get("notes", "seeded from config"),
+                             daily_token_limit=c.get("daily_token_limit"),
+                             daily_request_limit=c.get("daily_request_limit"),
+                             rpm_limit=c.get("rpm_limit"))
             log.info(f"Seeded {len(seed_clients)} clients from config")
         else:
             self._reload()
@@ -101,21 +113,26 @@ class ClientRegistry:
         """Refresh in-memory cache from DB."""
         self._by_token.clear()
         self._by_id.clear()
-        rows = self._conn.execute("SELECT id, label, token, created, notes FROM clients").fetchall()
+        rows = self._conn.execute("SELECT id, label, token, created, notes, daily_token_limit, daily_request_limit, rpm_limit FROM clients").fetchall()
         for r in rows:
-            entry = {"id": r[0], "label": r[1], "token": r[2], "created": r[3], "notes": r[4]}
+            entry = {"id": r[0], "label": r[1], "token": r[2], "created": r[3], "notes": r[4],
+                     "daily_token_limit": r[5], "daily_request_limit": r[6], "rpm_limit": r[7]}
             self._by_token[r[2]] = entry
             self._by_id[r[0]] = entry
 
-    def _insert(self, client_id: str, label: str, token: str, notes: str = "") -> dict:
+    def _insert(self, client_id: str, label: str, token: str, notes: str = "",
+                daily_token_limit: int = None, daily_request_limit: int = None,
+                rpm_limit: int = None) -> dict:
         now = time.time()
         self._conn.execute(
-            "INSERT OR REPLACE INTO clients (id, label, token, created, notes) VALUES (?, ?, ?, ?, ?)",
-            (client_id, label, token, now, notes),
+            "INSERT OR REPLACE INTO clients (id, label, token, created, notes, daily_token_limit, daily_request_limit, rpm_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (client_id, label, token, now, notes, daily_token_limit, daily_request_limit, rpm_limit),
         )
         self._conn.commit()
         self._reload()
-        return {"id": client_id, "label": label, "token": token, "created": now, "notes": notes}
+        return {"id": client_id, "label": label, "token": token, "created": now, "notes": notes,
+                "daily_token_limit": daily_token_limit, "daily_request_limit": daily_request_limit,
+                "rpm_limit": rpm_limit}
 
     def resolve(self, token: str) -> dict:
         """Resolve a Bearer token to a client identity. Unknown tokens still work."""
@@ -127,7 +144,9 @@ class ClientRegistry:
         return {"id": "unknown", "label": f"Unknown ({token[:8]}...)", "token": token}
 
     def create(self, client_id: str, label: str, notes: str = "",
-               token: Optional[str] = None) -> dict:
+               token: Optional[str] = None,
+               daily_token_limit: int = None, daily_request_limit: int = None,
+               rpm_limit: int = None) -> dict:
         """Create a new client. Auto-generates a token if not provided."""
         if client_id in self._by_id:
             raise ValueError(f"client id '{client_id}' already exists")
@@ -135,22 +154,32 @@ class ClientRegistry:
             token = f"ocp-{client_id}-{secrets.token_hex(8)}"
         if token in self._by_token:
             raise ValueError(f"token already in use by client '{self._by_token[token]['id']}'")
-        return self._insert(client_id, label, token, notes=notes)
+        return self._insert(client_id, label, token, notes=notes,
+                            daily_token_limit=daily_token_limit,
+                            daily_request_limit=daily_request_limit,
+                            rpm_limit=rpm_limit)
 
     def update(self, client_id: str, label: Optional[str] = None,
-               notes: Optional[str] = None, token: Optional[str] = None) -> Optional[dict]:
-        """Update an existing client's label, notes, or token."""
+               notes: Optional[str] = None, token: Optional[str] = None,
+               daily_token_limit: Optional[int] = ...,
+               daily_request_limit: Optional[int] = ...,
+               rpm_limit: Optional[int] = ...) -> Optional[dict]:
+        """Update an existing client's label, notes, token, or rate limits.
+        Use ... (Ellipsis) as sentinel to distinguish None (clear limit) from 'not provided'."""
         if client_id not in self._by_id:
             return None
         existing = self._by_id[client_id]
         new_label = label if label is not None else existing["label"]
         new_notes = notes if notes is not None else existing["notes"]
         new_token = token if token is not None else existing["token"]
+        new_dtl = daily_token_limit if daily_token_limit is not ... else existing.get("daily_token_limit")
+        new_drl = daily_request_limit if daily_request_limit is not ... else existing.get("daily_request_limit")
+        new_rpm = rpm_limit if rpm_limit is not ... else existing.get("rpm_limit")
         if new_token != existing["token"] and new_token in self._by_token:
             raise ValueError(f"token already in use by client '{self._by_token[new_token]['id']}'")
         self._conn.execute(
-            "UPDATE clients SET label=?, notes=?, token=? WHERE id=?",
-            (new_label, new_notes, new_token, client_id),
+            "UPDATE clients SET label=?, notes=?, token=?, daily_token_limit=?, daily_request_limit=?, rpm_limit=? WHERE id=?",
+            (new_label, new_notes, new_token, new_dtl, new_drl, new_rpm, client_id),
         )
         self._conn.commit()
         self._reload()
@@ -894,6 +923,92 @@ class UsageDB:
         }
 
 # ---------------------------------------------------------------------------
+# Rate Limiting — per-client daily tokens, daily requests, RPM
+# ---------------------------------------------------------------------------
+
+from collections import deque
+_rpm_tracker: dict[str, deque] = {}  # client_id -> deque of request timestamps
+_rpm_lock = asyncio.Lock()
+
+
+def _check_rpm(client_id: str, rpm_limit: int) -> bool:
+    """Check if client is within RPM limit. Returns True if allowed, False if rate limited."""
+    now = time.time()
+    if client_id not in _rpm_tracker:
+        _rpm_tracker[client_id] = deque()
+    window = _rpm_tracker[client_id]
+    # Prune entries older than 60s
+    while window and window[0] < now - 60:
+        window.popleft()
+    if len(window) >= rpm_limit:
+        return False
+    window.append(now)
+    return True
+
+
+async def _check_rate_limit(request: Request, client: dict) -> Optional[JSONResponse]:
+    """Check all rate limits for a client. Returns 429 JSONResponse if limited, None if OK."""
+    client_id = client["id"]
+
+    # RPM check (fast, in-memory)
+    rpm_limit = client.get("rpm_limit")
+    if rpm_limit is not None:
+        async with _rpm_lock:
+            if not _check_rpm(client_id, rpm_limit):
+                window = _rpm_tracker.get(client_id, deque())
+                reset_at = int(window[0] + 60) if window else int(time.time() + 60)
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": "rate_limit_exceeded",
+                        "detail": f"RPM limit of {rpm_limit} exceeded for client '{client_id}'",
+                        "limit_type": "rpm",
+                        "limit": rpm_limit,
+                        "reset_at": reset_at,
+                    },
+                )
+
+    # Daily limits check (queries DB)
+    daily_token_limit = client.get("daily_token_limit")
+    daily_request_limit = client.get("daily_request_limit")
+    if daily_token_limit is not None or daily_request_limit is not None:
+        today = datetime.now(timezone.utc).date().isoformat()
+        row = usage_db._conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(tokens_in + tokens_out), 0) FROM usage WHERE client_id = ? AND day = ?",
+            (client_id, today),
+        ).fetchone()
+        today_requests = row[0]
+        today_tokens = row[1]
+
+        if daily_request_limit is not None and today_requests >= daily_request_limit:
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": "rate_limit_exceeded",
+                    "detail": f"Daily request limit of {daily_request_limit} exceeded for client '{client_id}'",
+                    "limit_type": "daily_requests",
+                    "limit": daily_request_limit,
+                    "used": today_requests,
+                    "reset_at": int((datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp()),
+                },
+            )
+
+        if daily_token_limit is not None and today_tokens >= daily_token_limit:
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": "rate_limit_exceeded",
+                    "detail": f"Daily token limit of {daily_token_limit} exceeded for client '{client_id}'",
+                    "limit_type": "daily_tokens",
+                    "limit": daily_token_limit,
+                    "used": today_tokens,
+                    "reset_at": int((datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp()),
+                },
+            )
+
+    return None
+
+# ---------------------------------------------------------------------------
 # Proxy App — Lifespan
 # ---------------------------------------------------------------------------
 
@@ -1094,6 +1209,11 @@ async def _proxy_request(request: Request, path: str) -> Response:
 
     client = _resolve_client(request)
     client_id = client["id"]
+
+    # Check per-client rate limits before doing any upstream work
+    rate_limit_response = await _check_rate_limit(request, client)
+    if rate_limit_response is not None:
+        return rate_limit_response
 
     body = await request.body()
     req_json = json.loads(body) if body else {}
@@ -1879,12 +1999,15 @@ async def admin_list_clients():
 
 @app.post("/admin/clients", dependencies=[Depends(_verify_admin)])
 async def admin_create_client(request: Request):
-    """Create a new client key. Body: {"id": "my-app", "label": "My App", "notes": "optional"}"""
+    """Create a new client key. Body: {"id": "my-app", "label": "My App", "notes": "optional", "daily_token_limit": 100000, "daily_request_limit": 500, "rpm_limit": 30}"""
     body = await request.json()
     client_id = body.get("id")
     label = body.get("label", client_id)
     notes = body.get("notes", "")
     custom_token = body.get("token")  # optional: provide your own token
+    daily_token_limit = body.get("daily_token_limit")
+    daily_request_limit = body.get("daily_request_limit")
+    rpm_limit = body.get("rpm_limit")
 
     if not client_id:
         return JSONResponse(status_code=400, content={"error": "id is required"})
@@ -1893,7 +2016,10 @@ async def admin_create_client(request: Request):
                             content={"error": "id must be alphanumeric (dashes/underscores ok)"})
 
     try:
-        result = client_registry.create(client_id, label, notes=notes, token=custom_token)
+        result = client_registry.create(client_id, label, notes=notes, token=custom_token,
+                                        daily_token_limit=daily_token_limit,
+                                        daily_request_limit=daily_request_limit,
+                                        rpm_limit=rpm_limit)
         log.info(f"Client created: {client_id} ({label})")
         return result
     except ValueError as e:
@@ -1902,15 +2028,18 @@ async def admin_create_client(request: Request):
 
 @app.patch("/admin/clients/{client_id}", dependencies=[Depends(_verify_admin)])
 async def admin_update_client(client_id: str, request: Request):
-    """Update a client's label, notes, or token. Body: {"label": "...", "notes": "...", "token": "..."}"""
+    """Update a client's label, notes, token, or rate limits. Body: {"label": "...", "notes": "...", "token": "***", "daily_token_limit": null, "daily_request_limit": 500, "rpm_limit": 30}"""
     body = await request.json()
+    # Use Ellipsis sentinel: if key not in body, don't update; if null, clear the limit
+    kwargs = {}
+    for field in ("label", "notes", "token"):
+        if field in body:
+            kwargs[field] = body[field]
+    for field in ("daily_token_limit", "daily_request_limit", "rpm_limit"):
+        if field in body:
+            kwargs[field] = body[field]  # None clears the limit
     try:
-        result = client_registry.update(
-            client_id,
-            label=body.get("label"),
-            notes=body.get("notes"),
-            token=body.get("token"),
-        )
+        result = client_registry.update(client_id, **kwargs)
         if result is None:
             return JSONResponse(status_code=404, content={"error": f"client '{client_id}' not found"})
         log.info(f"Client updated: {client_id}")
@@ -2145,6 +2274,12 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     <span style="font-size:11px;color:var(--dim)">Changes take effect immediately but require config.yaml update + restart to persist</span>
   </div>
   <div id="subs-list"></div>
+  <h3 style="margin-top:24px;border-top:1px solid var(--border);padding-top:16px">Client Keys</h3>
+  <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center">
+    <button class="btn" id="btn-add-client">+ Add Client</button>
+    <span style="font-size:11px;color:var(--dim)">Client keys attribute usage and enforce rate limits</span>
+  </div>
+  <div id="client-list"></div>
 </div>
 
 <div id="modal-root"></div>
@@ -2201,7 +2336,7 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', funct
   this.classList.add('active');
   document.getElementById('panel-'+this.dataset.tab).classList.add('active');
   if (this.dataset.tab === 'models') loadModelsPanel();
-  if (this.dataset.tab === 'subs') loadSubsPanel();
+  if (this.dataset.tab === 'subs') { loadSubsPanel(); loadClients(); }
 }));
 
 // --- SSE ---
@@ -2343,6 +2478,75 @@ async function deleteKey(idx, label) {
   loadSubsPanel();
 }
 
+// --- Client Key Management ---
+async function loadClients() {
+  const clients = await loadJSON('/admin/clients');
+  const today = new Date().toISOString().slice(0, 10);
+  document.getElementById('client-list').innerHTML = (clients || []).map(c => {
+    const dtl = c.daily_token_limit != null ? c.daily_token_limit : '∞';
+    const drl = c.daily_request_limit != null ? c.daily_request_limit : '∞';
+    const rpm = c.rpm_limit != null ? c.rpm_limit : '∞';
+    const tok = c.token ? c.token.slice(0, 8) + '...' + c.token.slice(-4) : '—';
+    return `<div class="key-mgmt-card">
+      <div class="km-header">
+        <span class="km-label">${c.label || c.id}</span>
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-sm" onclick="editClient('${c.id}')">Edit</button>
+          <button class="btn btn-sm" onclick="regenClient('${c.id}')">🔄 Token</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteClient('${c.id}','${c.label || c.id}')">Remove</button>
+        </div>
+      </div>
+      <div class="km-row"><span>ID</span><span>${c.id}</span></div>
+      <div class="km-row"><span>Token</span><span style="font-family:monospace; font-size:11px">${tok}</span></div>
+      <div class="km-row"><span>Daily Token Limit</span><span>${dtl}</span></div>
+      <div class="km-row"><span>Daily Request Limit</span><span>${drl}</span></div>
+      <div class="km-row"><span>RPM Limit</span><span>${rpm}</span></div>
+      ${c.notes ? `<div class="km-row"><span>Notes</span><span style="font-size:11px">${c.notes}</span></div>` : ''}
+    </div>`;
+  }).join('') || '<div style="color:var(--dim);font-size:12px;padding:8px">No client keys yet</div>';
+}
+
+function editClient(id) {
+  // Fetch current values to pre-fill
+  loadJSON('/admin/clients').then(clients => {
+    const c = (clients || []).find(x => x.id === id);
+    if (!c) return;
+    showModal(`<h3>Edit Client: ${id}</h3>
+      <label>Label</label><input id="m-cl-label" value="${c.label || ''}">
+      <label>Notes</label><input id="m-cl-notes" value="${c.notes || ''}">
+      <label>Daily Token Limit <span style="color:var(--dim)">(null = unlimited)</span></label><input id="m-cl-dtl" type="number" placeholder="unlimited" value="${c.daily_token_limit ?? ''}">
+      <label>Daily Request Limit</label><input id="m-cl-drl" type="number" placeholder="unlimited" value="${c.daily_request_limit ?? ''}">
+      <label>RPM Limit</label><input id="m-cl-rpm" type="number" placeholder="unlimited" value="${c.rpm_limit ?? ''}">
+      <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="saveClient('${id}')">Save</button></div>`);
+  });
+}
+async function saveClient(id) {
+  const body = {};
+  const label = document.getElementById('m-cl-label').value;
+  if (label) body.label = label;
+  const notes = document.getElementById('m-cl-notes').value;
+  if (notes) body.notes = notes;
+  const dtl = document.getElementById('m-cl-dtl').value;
+  body.daily_token_limit = dtl === '' ? null : parseInt(dtl);
+  const drl = document.getElementById('m-cl-drl').value;
+  body.daily_request_limit = drl === '' ? null : parseInt(drl);
+  const rpm = document.getElementById('m-cl-rpm').value;
+  body.rpm_limit = rpm === '' ? null : parseInt(rpm);
+  await postJSON(`/admin/clients/${id}`, body, 'PATCH');
+  closeModal(); loadClients();
+}
+async function regenClient(id) {
+  if (!confirm(`Regenerate token for "${id}"? The old token will stop working immediately.`)) return;
+  const r = await postJSON(`/admin/clients/${id}/regenerate-token`, null, 'POST');
+  closeModal(); loadClients();
+  alert(`New token: ${r.token}`);
+}
+async function deleteClient(id, label) {
+  if (!confirm(`Remove client "${label}"? The token will stop working immediately.`)) return;
+  await postJSON(`/admin/clients/${id}`, null, 'DELETE');
+  loadClients();
+}
+
 document.getElementById('btn-add-key').addEventListener('click', () => {
   showModal(`<h3>Add Subscription</h3>
     <p style="font-size:11px;color:var(--dim);margin-bottom:12px">Add an Ollama Cloud API key. Get it from ollama.com/settings/keys</p>
@@ -2369,6 +2573,41 @@ async function addKey() {
   const r=await postJSON('/admin/keys', body);
   closeModal(); loadSubsPanel();
   alert(r.note||'Key added');
+}
+
+// --- Add Client ---
+document.getElementById('btn-add-client').addEventListener('click', () => {
+  showModal(`<h3>Add Client Key</h3>
+    <p style="font-size:11px;color:var(--dim);margin-bottom:12px">Create a client key for usage attribution and rate limiting</p>
+    <label>Client ID <span style="color:var(--red)">*</span></label><input id="m-cl-id" placeholder="e.g. my-app (alphanumeric, dashes ok)">
+    <label>Label</label><input id="m-cl-label" placeholder="e.g. My Application">
+    <label>Notes</label><input id="m-cl-notes" placeholder="Optional notes">
+    <h4 style="margin-top:12px">Rate Limits <span style="color:var(--dim);font-weight:normal">(leave empty for unlimited)</span></h4>
+    <label>Daily Token Limit</label><input id="m-cl-dtl" type="number" placeholder="unlimited">
+    <label>Daily Request Limit</label><input id="m-cl-drl" type="number" placeholder="unlimited">
+    <label>RPM Limit</label><input id="m-cl-rpm" type="number" placeholder="unlimited">
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="addClient()">Create</button></div>`);
+});
+
+async function addClient() {
+  const id = document.getElementById('m-cl-id').value.trim();
+  if (!id) { alert('Client ID is required'); return; }
+  const body = { id, label: document.getElementById('m-cl-label').value || id };
+  const notes = document.getElementById('m-cl-notes').value.trim();
+  if (notes) body.notes = notes;
+  const dtl = document.getElementById('m-cl-dtl').value;
+  if (dtl) body.daily_token_limit = parseInt(dtl);
+  const drl = document.getElementById('m-cl-drl').value;
+  if (drl) body.daily_request_limit = parseInt(drl);
+  const rpm = document.getElementById('m-cl-rpm').value;
+  if (rpm) body.rpm_limit = parseInt(rpm);
+  try {
+    const r = await postJSON('/admin/clients', body);
+    closeModal(); loadClients();
+    alert(`Client created! Token: ${r.token}`);
+  } catch (e) {
+    // postJSON already shows error
+  }
 }
 
 // --- Data Fetch ---
