@@ -965,6 +965,24 @@ class FallbackProvider:
             })
         return out
 
+    # ----- Runtime model_map mutations (used by /admin/fallback-map) -----
+
+    def add_mapping(self, ollama_name: str, nvidia_name: str,
+                    priority: Optional[str] = None) -> dict:
+        """Add or update an in-memory mapping. Returns the stored entry."""
+        if not ollama_name or not nvidia_name:
+            raise ValueError("ollama_name and nvidia_name are required")
+        entry = {
+            "nvidia_model": nvidia_name,
+            "priority": priority if priority in VALID_FALLBACK_PRIORITIES else None,
+        }
+        self._model_map[ollama_name] = entry
+        return entry
+
+    def remove_mapping(self, ollama_name: str) -> bool:
+        """Remove an in-memory mapping. Returns True if it existed."""
+        return self._model_map.pop(ollama_name, None) is not None
+
     # ----- Metadata cache (NVIDIA Build catalog) -----
 
     def _load_metadata_cache(self) -> None:
@@ -2931,6 +2949,72 @@ async def admin_fallback_catalog():
         "count": len(catalog),
         "by_org": by_org,
     }
+
+
+@app.post("/admin/fallback-map", dependencies=[Depends(_verify_admin)])
+async def admin_add_fallback_map(request: Request):
+    """Add or update an in-memory fallback model_map entry.
+
+    Body: {"ollama_name": "...", "nvidia_name": "...", "priority": "after|before|only"}
+    The change is in-memory only; a warning is logged so it can be persisted to config.
+    """
+    fp = fallback_provider
+    if not fp or not fp.enabled:
+        raise HTTPException(status_code=400, detail="fallback provider not configured")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    ollama_name = body.get("ollama_name") or request.query_params.get("ollama_name")
+    nvidia_name = body.get("nvidia_name") or request.query_params.get("nvidia_name")
+    priority = body.get("priority") or request.query_params.get("priority")
+    if not ollama_name or not nvidia_name:
+        raise HTTPException(status_code=400, detail="ollama_name and nvidia_name are required")
+    try:
+        entry = fp.add_mapping(ollama_name, nvidia_name, priority=priority)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    log.warning(
+        f"Runtime fallback map update for {ollama_name} -> {nvidia_name}; "
+        f"add to config.yaml to persist."
+    )
+    payload = {
+        "ollama_name": ollama_name,
+        "nvidia_model": entry["nvidia_model"],
+        "priority": entry.get("priority") or fp.priority,
+    }
+    await broadcaster.broadcast("fallback_map_update", {"action": "add", **payload})
+    return {"added": payload, "model_map": fp.model_aliases()}
+
+
+@app.delete("/admin/fallback-map", dependencies=[Depends(_verify_admin)])
+async def admin_remove_fallback_map(request: Request):
+    """Remove an in-memory fallback model_map entry.
+
+    Accepts ``ollama_name`` via query param or JSON body.
+    """
+    fp = fallback_provider
+    if not fp or not fp.enabled:
+        raise HTTPException(status_code=400, detail="fallback provider not configured")
+    ollama_name = request.query_params.get("ollama_name")
+    if not ollama_name:
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        ollama_name = (body or {}).get("ollama_name") if isinstance(body, dict) else None
+    if not ollama_name:
+        raise HTTPException(status_code=400, detail="ollama_name is required")
+    removed = fp.remove_mapping(ollama_name)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"no mapping for {ollama_name}")
+    log.warning(
+        f"Runtime fallback map removal for {ollama_name}; "
+        f"remove from config.yaml to persist."
+    )
+    await broadcaster.broadcast("fallback_map_update", {"action": "remove", "ollama_name": ollama_name})
+    return {"removed": ollama_name, "model_map": fp.model_aliases()}
 
 
 @app.post("/admin/fallback-priority", dependencies=[Depends(_verify_admin)])
