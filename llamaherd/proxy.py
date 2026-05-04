@@ -2259,15 +2259,20 @@ def _convert_openai_to_ollama_body(req_json: dict) -> bytes:
     """
     ollama: dict = {"model": req_json.get("model", "")}
     if "messages" in req_json:
-        # Strip fields Ollama native /api/chat doesn't understand (e.g. 'reasoning'
-        # that glm-5.1 injects into assistant messages, which causes Ollama to
-        # return 400 "Value looks like object, but can't find closing '}' symbol"
-        # when those messages are replayed in conversation history).
-        _allowed = {"role", "content", "images", "tool_calls", "tool_call_id", "name"}
-        ollama["messages"] = [
-            {k: v for k, v in msg.items() if k in _allowed}
-            for msg in req_json["messages"]
-        ]
+        # Convert OpenAI-style messages to Ollama native format.
+        # Key difference: Ollama uses 'thinking' for chain-of-thought, but
+        # Ollama Cloud's /v1 endpoint (and OpenAI) return it as 'reasoning'.
+        # When replaying history via the native bridge, rename reasoning→thinking
+        # so Ollama accepts it and the model can see its prior reasoning.
+        # Also drop any other unknown fields that Ollama's parser would reject.
+        _allowed = {"role", "content", "images", "tool_calls", "tool_call_id", "name", "thinking"}
+        def _to_ollama_msg(msg: dict) -> dict:
+            out = {k: v for k, v in msg.items() if k in _allowed}
+            # Rename OpenAI 'reasoning' → Ollama 'thinking'
+            if "reasoning" in msg and "thinking" not in out:
+                out["thinking"] = msg["reasoning"]
+            return out
+        ollama["messages"] = [_to_ollama_msg(m) for m in req_json["messages"]]
     if "stream" in req_json:
         ollama["stream"] = req_json["stream"]
     if "tools" in req_json:
