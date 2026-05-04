@@ -169,11 +169,11 @@ Set limits via API or CLI. `null` means unlimited (default).
 
 ### Hermes Agent
 
-Add LlamaHerd as a custom provider in `~/.hermes/config.yaml`:
+Hermes currently uses LlamaHerd through its OpenAI-compatible route. Include `/v1` in the base URL:
 
 ```yaml
 model:
-  default: deepseek-v3.2:cloud
+  default: deepseek-v3.2
   provider: custom
   base_url: http://127.0.0.1:8399/v1
   api_key: ocp-hermes-gateway-XXXXXXXX
@@ -182,6 +182,7 @@ model:
 Or via CLI:
 ```bash
 hermes config set model.provider custom
+hermes config set model.default deepseek-v3.2
 hermes config set model.base_url http://127.0.0.1:8399/v1
 hermes config set model.api_key ocp-hermes-gateway-XXXXXXXX
 ```
@@ -193,12 +194,33 @@ llamaherd clients create hermes-gateway --label "Hermes Gateway" --rpm-limit 60
 
 ### OpenClaw
 
-Point OpenClaw at LlamaHerd the same way — it's OpenAI-compatible:
+OpenClaw should use LlamaHerd's **native Ollama API**, not the OpenAI-compatible `/v1` route. Do **not** add `/v1`; using `/v1` can break tool calling.
 
 ```yaml
 # In your OpenClaw config
-base_url: http://127.0.0.1:8399/v1
-api_key: ocp-openclaw-gateway-XXXXXXXX
+baseUrl: http://127.0.0.1:8399
+api: ollama
+apiKey: ocp-openclaw-gateway-XXXXXXXX
+```
+
+Create the client key first:
+```bash
+llamaherd clients create openclaw-gateway --label "OpenClaw Gateway" --rpm-limit 60
+```
+
+### Copy-paste agent setup prompt
+
+If you are asking an agent to configure itself, give it this prompt and the client token privately:
+
+```text
+Configure this agent to use LlamaHerd, the local Ollama Cloud proxy.
+
+Endpoint rules:
+- If this agent is OpenClaw, use native Ollama protocol: baseUrl http://127.0.0.1:8399, api ollama, no /v1 suffix.
+- If this agent is Hermes Agent or another OpenAI-compatible client, use base_url http://127.0.0.1:8399/v1.
+- Use the provided client API key as the Authorization bearer/api_key.
+- Pick a model from GET /api/tags for native Ollama clients or GET /v1/models for OpenAI-compatible clients.
+- Verify with a small chat request and do not print the API key.
 ```
 
 ### Any OpenAI Client
@@ -223,7 +245,7 @@ response = client.chat.completions.create(
 |---|---|---|
 | `/admin/status` | GET | Key health, slots, usage %, billing data |
 | `/admin/events?token=X` | GET (SSE) | Real-time event stream |
-| `/admin/models` | GET | Discovered models with context length |
+| `/admin/models` | GET | Discovered models with context length, capabilities, size, family, parameters |
 | `/admin/totals` | GET | All-time or date-filtered totals |
 | `/admin/keys` | GET/POST/PUT/DELETE | Manage subscription keys |
 | `/admin/clients` | GET/POST/PUT/DELETE | Manage client attribution keys |
@@ -235,7 +257,7 @@ response = client.chat.completions.create(
 | `/v1/*` | ANY | OpenAI-compatible proxy routes |
 | `/api/*` | ANY | Native Ollama protocol routes |
 
-All `/admin/*` endpoints require authentication via `Authorization: Bearer TOKEN` header or `?token=TOKEN` query param.
+All `/admin/*` endpoints require the admin token, either in the Authorization bearer header or as a `?token=...` query param.
 
 ### Date Range Filtering
 

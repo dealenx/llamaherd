@@ -630,6 +630,7 @@ class ModelRegistry:
         self.manager = manager
         self.upstream = upstream
         self.models: dict[str, list[str]] = {}
+        self.model_metadata: dict[str, dict] = {}
         self.last_refresh: float = 0
         self._refresh_task: Optional[asyncio.Task] = None
 
@@ -648,28 +649,129 @@ class ModelRegistry:
                 log.error(f"Model refresh failed: {e}")
             await asyncio.sleep(interval)
 
+    def _native_base(self) -> str:
+        base = self.upstream.rstrip("/")
+        if base.endswith("/v1"):
+            return base[:-3] + "/api"
+        return base + "/api"
+
+    @staticmethod
+    def _created_from_modified(modified_at: Optional[str], fallback: float) -> int:
+        if modified_at:
+            try:
+                return int(datetime.fromisoformat(modified_at.replace("Z", "+00:00")).timestamp())
+            except Exception:
+                pass
+        return int(fallback or time.time())
+
+    @staticmethod
+    def _context_from_show(show_data: dict) -> Optional[int]:
+        info = show_data.get("model_info") or {}
+        for key, value in info.items():
+            if key.endswith(".context_length"):
+                try:
+                    return int(value)
+                except Exception:
+                    return None
+        return None
+
+    @staticmethod
+    def _parameter_count(show_data: dict) -> Optional[int]:
+        info = show_data.get("model_info") or {}
+        value = info.get("general.parameter_count")
+        if value is None:
+            value = (show_data.get("details") or {}).get("parameter_size")
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _model_entry(self, model_id: str) -> dict:
+        meta = self.model_metadata.get(model_id, {})
+        context_length = meta.get("context_length") or MODEL_CONTEXT_LENGTHS.get(model_id)
+        entry = {
+            "id": model_id,
+            "object": "model",
+            "created": self._created_from_modified(meta.get("modified_at"), self.last_refresh),
+            "owned_by": "ollama",
+        }
+        if context_length:
+            entry["context_length"] = context_length
+        for key in ("modified_at", "size", "digest", "capabilities", "family", "parameter_count", "quantization_level"):
+            if meta.get(key) is not None:
+                entry[key] = meta[key]
+        return entry
+
     async def refresh(self):
         old_models = set(self.models.keys()) if self.models else set()
-        all_models: dict[str, str] = {}
+        all_models: dict[str, list[str]] = {}
+        metadata: dict[str, dict] = dict(self.model_metadata)
+        native_base = self._native_base()
         async with httpx.AsyncClient(timeout=30) as client:
             for key in self.manager.keys:
                 try:
                     resp = await client.get(
-                        f"{self.upstream}/models",
+                        f"{native_base}/tags",
                         headers={"Authorization": f"Bearer {key.token}"},
                     )
                     if resp.status_code == 200:
                         data = resp.json()
-                        for m in data.get("data", []):
-                            model_id = m.get("id", "")
-                            if model_id:
-                                all_models.setdefault(model_id, []).append(key.token)
+                        for m in data.get("models", []):
+                            model_id = m.get("model") or m.get("name") or ""
+                            if not model_id:
+                                continue
+                            all_models.setdefault(model_id, []).append(key.token)
+                            current = metadata.setdefault(model_id, {})
+                            current.update({
+                                "id": model_id,
+                                "name": m.get("name") or model_id,
+                                "model": model_id,
+                                "modified_at": m.get("modified_at"),
+                                "size": m.get("size"),
+                                "digest": m.get("digest"),
+                                "details": m.get("details") or current.get("details") or {},
+                            })
                     else:
                         log.warning(f"Model list failed for {key.label}: {resp.status_code}")
                 except Exception as e:
                     log.warning(f"Model list error for {key.label}: {e}")
 
+            # Enrich new/changed models from native /api/show. This exposes context length,
+            # capabilities (vision/tools/thinking), family, parameter count, and quantization.
+            for model_id, tokens in sorted(all_models.items()):
+                current = metadata.get(model_id, {})
+                needs_show = not current.get("context_length") or not current.get("capabilities")
+                if not needs_show:
+                    continue
+                try:
+                    resp = await client.post(
+                        f"{native_base}/show",
+                        headers={"Authorization": f"Bearer {tokens[0]}", "Content-Type": "application/json"},
+                        json={"model": model_id},
+                    )
+                    if resp.status_code != 200:
+                        log.debug(f"/api/show metadata failed for {model_id}: {resp.status_code}")
+                        continue
+                    show = resp.json()
+                    details = show.get("details") or current.get("details") or {}
+                    info = show.get("model_info") or {}
+                    context_length = self._context_from_show(show) or MODEL_CONTEXT_LENGTHS.get(model_id)
+                    metadata[model_id] = {
+                        **current,
+                        "details": details,
+                        "model_info": info,
+                        "capabilities": show.get("capabilities") or current.get("capabilities") or [],
+                        "modified_at": show.get("modified_at") or current.get("modified_at"),
+                        "context_length": context_length,
+                        "parameter_count": self._parameter_count(show),
+                        "family": details.get("family") or info.get("general.architecture"),
+                        "quantization_level": details.get("quantization_level"),
+                    }
+                except Exception as e:
+                    log.debug(f"/api/show metadata error for {model_id}: {e}")
+
         self.models = all_models
+        self.model_metadata = {mid: metadata[mid] for mid in all_models.keys() if mid in metadata}
         self.last_refresh = time.time()
         new_models = set(all_models.keys()) - old_models
         if new_models:
@@ -688,20 +790,7 @@ class ModelRegistry:
     def get_models_response(self) -> dict:
         return {
             "object": "list",
-            "data": [
-                {
-                    "id": model_id,
-                    "object": "model",
-                    "created": int(self.last_refresh),
-                    "owned_by": "ollama",
-                    **(
-                        {"context_length": MODEL_CONTEXT_LENGTHS[model_id]}
-                        if model_id in MODEL_CONTEXT_LENGTHS
-                        else {}
-                    ),
-                }
-                for model_id in sorted(self.models.keys())
-            ],
+            "data": [self._model_entry(model_id) for model_id in sorted(self.models.keys())],
         }
 
     def get_preferred_key(self, model: str) -> Optional[str]:
@@ -868,7 +957,8 @@ class UsageDB:
             "avg_latency_ms": round(r[5] or 0, 1),
         } for r in rows]
 
-    def recent_calls(self, limit: int = 100, start_date: str = None, end_date: str = None) -> list[dict]:
+    def recent_calls(self, limit: int = 100, start_date: str = None, end_date: str = None,
+                     client_id: str = None, model: str = None) -> list[dict]:
         where_parts = []
         params: list = []
         if start_date:
@@ -877,6 +967,12 @@ class UsageDB:
         if end_date:
             where_parts.append("day <= ?")
             params.append(end_date)
+        if client_id:
+            where_parts.append("client_id = ?")
+            params.append(client_id)
+        if model:
+            where_parts.append("model = ?")
+            params.append(model)
         where = " AND ".join(where_parts) if where_parts else "1=1"
         query = f"""
             SELECT ts, client_id, upstream_key, model,
@@ -1089,8 +1185,12 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
         loop = asyncio.get_event_loop()
         if loop.is_running():
             asyncio.ensure_future(broadcaster.broadcast("call", call_data))
+            if manager:
+                asyncio.ensure_future(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url}))
         else:
             loop.run_until_complete(broadcaster.broadcast("call", call_data))
+            if manager:
+                loop.run_until_complete(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url}))
     except RuntimeError:
         pass  # No event loop — skip broadcast
 
@@ -1562,15 +1662,7 @@ async def list_models():
 @app.get("/v1/models/{model_id}")
 async def get_model(model_id: str):
     if registry and model_id in registry.models:
-        entry = {
-            "id": model_id,
-            "object": "model",
-            "created": int(registry.last_refresh),
-            "owned_by": "ollama",
-        }
-        if model_id in MODEL_CONTEXT_LENGTHS:
-            entry["context_length"] = MODEL_CONTEXT_LENGTHS[model_id]
-        return entry
+        return registry._model_entry(model_id)
     return JSONResponse(status_code=404, content={"error": f"model '{model_id}' not found"})
 
 
@@ -1603,30 +1695,23 @@ async def api_tags():
         return {"models": []}
     models = []
     for model_id in sorted(registry.models.keys()):
-        ctx_len = MODEL_CONTEXT_LENGTHS.get(model_id)
-        # Try to infer family from model name (part before the : or last -)
-        name_parts = model_id.split(":")
-        family = name_parts[0].split("-")[-1] if name_parts[0] else ""
+        meta = registry.model_metadata.get(model_id, {})
+        details = dict(meta.get("details") or {})
+        context_length = meta.get("context_length") or MODEL_CONTEXT_LENGTHS.get(model_id)
+        if context_length:
+            details["context_length"] = context_length
         entry = {
             "name": model_id,
             "model": model_id,
-            "modified_at": datetime.fromtimestamp(
-                registry.last_refresh, tz=timezone.utc
-            ).isoformat() if registry.last_refresh else "",
-            "size": ctx_len if ctx_len else 0,
-            "digest": "",
-            "details": {
-                "parent_model": "",
-                "format": "gguf",
-                "family": family,
-                "families": None,
-                "parameter_size": "",
-                "quantization_level": "",
-            },
-            "size_vram": 0,
+            "modified_at": meta.get("modified_at") or (
+                datetime.fromtimestamp(registry.last_refresh, tz=timezone.utc).isoformat()
+                if registry.last_refresh else ""
+            ),
+            "size": meta.get("size") or 0,
+            "digest": meta.get("digest") or "",
+            "details": details,
+            "size_vram": meta.get("size_vram", 0),
         }
-        if ctx_len:
-            entry["details"]["context_length"] = ctx_len
         models.append(entry)
     return {"models": models}
 
@@ -1770,7 +1855,8 @@ async def admin_recent_calls(limit: int = 100, client: str = None, model: str = 
     """Return recent individual calls (not aggregates) for the live feed."""
     if not usage_db:
         return []
-    return usage_db.recent_calls(limit, start_date=start_date, end_date=end_date)
+    return usage_db.recent_calls(limit, start_date=start_date, end_date=end_date,
+                                 client_id=client, model=model)
 
 
 @app.get("/admin/totals", dependencies=[Depends(_verify_admin)])
@@ -1788,10 +1874,18 @@ async def admin_models():
         return {"models": [], "count": 0, "last_refresh": 0}
     models_data = []
     for model_id, keys in registry.models.items():
+        meta = registry.model_metadata.get(model_id, {})
         models_data.append({
             "id": model_id,
-            "context_length": MODEL_CONTEXT_LENGTHS.get(model_id),
+            "context_length": meta.get("context_length") or MODEL_CONTEXT_LENGTHS.get(model_id),
             "available_on": len(keys),
+            "modified_at": meta.get("modified_at"),
+            "size": meta.get("size"),
+            "digest": meta.get("digest"),
+            "capabilities": meta.get("capabilities") or [],
+            "family": meta.get("family"),
+            "parameter_count": meta.get("parameter_count"),
+            "quantization_level": meta.get("quantization_level"),
         })
     models_data.sort(key=lambda m: m["id"])
     return {
@@ -2265,6 +2359,9 @@ tr:hover td { background: rgba(88,166,255,0.04); }
       <option value="name">Sort: Name</option>
       <option value="ctx">Sort: Context Length</option>
       <option value="keys">Sort: Availability</option>
+      <option value="updated">Sort: Updated</option>
+      <option value="params">Sort: Parameters</option>
+      <option value="family">Sort: Family</option>
     </select>
   </div>
   <div class="models-grid" id="models-grid"></div>
@@ -2351,7 +2448,25 @@ function connectSSE() {
   eventSource.onerror = () => { document.getElementById('sse-dot').className='sse-dot off'; document.getElementById('sse-label').textContent='reconnecting...'; eventSource.close(); setTimeout(connectSSE,reconnectDelay); reconnectDelay=Math.min(reconnectDelay*2,30000); };
   eventSource.addEventListener('status', e => { const d=JSON.parse(e.data); renderKeyStatus(d.keys||[]); document.getElementById('upstream-url').textContent=d.upstream||''; });
   eventSource.addEventListener('models', e => updateModelInfo(JSON.parse(e.data)));
-  eventSource.onmessage = e => { try { const m=JSON.parse(e.data); if(m.type==='call') addCallToFeed(m.data); } catch(err){} };
+  eventSource.onmessage = e => {
+    try {
+      const m=JSON.parse(e.data);
+      if(m.type==='call') { addCallToFeed(m.data); if(callInCurrentRange(m.data)) schedulePeriodRefresh(); }
+      else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; }
+      else if(m.type==='models') updateModelInfo(m.data||{});
+    } catch(err){}
+  };
+}
+
+function callInCurrentRange(c) {
+  const r=getDateRange(); if(!r.start||!r.end||!c.ts) return false;
+  const day=new Date(c.ts*1000).toISOString().slice(0,10);
+  return day>=r.start && day<=r.end;
+}
+let periodRefreshTimer=null;
+function schedulePeriodRefresh() {
+  if(periodRefreshTimer) return;
+  periodRefreshTimer=setTimeout(async()=>{ periodRefreshTimer=null; await fetchPeriodData({preserveFeed:true}); }, 1000);
 }
 
 // --- Model Info Bar ---
@@ -2401,13 +2516,20 @@ function renderModelsGrid() {
   let filtered = allModels.filter(m => !search || m.id.toLowerCase().includes(search));
   if (sort === 'ctx') filtered.sort((a,b) => (b.context_length||0)-(a.context_length||0));
   else if (sort === 'keys') filtered.sort((a,b) => (b.available_on||0)-(a.available_on||0));
+  else if (sort === 'updated') filtered.sort((a,b) => Date.parse(b.modified_at||0)-Date.parse(a.modified_at||0));
+  else if (sort === 'params') filtered.sort((a,b) => (b.parameter_count||0)-(a.parameter_count||0));
+  else if (sort === 'family') filtered.sort((a,b) => String(a.family||'').localeCompare(String(b.family||'')) || a.id.localeCompare(b.id));
   else filtered.sort((a,b) => a.id.localeCompare(b.id));
   document.getElementById('models-grid').innerHTML = filtered.map(m => {
     const u = modelUsage[m.id];
     const ctxStr = m.context_length ? `<span class="mc-ctx">${fmtCtx(m.context_length)} ctx</span>` : '';
     const keyStr = `<span class="mc-keys">${m.available_on||0} key${m.available_on!==1?'s':''}</span>`;
+    const caps = (m.capabilities||[]).map(c => `<span class="badge">${c}</span>`).join(' ');
+    const params = m.parameter_count ? `${fmt(m.parameter_count)} params` : '';
+    const updated = m.modified_at ? `updated ${m.modified_at.slice(0,10)}` : '';
+    const metaBits = [ctxStr, keyStr, m.family||'', params, updated].filter(Boolean).join(' · ');
     const usageLine = u ? `<div class="mc-usage">${fmt(u.requests)} calls · ${fmt(u.tokens_total)} tokens · ${Math.round(u.avg_latency_ms||0)}ms</div>` : '<div class="mc-usage" style="color:var(--dim)">No usage (7d)</div>';
-    return `<div class="model-chip"><div class="mc-name">${m.id}</div><div class="mc-meta">${ctxStr} ${ctxStr&&keyStr?'· ':''}${keyStr}</div>${usageLine}</div>`;
+    return `<div class="model-chip"><div class="mc-name">${m.id}</div><div class="mc-meta">${metaBits}</div><div class="mc-meta">${caps}</div>${usageLine}</div>`;
   }).join('');
 }
 document.getElementById('model-search').addEventListener('input', renderModelsGrid);
@@ -2613,15 +2735,17 @@ async function addClient() {
 }
 
 // --- Data Fetch ---
-async function fetchPeriodData() {
+async function fetchPeriodData(opts) {
+  opts = opts || {};
   const range=getDateRange(); if(!range.start||!range.end)return; updateBadges(range.label);
-  const [totals,clients,models,daily,calls]=await Promise.all([
+  const fetches=[
     loadJSON(`/admin/totals?start_date=${range.start}&end_date=${range.end}`),
     loadJSON(`/admin/usage/by-client?start_date=${range.start}&end_date=${range.end}`),
     loadJSON(`/admin/usage/by-model?start_date=${range.start}&end_date=${range.end}`),
     loadJSON(`/admin/usage/daily?start_date=${range.start}&end_date=${range.end}`),
-    fetchRecentCalls(),
-  ]);
+  ];
+  if(!opts.preserveFeed) fetches.push(fetchRecentCalls());
+  const [totals,clients,models,daily,calls]=await Promise.all(fetches);
   const t=totals||{};
   document.getElementById('totals').innerHTML=`
     <div class="card"><div class="label">Total Calls</div><div class="value blue">${fmt(t.total_calls||0)}</div></div>
@@ -2632,7 +2756,8 @@ async function fetchPeriodData() {
   document.querySelector('#client-table tbody').innerHTML=(clients||[]).map(c=>{const inW=Math.round((c.tokens_in/maxTok)*80),outW=Math.round((c.tokens_out/maxTok)*80); return `<tr><td>${c.client_id}</td><td>${fmt(c.requests)}</td><td>${fmt(c.tokens_in)}</td><td>${fmt(c.tokens_out)}</td><td>${fmt(c.tokens_total)}</td><td><div class="bars"><div class="bar in" style="width:${inW}px"></div><div class="bar out" style="width:${outW}px"></div></div></td></tr>`;}).join('');
   document.querySelector('#model-table tbody').innerHTML=(models||[]).map(m=>`<tr><td>${m.model}</td><td>${fmt(m.requests)}</td><td>${fmt(m.tokens_in)}</td><td>${fmt(m.tokens_out)}</td><td>${fmt(m.tokens_total)}</td><td>${Math.round(m.avg_latency_ms||0)}ms</td></tr>`).join('');
   document.querySelector('#daily-table tbody').innerHTML=(daily||[]).map(d=>`<tr><td>${d.day}</td><td>${fmt(d.requests)}</td><td>${fmt(d.tokens_in)}</td><td>${fmt(d.tokens_out)}</td><td>${fmt(d.tokens_total)}</td></tr>`).join('');
-  feedCalls=calls||[]; renderFeed(feedCalls); populateFilters(null,models);
+  if(!opts.preserveFeed) { feedCalls=calls||[]; renderFeed(feedCalls); }
+  populateFilters(null,models);
 }
 async function fetchRecentCalls() { const r=getDateRange(); const c=document.getElementById('filter-client').value,m=document.getElementById('filter-model').value,l=document.getElementById('feed-limit').value; let u=`/admin/recent-calls?limit=${l}&start_date=${r.start}&end_date=${r.end}`; if(c)u+=`&client=${encodeURIComponent(c)}`; if(m)u+=`&model=${encodeURIComponent(m)}`; return loadJSON(u); }
 
