@@ -7,7 +7,7 @@
 - **CLI commands output JSON by default** — parseable by agents. Add `--format table` for humans.
 - **APIs return structured JSON** with consistent schemas, not human-readable prose.
 - **Exit codes matter** — 0 for success, non-zero for failure. Errors go to stderr, data to stdout.
-- **Ids over names** — accept both, but always return stable identifiers.
+- **Names first, IDs as reference** — always surface the human-readable name prominently, with the stable ID alongside for disambiguation. Agents relay info to humans — "Hermes Gateway hit its rate limit" beats "hermes-gateway hit its rate limit".
 - **No interactive prompts** — every operation must be doable in a single invocation with flags/args.
 - **Docs for agents** — README sections should cover programmatic usage (curl examples, CLI flags) before GUI instructions.
 
