@@ -2259,7 +2259,15 @@ def _convert_openai_to_ollama_body(req_json: dict) -> bytes:
     """
     ollama: dict = {"model": req_json.get("model", "")}
     if "messages" in req_json:
-        ollama["messages"] = req_json["messages"]
+        # Strip fields Ollama native /api/chat doesn't understand (e.g. 'reasoning'
+        # that glm-5.1 injects into assistant messages, which causes Ollama to
+        # return 400 "Value looks like object, but can't find closing '}' symbol"
+        # when those messages are replayed in conversation history).
+        _allowed = {"role", "content", "images", "tool_calls", "tool_call_id", "name"}
+        ollama["messages"] = [
+            {k: v for k, v in msg.items() if k in _allowed}
+            for msg in req_json["messages"]
+        ]
     if "stream" in req_json:
         ollama["stream"] = req_json["stream"]
     if "tools" in req_json:
