@@ -1477,16 +1477,24 @@ def _new_request_id() -> str:
 
 
 def _request_start(request_id: str, client_id: str, model: str,
-                    target_key: str, target_provider: str) -> None:
+                    target_key: str, target_provider: str,
+                    *, headers: Optional[dict] = None,
+                    path: Optional[str] = None) -> None:
     """Register an in-flight request and broadcast a request_start SSE event."""
-    entry = {
+    entry: dict = {
         "request_id": request_id,
         "client_id": client_id,
         "model": model,
         "target_key": target_key,
         "target_provider": target_provider,
         "started_at": time.time(),
+        "tokens_in": 0,
+        "tokens_out": 0,
     }
+    if path:
+        entry["path"] = path
+    if headers:
+        entry["headers"] = _sanitize_headers(headers)
     _in_flight[request_id] = entry
     try:
         loop = asyncio.get_event_loop()
@@ -1494,6 +1502,43 @@ def _request_start(request_id: str, client_id: str, model: str,
             asyncio.ensure_future(broadcaster.broadcast("request_start", entry))
     except RuntimeError:
         pass
+
+
+# Header keys that must never appear in the in-flight detail payload.
+_SENSITIVE_HEADER_KEYS = {
+    "authorization", "cookie", "set-cookie", "proxy-authorization",
+    "x-api-key", "api-key", "x-admin-token",
+}
+
+
+def _sanitize_headers(headers: dict) -> dict:
+    """Strip auth/cookie headers; keep only those safe to display in the dashboard."""
+    out: dict = {}
+    for k, v in (headers or {}).items():
+        if not isinstance(k, str):
+            continue
+        if k.lower() in _SENSITIVE_HEADER_KEYS:
+            continue
+        try:
+            out[k] = str(v)[:200]
+        except Exception:
+            continue
+    return out
+
+
+def _update_in_flight_tokens(request_id: Optional[str],
+                              tokens_in: Optional[int] = None,
+                              tokens_out: Optional[int] = None) -> None:
+    """Update the live token counters on an in-flight entry (no-op if missing)."""
+    if not request_id:
+        return
+    entry = _in_flight.get(request_id)
+    if not entry:
+        return
+    if tokens_in is not None and tokens_in > entry.get("tokens_in", 0):
+        entry["tokens_in"] = tokens_in
+    if tokens_out is not None and tokens_out > entry.get("tokens_out", 0):
+        entry["tokens_out"] = tokens_out
 
 
 def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
@@ -1776,7 +1821,10 @@ async def _proxy_request(request: Request, path: str) -> Response:
             )
 
         if not start_emitted:
-            _request_start(request_id, client_id, model, key.label, "ollama-cloud")
+            _request_start(
+                request_id, client_id, model, key.label, "ollama-cloud",
+                headers=dict(request.headers), path=path,
+            )
             start_emitted = True
 
         try:
@@ -1899,6 +1947,16 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
                                     tokens_in = chunk_usage.get("prompt_tokens", 0)
                                     tokens_out = chunk_usage.get("completion_tokens", 0)
                                     usage_captured = True
+                                    _update_in_flight_tokens(request_id, tokens_in, tokens_out)
+                                else:
+                                    # Live progress: estimate completion tokens from delta content.
+                                    choices = chunk.get("choices") or []
+                                    if choices:
+                                        delta = choices[0].get("delta") or {}
+                                        content = delta.get("content")
+                                        if content:
+                                            tokens_out += max(1, len(content) // 4)
+                                            _update_in_flight_tokens(request_id, None, tokens_out)
                             except (json.JSONDecodeError, IndexError, KeyError):
                                 pass
         except Exception as e:
@@ -1942,7 +2000,10 @@ async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
 
     if request_id is None:
         request_id = _new_request_id()
-    _request_start(request_id, client_id, original_model, upstream_label, fp.provider)
+    _request_start(
+        request_id, client_id, original_model, upstream_label, fp.provider,
+        path=path,
+    )
 
     if is_stream:
         return await _proxy_fallback_stream(
@@ -2004,6 +2065,15 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
                                     tokens_in = chunk_usage.get("prompt_tokens", 0)
                                     tokens_out = chunk_usage.get("completion_tokens", 0)
                                     usage_captured = True
+                                    _update_in_flight_tokens(request_id, tokens_in, tokens_out)
+                                else:
+                                    choices = chunk.get("choices") or []
+                                    if choices:
+                                        delta = choices[0].get("delta") or {}
+                                        content = delta.get("content")
+                                        if content:
+                                            tokens_out += max(1, len(content) // 4)
+                                            _update_in_flight_tokens(request_id, None, tokens_out)
                             except (json.JSONDecodeError, IndexError, KeyError):
                                 pass
         except Exception as e:
@@ -2085,6 +2155,14 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
                                     tokens_out = int(ev)
                                 if tokens_in > 0 or tokens_out > 0:
                                     usage_captured = True
+                                    _update_in_flight_tokens(request_id, tokens_in, tokens_out)
+                            else:
+                                # Live progress: estimate completion tokens from chunk content.
+                                msg = chunk.get("message") or {}
+                                content = msg.get("content") or chunk.get("response") or ""
+                                if content:
+                                    tokens_out += max(1, len(content) // 4)
+                                    _update_in_flight_tokens(request_id, None, tokens_out)
                         except (json.JSONDecodeError, ValueError, TypeError):
                             pass
         except Exception as e:
@@ -2136,7 +2214,10 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             )
 
         if not start_emitted:
-            _request_start(request_id, client_id, model, key.label, "ollama-cloud")
+            _request_start(
+                request_id, client_id, model, key.label, "ollama-cloud",
+                headers=dict(request.headers), path=path,
+            )
             start_emitted = True
 
         try:
@@ -2754,8 +2835,16 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
                                 tokens_out = int(ev)
                             if tokens_in > 0 or tokens_out > 0:
                                 usage_captured = True
+                                _update_in_flight_tokens(request_id, tokens_in, tokens_out)
                             # Emit [DONE] after final chunk
                             yield "data: [DONE]\n\n"
+                        else:
+                            # Live progress: estimate completion tokens from delta content.
+                            msg = ollama_chunk.get("message") or {}
+                            content = msg.get("content") or ""
+                            if content:
+                                tokens_out += max(1, len(content) // 4)
+                                _update_in_flight_tokens(request_id, None, tokens_out)
 
         except Exception as e:
             log.error(f"Bridge stream error for {model} (client={client_id}): {e}")
