@@ -882,6 +882,13 @@ class FallbackProvider:
         # Models discovered from the fallback's /v1/models on startup.
         self.discovered_models: list[dict] = []
         self.enabled: bool = bool(self.base_url and self.api_key)
+        # Metadata cache for the fallback model catalog (keyed by model id).
+        cache_path = cfg.get("metadata_cache_path", "~/llamaherd/nvidia_model_cache.json")
+        self.metadata_cache_path: Path = Path(cache_path).expanduser()
+        self.metadata_cache: dict[str, dict] = {}
+        self._load_metadata_cache()
+        # Refresh metadata older than this (seconds) — default 7 days.
+        self.metadata_max_age: float = float(cfg.get("metadata_max_age", 7 * 86400))
 
     @property
     def label(self) -> str:
@@ -956,6 +963,129 @@ class FallbackProvider:
                 "priority": entry.get("priority") or self.priority,
                 "provider": self.provider,
             })
+        return out
+
+    # ----- Metadata cache (NVIDIA Build catalog) -----
+
+    def _load_metadata_cache(self) -> None:
+        """Load cached model metadata from disk (best-effort)."""
+        try:
+            if self.metadata_cache_path.exists():
+                with open(self.metadata_cache_path) as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict):
+                    self.metadata_cache = raw
+        except Exception as e:
+            log.warning(f"Failed to load fallback metadata cache: {e}")
+
+    def _save_metadata_cache(self) -> None:
+        """Persist metadata cache to disk (best-effort)."""
+        try:
+            self.metadata_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.metadata_cache_path, "w") as f:
+                json.dump(self.metadata_cache, f, indent=2, sort_keys=True)
+        except Exception as e:
+            log.warning(f"Failed to save fallback metadata cache: {e}")
+
+    @staticmethod
+    def _docs_url(model_id: str) -> str:
+        """Convert a NVIDIA model id (org/name) to its docs API URL."""
+        slug = model_id.replace("/", "-")
+        return f"https://docs.api.nvidia.com/nim/reference/{slug}"
+
+    @staticmethod
+    def _model_card_url(model_id: str) -> str:
+        return f"https://build.nvidia.com/{model_id}"
+
+    async def fetch_model_metadata(self, model_id: str, timeout: float = 5.0) -> Optional[dict]:
+        """Fetch metadata for a single fallback model from the docs API.
+
+        Best-effort: returns None on failure. Stores result in self.metadata_cache.
+        """
+        url = self._docs_url(model_id)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    return None
+                ct = (resp.headers.get("content-type") or "").lower()
+                meta: dict = {"fetched_at": time.time(), "source": url}
+                if "json" in ct:
+                    body = resp.json()
+                    meta["raw"] = body
+                    if isinstance(body, dict):
+                        for k in ("description", "context_length", "parameter_count",
+                                   "summary", "tags", "modality"):
+                            if k in body:
+                                meta[k] = body[k]
+                else:
+                    meta["raw"] = resp.text[:4000]
+                self.metadata_cache[model_id] = meta
+                return meta
+        except Exception:
+            return None
+
+    async def refresh_metadata_cache(self, timeout: float = 5.0,
+                                      max_concurrency: int = 4) -> int:
+        """Refresh metadata for discovered models that are missing or stale.
+
+        Returns the number of metadata entries updated.
+        """
+        if not self.discovered_models:
+            return 0
+        now = time.time()
+        targets: list[str] = []
+        for m in self.discovered_models:
+            mid = m.get("id") if isinstance(m, dict) else None
+            if not mid:
+                continue
+            cached = self.metadata_cache.get(mid)
+            if cached and (now - cached.get("fetched_at", 0)) < self.metadata_max_age:
+                continue
+            targets.append(mid)
+        if not targets:
+            return 0
+        sem = asyncio.Semaphore(max_concurrency)
+
+        async def _one(mid: str):
+            async with sem:
+                await self.fetch_model_metadata(mid, timeout=timeout)
+
+        await asyncio.gather(*(_one(mid) for mid in targets), return_exceptions=True)
+        self._save_metadata_cache()
+        return len(targets)
+
+    def get_catalog(self) -> list[dict]:
+        """Return the full discovered-model catalog enriched with cached metadata."""
+        # Build reverse lookup: nvidia_model -> ollama alias
+        reverse: dict[str, str] = {}
+        for alias, entry in self._model_map.items():
+            nv = entry.get("nvidia_model")
+            if nv:
+                reverse[nv] = alias
+        out: list[dict] = []
+        for m in self.discovered_models:
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("id")
+            if not mid:
+                continue
+            meta = self.metadata_cache.get(mid) or {}
+            org = mid.split("/", 1)[0] if "/" in mid else (m.get("owned_by") or "")
+            ollama_alias = reverse.get(mid)
+            out.append({
+                "id": mid,
+                "owned_by": m.get("owned_by") or org,
+                "org": org,
+                "context_length": meta.get("context_length"),
+                "parameter_count": meta.get("parameter_count"),
+                "description": meta.get("description") or meta.get("summary"),
+                "model_card_url": self._model_card_url(mid),
+                "is_mapped": ollama_alias is not None,
+                "ollama_equivalent": ollama_alias,
+                "metadata_fetched_at": meta.get("fetched_at"),
+            })
+        out.sort(key=lambda r: (r.get("org") or "", r.get("id") or ""))
         return out
 
 
@@ -1454,6 +1584,7 @@ async def lifespan(app: FastAPI):
     usage_task = asyncio.create_task(_scrape_usage_loop(usage_scraper, manager, usage_scrape_interval))
     # Fallback provider (NVIDIA Build, etc.)
     fallback_provider = FallbackProvider(cfg.get("fallback") or {})
+    fb_metadata_task: Optional[asyncio.Task] = None
     if fallback_provider.enabled:
         # Best-effort discovery — don't block startup if it's slow.
         try:
@@ -1463,6 +1594,10 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"Fallback model discovery error: {e}")
         log.info(f"Fallback enabled: {fallback_provider.provider} ({len(fallback_provider._model_map)} mapped, priority={fallback_provider.priority})")
+        # Kick off metadata enrichment in the background — never block startup.
+        fb_metadata_task = asyncio.create_task(
+            _refresh_fallback_metadata_loop(fallback_provider)
+        )
     else:
         log.info("Fallback provider not configured")
 
@@ -1472,6 +1607,8 @@ async def lifespan(app: FastAPI):
 
     sub_task.cancel()
     usage_task.cancel()
+    if fb_metadata_task is not None:
+        fb_metadata_task.cancel()
     if registry:
         await registry.stop()
 
@@ -1488,6 +1625,33 @@ async def _poll_subscriptions_loop(mgr: KeyManager, interval: int):
             })
         except Exception as e:
             log.error(f"Subscription poll loop error: {e}")
+
+
+async def _refresh_fallback_metadata_loop(fp: 'FallbackProvider'):
+    """Background task: enrich the fallback model catalog with docs metadata.
+
+    Runs once shortly after startup, then weekly. Best-effort — all failures
+    are swallowed so the proxy keeps running even if NVIDIA's docs API is down.
+    """
+    # Wait briefly so the rest of startup completes first.
+    await asyncio.sleep(2.0)
+    try:
+        updated = await fp.refresh_metadata_cache(timeout=5.0)
+        if updated:
+            log.info(f"Fallback metadata cache: refreshed {updated} entries")
+    except Exception as e:
+        log.warning(f"Fallback metadata refresh error: {e}")
+    # Weekly refresh loop.
+    while True:
+        try:
+            await asyncio.sleep(7 * 86400)
+            updated = await fp.refresh_metadata_cache(timeout=5.0)
+            if updated:
+                log.info(f"Fallback metadata cache: refreshed {updated} entries")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning(f"Fallback metadata refresh error: {e}")
 
 
 async def _scrape_usage_loop(scraper: UsageScraper, mgr: KeyManager, interval: int):
@@ -2745,6 +2909,27 @@ async def admin_fallback_status():
         "valid_priorities": list(VALID_FALLBACK_PRIORITIES),
         "model_map": fp.model_aliases(),
         "discovered_count": len(fp.discovered_models),
+    }
+
+
+@app.get("/admin/fallback-catalog", dependencies=[Depends(_verify_admin)])
+async def admin_fallback_catalog():
+    """Return the full discovered fallback model catalog with metadata."""
+    fp = fallback_provider
+    if not fp or not fp.enabled:
+        return {"enabled": False, "catalog": [], "count": 0}
+    catalog = fp.get_catalog()
+    # Group counts per org for the dashboard badges.
+    by_org: dict[str, int] = {}
+    for entry in catalog:
+        org = entry.get("org") or ""
+        by_org[org] = by_org.get(org, 0) + 1
+    return {
+        "enabled": True,
+        "provider": fp.provider,
+        "catalog": catalog,
+        "count": len(catalog),
+        "by_org": by_org,
     }
 
 
