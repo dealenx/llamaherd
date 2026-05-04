@@ -19,6 +19,7 @@ import logging
 import secrets
 import sqlite3
 import time
+import uuid
 import queue
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -1506,6 +1507,24 @@ async def _proxy_request(request: Request, path: str) -> Response:
             req_json["stream_options"] = so
             body = json.dumps(req_json).encode()
 
+    # Fallback routing decision (priority before/only/after).
+    fp = fallback_provider
+    has_fallback = bool(fp and fp.enabled)
+    ollama_has_model = bool(registry and registry.models.get(model))
+    fp_mapped = bool(has_fallback and fp.resolve_model(model))
+    fp_can_serve = bool(has_fallback and (fp.resolve_model(model) or fp.default_model))
+    priority = fp.priority_for(model) if has_fallback else "after"
+
+    # priority=only — fallback only for mapped models; Ollama for others.
+    if has_fallback and priority == "only" and fp_mapped:
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream)
+    # priority=before — try fallback first when a mapping exists.
+    if has_fallback and priority == "before" and fp_mapped:
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream)
+    # priority=after — model unknown to Ollama but fallback can serve it.
+    if has_fallback and priority == "after" and not ollama_has_model and fp_can_serve:
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream)
+
     prefer_key = registry.get_preferred_key(model) if registry else None
 
     last_error = None
@@ -1519,6 +1538,10 @@ async def _proxy_request(request: Request, path: str) -> Response:
             await asyncio.sleep(0.5)
 
         if not key:
+            # All keys at capacity — fall back if priority allows it.
+            if has_fallback and fp_can_serve and priority in ("after", "before"):
+                log.warning(f"Ollama keys at capacity for {model}; falling back to {fp.label}")
+                return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream)
             _record_and_broadcast(client_id, "none", model, 0, 0, 0, 503)
             return JSONResponse(
                 status_code=503,
@@ -1590,6 +1613,11 @@ async def _proxy_request(request: Request, path: str) -> Response:
             last_error = str(e)
             log.error(f"Proxy error for {model} (client={client_id}): {e}")
             continue
+
+    # Ollama exhausted retries — try fallback as a last resort.
+    if has_fallback and fp_can_serve and priority in ("after", "before"):
+        log.warning(f"Ollama exhausted retries for {model}; falling back to {fp.label}")
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream)
 
     _record_and_broadcast(client_id, "none", model, 0, 0, 0, 502)
     return JSONResponse(
@@ -1931,15 +1959,52 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
 @app.get("/v1/models")
 @app.get("/v1/models/")
 async def list_models():
-    if registry:
-        return registry.get_models_response()
-    return {"object": "list", "data": []}
+    base = registry.get_models_response() if registry else {"object": "list", "data": []}
+    data = list(base.get("data") or [])
+    seen = {entry.get("id") for entry in data}
+    # Tag Ollama-Cloud-discovered entries with provider for parity with fallback rows.
+    for entry in data:
+        entry.setdefault("provider", "ollama-cloud")
+    if fallback_provider and fallback_provider.enabled:
+        for alias in fallback_provider.model_aliases():
+            if alias["id"] in seen:
+                # Model exists on both — annotate the existing row instead of duplicating.
+                for entry in data:
+                    if entry.get("id") == alias["id"]:
+                        entry["provider"] = f"ollama-cloud,{fallback_provider.provider}"
+                        entry["fallback_model"] = alias["nvidia_model"]
+                        break
+                continue
+            data.append({
+                "id": alias["id"],
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": fallback_provider.provider,
+                "provider": fallback_provider.provider,
+                "fallback_model": alias["nvidia_model"],
+            })
+            seen.add(alias["id"])
+    return {"object": "list", "data": data}
 
 
 @app.get("/v1/models/{model_id}")
 async def get_model(model_id: str):
     if registry and model_id in registry.models:
-        return registry._model_entry(model_id)
+        entry = registry._model_entry(model_id)
+        entry["provider"] = "ollama-cloud"
+        if fallback_provider and fallback_provider.enabled and fallback_provider.resolve_model(model_id):
+            entry["provider"] = f"ollama-cloud,{fallback_provider.provider}"
+            entry["fallback_model"] = fallback_provider.resolve_model(model_id)
+        return entry
+    if fallback_provider and fallback_provider.enabled and fallback_provider.resolve_model(model_id):
+        return {
+            "id": model_id,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": fallback_provider.provider,
+            "provider": fallback_provider.provider,
+            "fallback_model": fallback_provider.resolve_model(model_id),
+        }
     return JSONResponse(status_code=404, content={"error": f"model '{model_id}' not found"})
 
 
@@ -2386,30 +2451,67 @@ async def admin_totals(start_date: str = None, end_date: str = None):
 @app.get("/admin/models", dependencies=[Depends(_verify_admin)])
 async def admin_models():
     """List all discovered models with context lengths and availability."""
-    if not registry:
-        return {"models": [], "count": 0, "last_refresh": 0}
-    models_data = []
-    for model_id, keys in registry.models.items():
-        meta = registry.model_metadata.get(model_id, {})
-        param_count = meta.get("parameter_count")
-        models_data.append({
-            "id": model_id,
-            "context_length": meta.get("context_length") or MODEL_CONTEXT_LENGTHS.get(model_id),
-            "available_on": len(keys),
-            "modified_at": meta.get("modified_at"),
-            "size": meta.get("size"),
-            "digest": meta.get("digest"),
-            "capabilities": meta.get("capabilities") or [],
-            "family": meta.get("family"),
-            "parameter_count": param_count,
-            "parameter_count_display": fmt_param_count(param_count),
-            "quantization_level": meta.get("quantization_level"),
-        })
+    fp = fallback_provider
+    fp_enabled = bool(fp and fp.enabled)
+    models_data: list[dict] = []
+    seen_ids: set[str] = set()
+    if registry:
+        for model_id, keys in registry.models.items():
+            meta = registry.model_metadata.get(model_id, {})
+            param_count = meta.get("parameter_count")
+            providers = ["ollama-cloud"]
+            fb_mapped = fp.resolve_model(model_id) if fp_enabled else None
+            if fb_mapped:
+                providers.append(fp.provider)
+            models_data.append({
+                "id": model_id,
+                "context_length": meta.get("context_length") or MODEL_CONTEXT_LENGTHS.get(model_id),
+                "available_on": len(keys),
+                "modified_at": meta.get("modified_at"),
+                "size": meta.get("size"),
+                "digest": meta.get("digest"),
+                "capabilities": meta.get("capabilities") or [],
+                "family": meta.get("family"),
+                "parameter_count": param_count,
+                "parameter_count_display": fmt_param_count(param_count),
+                "quantization_level": meta.get("quantization_level"),
+                "providers": providers,
+                "fallback_model": fb_mapped,
+                "priority": fp.priority_for(model_id) if fp_enabled else None,
+            })
+            seen_ids.add(model_id)
+    if fp_enabled:
+        for alias in fp.model_aliases():
+            if alias["id"] in seen_ids:
+                continue
+            models_data.append({
+                "id": alias["id"],
+                "context_length": None,
+                "available_on": 0,
+                "modified_at": None,
+                "size": None,
+                "digest": None,
+                "capabilities": [],
+                "family": None,
+                "parameter_count": None,
+                "parameter_count_display": "",
+                "quantization_level": None,
+                "providers": [fp.provider],
+                "fallback_model": alias["nvidia_model"],
+                "priority": alias["priority"],
+            })
     models_data.sort(key=lambda m: m["id"])
     return {
         "models": models_data,
-        "count": len(registry.models),
-        "last_refresh": registry.last_refresh,
+        "count": len(models_data),
+        "last_refresh": registry.last_refresh if registry else 0,
+        "fallback": {
+            "enabled": fp_enabled,
+            "provider": fp.provider if fp_enabled else None,
+            "priority": fp.priority if fp_enabled else None,
+            "default_model": fp.default_model if fp_enabled else None,
+            "discovered_count": len(fp.discovered_models) if fp_enabled else 0,
+        },
     }
 
 
