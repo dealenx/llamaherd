@@ -1,11 +1,20 @@
 # 🦙 LlamaHerd
 
-**Herd your Ollama Cloud subscriptions.**
+**One endpoint. Many llamas. Smarter routing.**
 
-LlamaHerd is an OpenAI-compatible proxy that routes requests across multiple Ollama Cloud API keys — load balancing, usage tracking, and a live dashboard included. It pools your $20/mo subscriptions into one high-concurrency endpoint.
+LlamaHerd is an agent-first proxy for Ollama Cloud: multi-key routing, usage tracking, client API keys, rate limits, and a live dashboard. It pools your subscriptions behind one OpenAI-compatible and native Ollama-compatible endpoint.
 
+```text
+clients --> [ LlamaHerd ] --> { Sub 1 | Sub 2 | Sub N }
+              route by slots, session %, weekly %, health
 ```
-Client (Hermes/Cron/Eval) ──[client key]──▶ LlamaHerd :8399 ──[real key]──▶ ollama.com/v1
+
+```text
+    __    __                      __  __              __
+   / /   / /___ _____ ___  ____ _/ / / /__  _________/ /
+  / /   / / __ `/ __ `__ \/ __ `/ /_/ / _ \/ ___/ __  / 
+ / /___/ / /_/ / / / / / / /_/ / __  /  __/ /  / /_/ /  
+/_____/_/\__,_/_/ /_/ /_/\__,_/_/ /_/\___/_/   \__,_/   
 ```
 
 ## ✨ Features
@@ -28,7 +37,7 @@ Client (Hermes/Cron/Eval) ──[client key]──▶ LlamaHerd :8399 ──[rea
 pip install llamaherd
 
 # Or from source
-git clone https://github.com/llamaherd/llamaherd.git
+git clone https://github.com/bennybuoy/llamaherd.git
 cd llamaherd
 pip install -e .
 

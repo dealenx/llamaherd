@@ -1,7 +1,11 @@
 # Runtime / data files
 config.yaml
+*.bak
+*.bad-test-*
 usage.db
 proxy.db
+**/usage.db
+**/proxy.db
 __pycache__/
 *.pyc
 *.pyo

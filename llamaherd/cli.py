@@ -6,6 +6,16 @@ import sys
 
 import httpx
 
+from . import __tagline__, __version__
+
+BANNER = r"""
+    __    __                      __  __              __
+   / /   / /___ _____ ___  ____ _/ / / /__  _________/ /
+  / /   / / __ `/ __ `__ \/ __ `/ /_/ / _ \/ ___/ __  /
+ / /___/ / /_/ / / / / / / /_/ / __  /  __/ /  / /_/ /
+/_____/_/\__,_/_/ /_/ /_/\__,_/_/ /_/\___/_/   \__,_/
+""".strip("\n")
+
 
 def _base_url(args) -> str:
     host = getattr(args, "host", None) or "127.0.0.1"
@@ -227,13 +237,21 @@ def _models_table(data):
     print(f"\nTotal: {data.get('count', len(models))} models")
 
 
+# ---- Branding command ----
+
+def cmd_banner(args):
+    print(BANNER)
+    print(f"\n{__tagline__}")
+
+
 # ---- Build the parser ----
 
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="llamaherd",
-        description="LlamaHerd — Herd your Ollama Cloud subscriptions.",
+        description=f"LlamaHerd — {__tagline__}",
     )
+    parser.add_argument("--version", action="version", version=f"llamaherd {__version__}")
     parser.add_argument("--config", "-c", default="config.yaml", help="Config file path")
     parser.add_argument("--host", default=None, help="API host (default: 127.0.0.1)")
     parser.add_argument("--port", "-p", type=int, default=None, help="API port (default: 8399)")
@@ -302,6 +320,10 @@ def build_parser():
     # --- models ---
     models = sub.add_parser("models", help="List discovered models")
     models.set_defaults(func=cmd_models)
+
+    # --- banner ---
+    banner = sub.add_parser("banner", help="Print the LlamaHerd ASCII banner")
+    banner.set_defaults(func=cmd_banner)
 
     # --- serve (run the proxy) ---
     serve = sub.add_parser("serve", help="Start the proxy server")

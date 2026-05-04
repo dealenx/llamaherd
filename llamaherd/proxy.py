@@ -1,5 +1,5 @@
 """
-LlamaHerd — Herd your Ollama Cloud Subscriptions
+LlamaHerd — One endpoint. Many llamas. Smarter routing.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 OpenAI-compatible proxy that routes requests across multiple Ollama Cloud API keys.
 - Auto-discovers models from /v1/models on each key
@@ -2076,7 +2076,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OCP Dashboard</title>
+<title>LlamaHerd — Ollama Cloud Router</title>
 <style>
 :root {
   --bg: #0d1117; --surface: #161b22; --border: #30363d;
@@ -2088,6 +2088,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
        background: var(--bg); color: var(--text); padding: 20px; font-size: 14px; }
 h1 { font-size: 22px; margin-bottom: 4px; }
+.brandline { color: #f2d6a2; font-size: 13px; margin-bottom: 10px; }
 .subtitle { color: var(--dim); font-size: 13px; margin-bottom: 20px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 24px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
@@ -2180,7 +2181,8 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 </style>
 </head>
 <body>
-<h1>OCP Dashboard</h1>
+<h1>🦙 LlamaHerd</h1>
+<p class="brandline">One endpoint. Many llamas. Smarter routing.</p>
 <p class="subtitle">
   <span id="upstream-url"></span>
   <span class="sse-dot" id="sse-dot"></span>
@@ -2678,7 +2680,7 @@ def main():
 
     config = Config(app, host=host, port=port, log_level="info")
     server = Server(config)
-    log.info(f"Starting LlamaHerd on {host}:{port}")
+    log.info(f"Starting LlamaHerd on {host}:{port} — One endpoint. Many llamas. Smarter routing.")
     server.run()
 
 
