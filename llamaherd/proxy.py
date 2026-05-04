@@ -3045,9 +3045,16 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .inflight-row .if-target { color: var(--dim); font-size: 12px; }
 .inflight-row .if-elapsed { font-variant-numeric: tabular-nums; color: var(--yellow); text-align: right; }
 .inflight-row .if-provider { font-size: 11px; }
-.provider-badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; }
-.provider-ollama-cloud { background: #1a3a3a; color: #7fdcdc; }
-.provider-fallback { background: #3a2a1a; color: #f0a878; }
+.provider-badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px; margin-left: 6px; vertical-align: middle; }
+.provider-badge.oc { background: #173a23; color: #6fdc8c; }
+.provider-badge.nv { background: #14274d; color: #76b6ff; }
+.provider-badge.both { background: #2a2a4d; color: #c8b6ff; }
+.provider-badge.unknown { background: var(--border); color: var(--dim); }
+.fb-map-toggle { font-size: 11px; color: var(--accent); cursor: pointer; background: none; border: none; padding: 0 4px; }
+.fb-map-panel { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-top: 6px; max-height: 240px; overflow-y: auto; font-size: 12px; }
+.fb-map-panel table { width: 100%; }
+.fb-map-panel td { padding: 3px 8px; border: none; }
+.fb-map-panel td.fb-pri { color: var(--dim); font-size: 11px; }
 #inflight-empty { color: var(--dim); font-size: 12px; padding: 8px 12px; }
 </style>
 </head>
@@ -3061,11 +3068,11 @@ tr:hover td { background: rgba(88,166,255,0.04); }
   <span class="date-range">
     <label>Period:</label>
     <select id="period-select">
-      <option value="today">Today</option>
+      <option value="today" selected>Today</option>
       <option value="yesterday">Yesterday</option>
       <option value="7d">Last 7 days</option>
       <option value="this_week">This Week</option>
-      <option value="this_month" selected>This Month</option>
+      <option value="this_month">This Month</option>
       <option value="last_month">Last Month</option>
       <option value="custom">Custom</option>
     </select>
@@ -3081,8 +3088,10 @@ tr:hover td { background: rgba(88,166,255,0.04); }
   <span>Refreshed: <span class="mi-val" id="mi-refresh">-</span></span>
   <span id="mi-new" class="new-models" style="display:none"></span>
   <button id="btn-refresh-models">🔄 Refresh</button>
-  <span id="fallback-control" style="display:none; margin-left:auto; display:flex; align-items:center; gap:6px;">
+  <span id="fallback-control" style="display:none; margin-left:auto; align-items:center; gap:6px;">
     <span class="badge" id="fb-provider-badge">fallback</span>
+    <span style="font-size:11px; color:var(--dim)" id="fb-model-count">0 mapped / 0 discovered</span>
+    <button type="button" class="fb-map-toggle" id="fb-map-toggle">show map</button>
     <label style="font-size:11px; color:var(--dim)">Priority:</label>
     <select id="fb-priority" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:12px">
       <option value="after">after (Ollama first)</option>
@@ -3090,6 +3099,12 @@ tr:hover td { background: rgba(88,166,255,0.04); }
       <option value="only">only (Fallback only)</option>
     </select>
   </span>
+</div>
+<div id="fb-map-panel" class="fb-map-panel" style="display:none"></div>
+
+<div class="section" id="inflight-section">
+  <h2>In-Flight Requests <span class="badge live" id="inflight-count">0</span></h2>
+  <div id="inflight-list"><div id="inflight-empty">No requests in flight</div></div>
 </div>
 
 <div class="tab-bar">
@@ -3121,11 +3136,6 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     <div style="overflow-x:auto"><table id="daily-table"><thead><tr>
       <th>Day</th><th>Calls</th><th>Tokens In</th><th>Tokens Out</th><th>Total Tokens</th>
     </tr></thead><tbody></tbody></table></div>
-  </div>
-
-  <div class="section">
-    <h2>In-Flight Requests <span class="badge live" id="inflight-count">0</span></h2>
-    <div id="inflight-list"><div id="inflight-empty">No requests in flight</div></div>
   </div>
 
   <div class="section">
@@ -3242,9 +3252,9 @@ function connectSSE() {
   eventSource.onmessage = e => {
     try {
       const m=JSON.parse(e.data);
-      if(m.type==='call') { addCallToFeed(m.data); if(callInCurrentRange(m.data)) schedulePeriodRefresh(); }
+      if(m.type==='call') { if(callInCurrentRange(m.data)) schedulePeriodRefresh(); }
       else if(m.type==='request_start') { addInFlight(m.data); }
-      else if(m.type==='request_end') { removeInFlight(m.data); }
+      else if(m.type==='request_end') { addCallToFeed(m.data); removeInFlight(m.data); }
       else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; }
       else if(m.type==='models') updateModelInfo(m.data||{});
       else if(m.type==='fallback_priority') { const sel=document.getElementById('fb-priority'); if(m.data && m.data.priority) sel.value = m.data.priority; }
@@ -3261,8 +3271,14 @@ function fmtElapsed(ms) {
   return m + 'm' + s + 's';
 }
 function providerBadge(p) {
-  const cls = p === 'ollama-cloud' ? 'provider-ollama-cloud' : 'provider-fallback';
-  return `<span class="provider-badge ${cls}">${p || '?'}</span>`;
+  if (!p) return '<span class="provider-badge unknown" title="unknown provider">?</span>';
+  // Allow combined "ollama-cloud,nvidia-build" tagging from /admin/models or end events.
+  const parts = String(p).split(',').map(s => s.trim()).filter(Boolean);
+  const hasOC = parts.some(x => x === 'ollama-cloud');
+  const hasFB = parts.some(x => x && x !== 'ollama-cloud');
+  if (hasOC && hasFB) return `<span class="provider-badge both" title="${p}">OC+NV</span>`;
+  if (hasOC) return `<span class="provider-badge oc" title="ollama-cloud">OC</span>`;
+  return `<span class="provider-badge nv" title="${p}">NV</span>`;
 }
 function renderInFlight() {
   const list = document.getElementById('inflight-list');
@@ -3276,9 +3292,9 @@ function renderInFlight() {
     const cls = r._ending ? 'inflight-row ending-' + (r._ending === 'ok' ? 'ok' : 'err') : 'inflight-row';
     return `<div class="${cls}" id="if-${id}" data-rid="${id}">
       <div class="if-client">${r.client_id}</div>
-      <div><span class="if-model">${r.model}</span></div>
-      <div class="if-target">${r.target_key || '-'}</div>
-      <div class="if-provider">${providerBadge(r.target_provider)}</div>
+      <div><span class="if-model">${r.model}</span>${providerBadge(r.target_provider)}</div>
+      <div class="if-target" title="${r.target_key || ''}">${r.target_key || '-'}</div>
+      <div class="if-provider">${(r.target_provider || '').split(',')[0] || '-'}</div>
       <div class="if-elapsed" data-started="${r.started_at}">${fmtElapsed(elapsed)}</div>
     </div>`;
   }).join('');
@@ -3325,17 +3341,40 @@ document.getElementById('btn-refresh-models').addEventListener('click', async fu
 setInterval(()=>{ if(modelState.last_refresh) document.getElementById('mi-refresh').textContent=relTime(modelState.last_refresh); },30000);
 
 // --- Fallback Priority Control ---
+let fbState = null;
 async function loadFallbackStatus() {
   try {
     const fb = await loadJSON('/admin/fallback');
     const ctl = document.getElementById('fallback-control');
-    if (!fb || !fb.enabled) { ctl.style.display = 'none'; return; }
-    ctl.style.display = 'flex';
+    const panel = document.getElementById('fb-map-panel');
+    if (!fb || !fb.enabled) { ctl.style.display = 'none'; panel.style.display = 'none'; return; }
+    fbState = fb;
+    ctl.style.display = 'inline-flex';
     document.getElementById('fb-provider-badge').textContent = fb.provider;
+    const mapped = (fb.model_map || []).length;
+    const discovered = fb.discovered_count || 0;
+    document.getElementById('fb-model-count').textContent = `${mapped} mapped / ${discovered} discovered`;
     const sel = document.getElementById('fb-priority');
     sel.value = fb.priority;
+    renderFallbackMap();
   } catch (e) { /* fallback not configured */ }
 }
+function renderFallbackMap() {
+  if (!fbState) return;
+  const panel = document.getElementById('fb-map-panel');
+  const rows = (fbState.model_map || []).map(a =>
+    `<tr><td><span class="if-model">${a.id}</span></td><td>→</td><td>${a.nvidia_model || a.fallback_model || '-'}</td><td class="fb-pri">${a.priority || ''}</td></tr>`
+  ).join('');
+  panel.innerHTML = rows
+    ? `<table>${rows}</table>`
+    : '<div style="color:var(--dim)">No model_map entries configured.</div>';
+}
+document.getElementById('fb-map-toggle').addEventListener('click', function() {
+  const panel = document.getElementById('fb-map-panel');
+  const showing = panel.style.display !== 'none';
+  panel.style.display = showing ? 'none' : 'block';
+  this.textContent = showing ? 'show map' : 'hide map';
+});
 document.getElementById('fb-priority').addEventListener('change', async function(){
   const requested = this.value;
   try {
@@ -3366,7 +3405,7 @@ function renderKeyStatus(keys) {
 
 // --- Call Feed ---
 function addCallToFeed(c) { const cf=document.getElementById('filter-client').value,mf=document.getElementById('filter-model').value; let ok=true; if(cf&&c.client_id!==cf)ok=false; if(mf&&c.model!==mf)ok=false; if(ok){feedCalls.unshift(c); const lim=parseInt(document.getElementById('feed-limit').value); if(feedCalls.length>lim)feedCalls.length=lim; renderFeed(feedCalls);} }
-function renderFeed(calls) { document.getElementById('feed-count').textContent=calls.length; document.querySelector('#feed-tbl tbody').innerHTML=calls.map(c=>{const sc=c.status===200?'status-ok':c.status>=400?'status-err':'status-warn'; return `<tr><td>${fmtTs(c.ts)}</td><td>${c.client_id}</td><td>${c.model}</td><td>${(c.upstream_key||'').slice(0,8)}</td><td>${fmt(c.tokens_in)}</td><td>${fmt(c.tokens_out)}</td><td>${c.latency_ms}ms</td><td class="${sc}">${c.status}</td></tr>`;}).join(''); }
+function renderFeed(calls) { document.getElementById('feed-count').textContent=calls.length; document.querySelector('#feed-tbl tbody').innerHTML=calls.map(c=>{const sc=c.status===200?'status-ok':c.status>=400?'status-err':'status-warn'; const pb=c.provider?providerBadge(c.provider):''; return `<tr><td>${fmtTs(c.ts)}</td><td>${c.client_id}</td><td>${c.model}${pb}</td><td>${(c.upstream_key||'').slice(0,8)}</td><td>${fmt(c.tokens_in)}</td><td>${fmt(c.tokens_out)}</td><td>${c.latency_ms}ms</td><td class="${sc}">${c.status}</td></tr>`;}).join(''); }
 let prevClients=[],prevModels=[];
 function populateFilters(clients,models) { const sc=document.getElementById('filter-client'),sm=document.getElementById('filter-model'); const cc=sc.value,cm=sm.value; const cl=(clients||[]).map(c=>c.id||c),ml=(models||[]).map(m=>m.model||m); if(JSON.stringify(cl)!==JSON.stringify(prevClients)){sc.innerHTML='<option value="">All</option>'+cl.map(c=>`<option value="${c}">${c}</option>`).join('');sc.value=cc;prevClients=cl;} if(JSON.stringify(ml)!==JSON.stringify(prevModels)){sm.innerHTML='<option value="">All</option>'+ml.map(m=>`<option value="${m}">${m}</option>`).join('');sm.value=cm;prevModels=ml;} }
 
@@ -3398,7 +3437,8 @@ function renderModelsGrid() {
     const updated = m.modified_at ? `updated ${m.modified_at.slice(0,10)}` : '';
     const metaBits = [ctxStr, keyStr, m.family||'', params, updated].filter(Boolean).join(' · ');
     const usageLine = u ? `<div class="mc-usage">${fmt(u.requests)} calls · ${fmt(u.tokens_total)} tokens · ${Math.round(u.avg_latency_ms||0)}ms</div>` : '<div class="mc-usage" style="color:var(--dim)">No usage (7d)</div>';
-    return `<div class="model-chip"><div class="mc-name">${m.id}</div><div class="mc-meta">${metaBits}</div><div class="mc-meta">${caps}</div>${usageLine}</div>`;
+    const provBadge = providerBadge((m.providers||[]).join(','));
+    return `<div class="model-chip"><div class="mc-name">${m.id}${provBadge}</div><div class="mc-meta">${metaBits}</div><div class="mc-meta">${caps}</div>${usageLine}</div>`;
   }).join('');
 }
 document.getElementById('model-search').addEventListener('input', renderModelsGrid);
