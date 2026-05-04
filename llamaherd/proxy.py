@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, date, timedelta
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 import yaml
@@ -2250,6 +2250,107 @@ def _should_bridge_to_native(model: str) -> bool:
     return False
 
 
+def _parse_openai_tool_args(args: Any) -> Any:
+    """Convert OpenAI tool call arguments to Ollama native shape.
+
+    OpenAI stores function.arguments as a JSON string. Ollama native /api/chat
+    expects the arguments value to be a JSON object. Passing the string through
+    causes Ollama Cloud's parser to reject the body with:
+      Value looks like object, but can't find closing '}' symbol
+    """
+    if isinstance(args, str):
+        try:
+            return json.loads(args) if args.strip() else {}
+        except json.JSONDecodeError:
+            # Keep non-JSON strings as-is; better to preserve data than invent.
+            return args
+    return args
+
+
+def _openai_tool_calls_to_ollama(tool_calls: Any) -> list[dict]:
+    """Convert OpenAI assistant tool_calls to Ollama native tool_calls."""
+    out: list[dict] = []
+    if not isinstance(tool_calls, list):
+        return out
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") or {}
+        if not isinstance(fn, dict):
+            continue
+        native = {
+            "function": {
+                "name": fn.get("name", ""),
+                "arguments": _parse_openai_tool_args(fn.get("arguments", {})),
+            }
+        }
+        out.append(native)
+    return out
+
+
+def _convert_openai_messages_to_ollama(messages: Any) -> list[dict]:
+    """Convert OpenAI chat messages to Ollama native /api/chat messages."""
+    if not isinstance(messages, list):
+        return []
+
+    # Map OpenAI tool_call IDs to names so following role=tool messages can use
+    # Ollama's native tool_name field instead of OpenAI's tool_call_id.
+    tool_id_to_name: dict[str, str] = {}
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        for call in msg.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            call_id = call.get("id")
+            fn = call.get("function") or {}
+            name = fn.get("name") if isinstance(fn, dict) else None
+            if call_id and name:
+                tool_id_to_name[str(call_id)] = str(name)
+
+    converted: list[dict] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        out: dict = {}
+        if role:
+            out["role"] = role
+
+        # Ollama expects content to be a string. OpenAI sometimes uses null for
+        # assistant tool-call messages; normalize that to an empty string.
+        if "content" in msg:
+            out["content"] = "" if msg.get("content") is None else msg.get("content")
+
+        if "images" in msg:
+            out["images"] = msg["images"]
+        if "name" in msg:
+            out["name"] = msg["name"]
+
+        if "tool_calls" in msg:
+            native_calls = _openai_tool_calls_to_ollama(msg["tool_calls"])
+            if native_calls:
+                out["tool_calls"] = native_calls
+
+        # OpenAI uses tool_call_id on tool-result messages. Ollama native uses
+        # tool_name. Translate when possible, otherwise omit the unsupported ID.
+        if "tool_name" in msg:
+            out["tool_name"] = msg["tool_name"]
+        elif "tool_call_id" in msg:
+            name = tool_id_to_name.get(str(msg["tool_call_id"]))
+            if name:
+                out["tool_name"] = name
+
+        # OpenAI/Ollama Cloud call this reasoning; Ollama native calls it thinking.
+        if "thinking" in msg:
+            out["thinking"] = msg["thinking"]
+        elif "reasoning" in msg:
+            out["thinking"] = msg["reasoning"]
+
+        converted.append(out)
+    return converted
+
+
 def _convert_openai_to_ollama_body(req_json: dict) -> bytes:
     """Convert an OpenAI /v1/chat/completions request body to Ollama /api/chat format.
 
@@ -2259,24 +2360,27 @@ def _convert_openai_to_ollama_body(req_json: dict) -> bytes:
     """
     ollama: dict = {"model": req_json.get("model", "")}
     if "messages" in req_json:
-        # Convert OpenAI-style messages to Ollama native format.
-        # Key difference: Ollama uses 'thinking' for chain-of-thought, but
-        # Ollama Cloud's /v1 endpoint (and OpenAI) return it as 'reasoning'.
-        # When replaying history via the native bridge, rename reasoning→thinking
-        # so Ollama accepts it and the model can see its prior reasoning.
-        # Also drop any other unknown fields that Ollama's parser would reject.
-        _allowed = {"role", "content", "images", "tool_calls", "tool_call_id", "name", "thinking"}
-        def _to_ollama_msg(msg: dict) -> dict:
-            out = {k: v for k, v in msg.items() if k in _allowed}
-            # Rename OpenAI 'reasoning' → Ollama 'thinking'
-            if "reasoning" in msg and "thinking" not in out:
-                out["thinking"] = msg["reasoning"]
-            return out
-        ollama["messages"] = [_to_ollama_msg(m) for m in req_json["messages"]]
+        ollama["messages"] = _convert_openai_messages_to_ollama(req_json["messages"])
     if "stream" in req_json:
         ollama["stream"] = req_json["stream"]
     if "tools" in req_json:
         ollama["tools"] = req_json["tools"]
+
+    # OpenAI-compatible reasoning controls → Ollama native thinking controls.
+    # Ollama native accepts: think=true/false/"low"/"medium"/"high".
+    if "think" in req_json:
+        ollama["think"] = req_json["think"]
+    elif "reasoning_effort" in req_json:
+        effort = req_json.get("reasoning_effort")
+        ollama["think"] = False if effort in (None, "none", "off", "false") else effort
+    elif "reasoning" in req_json:
+        reasoning = req_json.get("reasoning")
+        if isinstance(reasoning, dict):
+            effort = reasoning.get("effort") or reasoning.get("level")
+            if effort:
+                ollama["think"] = False if effort in ("none", "off", "false") else effort
+        elif isinstance(reasoning, (bool, str)):
+            ollama["think"] = reasoning
 
     # Pack OpenAI kwargs into Ollama options dict
     options: dict = {}
@@ -2370,6 +2474,11 @@ def _ollama_chunk_to_sse(ollama_chunk: dict, chunk_id: str, model: str) -> str |
         # Content chunk
         content = message.get("content", "")
         delta: dict = {}
+        # Reasoning/thinking chunk. Ollama native emits message.thinking;
+        # OpenAI-compatible clients expect reasoning on the delta.
+        thinking = message.get("thinking", "")
+        if thinking:
+            delta["reasoning"] = thinking
         if content:
             delta["content"] = content
         # Tool calls chunk
