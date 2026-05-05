@@ -3668,6 +3668,7 @@ tr:hover td { background: rgba(88,166,255,0.04); }
   <div class="tab active" data-tab="overview">Overview</div>
   <div class="tab" data-tab="models">Models</div>
   <div class="tab" data-tab="subs">Subscriptions</div>
+  <div class="tab" data-tab="quota">Quota Cost</div>
 </div>
 
 <div class="tab-panel active" id="panel-overview">
@@ -3754,6 +3755,19 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     <span style="font-size:11px;color:var(--dim)">Client keys attribute usage and enforce rate limits</span>
   </div>
   <div id="client-list"></div>
+</div>
+
+<div class="tab-panel" id="panel-quota">
+  <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+    <h2 style="margin:0">Per-Model Quota Cost</h2>
+    <span class="badge" id="quota-badge">0</span>
+    <button class="btn btn-sm" id="quota-refresh">🔄 Refresh</button>
+    <span style="font-size:11px;color:var(--dim)">Inferred from session usage % changes between calls. Higher cost = more expensive per token.</span>
+  </div>
+  <div style="overflow-x:auto"><table id="quota-table"><thead><tr>
+    <th>Model</th><th>Calls</th><th>Session % Consumed</th><th>Tokens In</th><th>Tokens Out</th><th>Quota % / 1K tokens</th><th>Quota % / 1K input</th><th>Quota % / 1K output</th>
+  </tr></thead><tbody></tbody></table></div>
+  <div id="quota-note" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
 </div>
 
 <div id="modal-root"></div>
@@ -4495,6 +4509,43 @@ fetchPeriodData();
 loadFallbackStatus();
 loadInFlightInitial();
 connectSSE();
+
+// --- Quota Cost ---
+async function loadQuotaCost() {
+  try {
+    const data = await loadJSON('/admin/quota-cost');
+    const tbody = document.querySelector('#quota-table tbody');
+    const badge = document.getElementById('quota-badge');
+    const note = document.getElementById('quota-note');
+    if (!data.models || data.models.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" style="color:var(--dim);text-align:center;padding:2em">' +
+        (data.note || 'No quota cost data yet. Data appears as session usage % changes between scrapes.') + '</td></tr>';
+      badge.textContent = '0';
+      note.textContent = data.note || '';
+      return;
+    }
+    badge.textContent = data.models.length;
+    note.textContent = data.note || '';
+    tbody.innerHTML = data.models.map(m => {
+      const costColor = m.quota_pct_per_1k_tokens > 0.01 ? 'var(--red)' : m.quota_pct_per_1k_tokens > 0.005 ? 'var(--yellow)' : 'var(--green)';
+      return '<tr>' +
+        '<td style="font-family:monospace">' + escHtml(m.model) + '</td>' +
+        '<td>' + m.calls + '</td>' +
+        '<td>' + m.total_session_pct_consumed.toFixed(3) + '%</td>' +
+        '<td>' + fmt(m.tokens_in) + '</td>' +
+        '<td>' + fmt(m.tokens_out) + '</td>' +
+        '<td style="color:' + costColor + ';font-weight:600">' + m.quota_pct_per_1k_tokens.toFixed(6) + '</td>' +
+        '<td>' + m.quota_pct_per_1k_input.toFixed(6) + '</td>' +
+        '<td>' + m.quota_pct_per_1k_output.toFixed(6) + '</td>' +
+        '</tr>';
+    }).join('');
+  } catch (e) { /* ignore */ }
+}
+document.getElementById('quota-refresh').addEventListener('click', loadQuotaCost);
+// Load quota data when tab is clicked
+document.querySelectorAll('.tab').forEach(t => {
+  if (t.dataset.tab === 'quota') t.addEventListener('click', loadQuotaCost);
+});
 </script>
 </body>
 </html>"""
