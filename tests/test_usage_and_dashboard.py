@@ -9,12 +9,12 @@ from llamaherd import proxy
 def test_recent_calls_filters_by_client_and_model(tmp_path):
     db = proxy.UsageDB(str(tmp_path / "usage.db"))
     rows = [
-        (1000.0, "2026-05-04", "hermes", "key-a", "glm-5.1", 10, 5, 100, 200),
-        (1001.0, "2026-05-04", "openclaw", "key-a", "glm-5.1", 20, 6, 120, 200),
-        (1002.0, "2026-05-04", "hermes", "key-b", "gemma3:4b", 30, 7, 130, 200),
-        (1003.0, "2026-05-03", "hermes", "key-b", "glm-5.1", 40, 8, 140, 200),
+        (1000.0, "2026-05-04", "hermes", "key-a", "glm-5.1", 10, 5, 100, 200, 1.2, 5.0),
+        (1001.0, "2026-05-04", "openclaw", "key-a", "glm-5.1", 20, 6, 120, 200, 1.3, 5.1),
+        (1002.0, "2026-05-04", "hermes", "key-b", "gemma3:4b", 30, 7, 130, 200, -1.0, -1.0),
+        (1003.0, "2026-05-03", "hermes", "key-b", "glm-5.1", 40, 8, 140, 200, 0.8, 4.5),
     ]
-    db._conn.executemany("INSERT INTO usage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    db._conn.executemany("INSERT INTO usage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     db._conn.commit()
 
     hermes_glm = db.recent_calls(

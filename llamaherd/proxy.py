@@ -461,6 +461,13 @@ class KeyManager:
             "weekly_elapsed_pct": k._weekly_elapsed_pct(),
         } for k in self.keys]
 
+    def key_by_token_prefix(self, prefix: str) -> Optional[KeyState]:
+        """Look up a key by its token prefix (first 8 chars)."""
+        for k in self.keys:
+            if k.token[:8] == prefix[:8]:
+                return k
+        return None
+
 # ---------------------------------------------------------------------------
 # Usage Scraper (cookie-based ollama.com/settings)
 # ---------------------------------------------------------------------------
@@ -1126,9 +1133,17 @@ class UsageDB:
                 tokens_in INTEGER NOT NULL,
                 tokens_out INTEGER NOT NULL,
                 latency_ms INTEGER NOT NULL,
-                status INTEGER NOT NULL
+                status INTEGER NOT NULL,
+                session_usage_pct REAL DEFAULT -1.0,
+                weekly_usage_pct REAL DEFAULT -1.0
             )
-        """)
+            """)
+        # Backward-compatible migration for existing DBs
+        for col, default in [("session_usage_pct", -1.0), ("weekly_usage_pct", -1.0)]:
+            try:
+                self._conn.execute(f"ALTER TABLE usage ADD COLUMN {col} REAL DEFAULT {default}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         for idx_cols in [
             "client_id, day",
             "model, day",
@@ -1143,12 +1158,14 @@ class UsageDB:
         self._conn.commit()
 
     def record(self, client_id: str, upstream_key: str, model: str,
-               tokens_in: int, tokens_out: int, latency_ms: int, status: int):
+               tokens_in: int, tokens_out: int, latency_ms: int, status: int,
+               session_usage_pct: float = -1.0, weekly_usage_pct: float = -1.0):
         today = datetime.now(timezone.utc).date().isoformat()
         self._conn.execute(
-            "INSERT INTO usage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO usage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (time.time(), today, client_id, upstream_key, model,
-             tokens_in, tokens_out, latency_ms, status),
+             tokens_in, tokens_out, latency_ms, status,
+             session_usage_pct, weekly_usage_pct),
         )
         self._conn.commit()
 
@@ -1546,7 +1563,16 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
                            *, request_id: Optional[str] = None,
                            provider: Optional[str] = None):
     """Record usage to DB and broadcast call + request_end events to SSE subscribers."""
-    usage_db.record(client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status)
+    # Look up the key's cached usage percentages for quota cost tracking
+    s_pct = -1.0
+    w_pct = -1.0
+    if manager:
+        key = manager.key_by_token_prefix(upstream_key)
+        if key:
+            s_pct = key.session_usage_pct if key.session_usage_pct >= 0 else -1.0
+            w_pct = key.weekly_usage_pct if key.weekly_usage_pct >= 0 else -1.0
+    usage_db.record(client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status,
+                    session_usage_pct=s_pct, weekly_usage_pct=w_pct)
     call_data = {
         "ts": time.time(),
         "client_id": client_id,
@@ -4474,6 +4500,72 @@ connectSSE();
 </html>"""
 
 
+@app.get("/admin/quota-cost", dependencies=[Depends(_verify_admin)])
+async def admin_quota_cost():
+    """Compute inferred quota cost per model from session_usage_pct changes.
+    
+    For consecutive calls on the same key where session_usage_pct changed,
+    computes the cost in quota-% per 1K tokens, split by input and output.
+    """
+    if not usage_db or not usage_db._conn:
+        return {"models": [], "note": "No usage DB configured"}
+    
+    # Get all calls with session_usage_pct recorded (not -1)
+    rows = usage_db._conn.execute("""
+        SELECT upstream_key, model, tokens_in, tokens_out, session_usage_pct, ts
+        FROM usage 
+        WHERE session_usage_pct >= 0 AND status > 0
+        ORDER BY upstream_key, ts ASC
+    """).fetchall()
+    
+    if not rows:
+        return {"models": [], "note": "No usage data with quota snapshots yet. Data accumulates as the periodic usage scraper runs."}
+    
+    # Group consecutive calls by key, compute deltas
+    # For each pair of consecutive calls on same key where session_usage_pct changed,
+    # attribute the delta proportionally to tokens_in and tokens_out
+    model_costs: dict[str, dict] = {}  # model -> {calls, delta_pct, tokens_in, tokens_out}
+    
+    prev_by_key: dict[str, dict] = {}  # key -> {pct, ts, tokens_in, tokens_out}
+    
+    for row in rows:
+        key_prefix, model, t_in, t_out, s_pct, ts = row
+        
+        prev = prev_by_key.get(key_prefix)
+        if prev and s_pct > prev["pct"]:
+            delta_pct = s_pct - prev["pct"]
+            total_tok = t_in + t_out
+            if total_tok > 0 and delta_pct > 0:
+                if model not in model_costs:
+                    model_costs[model] = {"calls": 0, "delta_pct": 0.0, "tokens_in": 0, "tokens_out": 0}
+                mc = model_costs[model]
+                mc["calls"] += 1
+                mc["delta_pct"] += delta_pct
+                mc["tokens_in"] += t_in
+                mc["tokens_out"] += t_out
+        
+        prev_by_key[key_prefix] = {"pct": s_pct, "ts": ts, "tokens_in": t_in, "tokens_out": t_out}
+    
+    # Compute per-model cost metrics
+    result = []
+    for model, mc in sorted(model_costs.items(), key=lambda x: -x[1]["delta_pct"]):
+        total_tok = mc["tokens_in"] + mc["tokens_out"]
+        cost_per_1k = (mc["delta_pct"] / total_tok * 1000) if total_tok > 0 else 0
+        cost_in_per_1k = (mc["delta_pct"] / mc["tokens_in"] * 1000) if mc["tokens_in"] > 0 else 0
+        cost_out_per_1k = (mc["delta_pct"] / mc["tokens_out"] * 1000) if mc["tokens_out"] > 0 else 0
+        result.append({
+            "model": model,
+            "calls": mc["calls"],
+            "total_session_pct_consumed": round(mc["delta_pct"], 3),
+            "tokens_in": mc["tokens_in"],
+            "tokens_out": mc["tokens_out"],
+            "tokens_total": total_tok,
+            "quota_pct_per_1k_tokens": round(cost_per_1k, 6),
+            "quota_pct_per_1k_input": round(cost_in_per_1k, 6),
+            "quota_pct_per_1k_output": round(cost_out_per_1k, 6),
+        })
+    
+    return {"models": result, "note": "Quota cost inferred from session_usage_pct deltas. Higher cost_per_1k = more expensive model."}
 
 
 @app.get("/dashboard", dependencies=[Depends(_verify_admin)])
