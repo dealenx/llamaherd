@@ -3576,8 +3576,8 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .catalog-org.open .co-caret { transform: rotate(90deg); }
 .catalog-org-body { display: none; padding: 0 8px 8px; }
 .catalog-org.open .catalog-org-body { display: block; }
-.catalog-row { display: grid; grid-template-columns: minmax(220px,2fr) 80px 80px minmax(160px,1.5fr) 110px;
-  gap: 10px; align-items: center; padding: 6px 8px; border-top: 1px solid var(--border); font-size: 12px; }
+.catalog-row { display: grid; grid-template-columns: 2fr 70px 80px 1.5fr 100px;
+  gap: 8px; align-items: center; padding: 6px 8px; border-top: 1px solid var(--border); font-size: 12px; overflow: hidden; }
 .catalog-row:first-child { border-top: none; }
 .catalog-row .cr-name { font-family: monospace; word-break: break-all; }
 .catalog-row .cr-name a { color: var(--text); text-decoration: none; }
