@@ -3514,17 +3514,32 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 }
 @keyframes flash-green { 0% { background: rgba(63,185,80,0.35); } 100% { background: transparent; } }
 @keyframes flash-red   { 0% { background: rgba(248,81,73,0.35); } 100% { background: transparent; } }
-.inflight-row { display: grid; grid-template-columns: minmax(160px,1fr) minmax(220px,2fr) 110px 90px 90px;
-  gap: 10px; align-items: center; padding: 8px 12px; border: 1px solid var(--border);
-  border-radius: 6px; margin-bottom: 6px; background: var(--surface);
-  animation: inflight-pulse 1.6s ease-out infinite; font-size: 13px; }
-.inflight-row.ending-ok  { animation: flash-green 0.4s ease-out forwards; }
-.inflight-row.ending-err { animation: flash-red 0.4s ease-out forwards; }
+.inflight-item { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px;
+  background: var(--surface); animation: inflight-pulse 1.6s ease-out infinite; overflow: hidden; }
+.inflight-item.ending-ok  { animation: flash-green 0.4s ease-out forwards; }
+.inflight-item.ending-err { animation: flash-red 0.4s ease-out forwards; }
+.inflight-row { display: grid;
+  grid-template-columns: minmax(140px,1fr) minmax(200px,2fr) 110px 110px 90px 18px;
+  gap: 10px; align-items: center; padding: 8px 12px; font-size: 13px; cursor: pointer;
+  user-select: none; }
 .inflight-row .if-client { color: var(--text); }
 .inflight-row .if-model  { color: var(--accent); font-family: monospace; }
-.inflight-row .if-target { color: var(--dim); font-size: 12px; }
+.inflight-row .if-target { color: var(--dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.inflight-row .if-tokens { color: var(--purple); font-size: 12px; font-variant-numeric: tabular-nums; }
+.inflight-row .if-tokens .if-tin  { color: var(--green); }
+.inflight-row .if-tokens .if-tout { color: var(--purple); }
 .inflight-row .if-elapsed { font-variant-numeric: tabular-nums; color: var(--yellow); text-align: right; }
-.inflight-row .if-provider { font-size: 11px; }
+.inflight-row .if-caret { color: var(--dim); transition: transform .2s ease; text-align: center; font-size: 10px; }
+.inflight-item.expanded .if-caret { transform: rotate(90deg); }
+.inflight-details { max-height: 0; overflow: hidden; transition: max-height 0.25s ease-out;
+  padding: 0 12px; border-top: 0 solid var(--border); font-size: 12px; }
+.inflight-item.expanded .inflight-details { max-height: 380px; padding: 8px 12px; border-top: 1px solid var(--border); overflow-y: auto; }
+.inflight-details .ifd-row { display: grid; grid-template-columns: 130px 1fr; gap: 8px; padding: 2px 0; }
+.inflight-details .ifd-row .ifd-k { color: var(--dim); }
+.inflight-details .ifd-row .ifd-v { color: var(--text); font-family: monospace; word-break: break-all; }
+.inflight-details .ifd-headers { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--border); }
+.inflight-details .ifd-headers .ifd-k { font-size: 11px; }
+.inflight-details .ifd-headers .ifd-v { font-size: 11px; color: var(--dim); }
 .provider-badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px; margin-left: 6px; vertical-align: middle; }
 .provider-badge.oc { background: #173a23; color: #6fdc8c; }
 .provider-badge.nv { background: #14274d; color: #76b6ff; }
@@ -3535,7 +3550,43 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .fb-map-panel table { width: 100%; }
 .fb-map-panel td { padding: 3px 8px; border: none; }
 .fb-map-panel td.fb-pri { color: var(--dim); font-size: 11px; }
+.fb-map-panel td.fb-actions { width: 28px; text-align: right; }
+.fb-map-panel button.fb-rm { background: transparent; color: var(--red); border: none; cursor: pointer; font-size: 14px; padding: 0 6px; }
+.fb-map-panel button.fb-rm:hover { background: rgba(248,81,73,0.15); border-radius: 3px; }
+.fb-map-panel .fb-add-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed var(--border); flex-wrap: wrap; }
+.fb-map-panel .fb-add-row input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; font-size: 12px; font-family: monospace; min-width: 140px; flex: 1; }
 #inflight-empty { color: var(--dim); font-size: 12px; padding: 8px 12px; }
+/* Model Catalog */
+.catalog-section { margin-top: 24px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.catalog-header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; user-select: none; flex-wrap: wrap; }
+.catalog-header:hover { background: rgba(88,166,255,0.05); }
+.catalog-header .ch-title { font-weight: 600; font-size: 14px; flex: 1; }
+.catalog-header .ch-caret { color: var(--dim); font-size: 11px; transition: transform .2s ease; }
+.catalog-section.open .ch-caret { transform: rotate(90deg); }
+.catalog-body { display: none; padding: 0 14px 14px; }
+.catalog-section.open .catalog-body { display: block; }
+.catalog-controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.catalog-controls .search-input { flex: 1; min-width: 220px; }
+.catalog-org { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.catalog-org-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; user-select: none; font-size: 12px; }
+.catalog-org-header:hover { background: rgba(88,166,255,0.04); }
+.catalog-org-header .co-name { font-weight: 600; color: var(--accent); }
+.catalog-org-header .co-count { color: var(--dim); font-size: 11px; }
+.catalog-org-header .co-caret { color: var(--dim); font-size: 10px; transition: transform .2s ease; margin-left: auto; }
+.catalog-org.open .co-caret { transform: rotate(90deg); }
+.catalog-org-body { display: none; padding: 0 8px 8px; }
+.catalog-org.open .catalog-org-body { display: block; }
+.catalog-row { display: grid; grid-template-columns: minmax(220px,2fr) 80px 80px minmax(160px,1.5fr) 110px;
+  gap: 10px; align-items: center; padding: 6px 8px; border-top: 1px solid var(--border); font-size: 12px; }
+.catalog-row:first-child { border-top: none; }
+.catalog-row .cr-name { font-family: monospace; word-break: break-all; }
+.catalog-row .cr-name a { color: var(--text); text-decoration: none; }
+.catalog-row .cr-name a:hover { color: var(--accent); text-decoration: underline; }
+.catalog-row .cr-meta { color: var(--dim); font-variant-numeric: tabular-nums; }
+.catalog-row .cr-mapped { color: var(--green); font-size: 11px; }
+.catalog-row .cr-mapped .cr-alias { color: var(--text); font-family: monospace; }
+.catalog-row .cr-action { text-align: right; }
+.catalog-empty { color: var(--dim); font-size: 12px; padding: 8px 0; }
 </style>
 </head>
 <body>
@@ -3646,6 +3697,23 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     </select>
   </div>
   <div class="models-grid" id="models-grid"></div>
+
+  <div class="catalog-section" id="catalog-section">
+    <div class="catalog-header" id="catalog-header">
+      <span class="ch-caret">▶</span>
+      <span class="ch-title">NVIDIA Build Catalog</span>
+      <span class="badge" id="catalog-count">0</span>
+      <span style="font-size:11px; color:var(--dim)" id="catalog-summary"></span>
+    </div>
+    <div class="catalog-body">
+      <div class="catalog-controls">
+        <input type="text" class="search-input" id="catalog-search" placeholder="Filter by name or org...">
+        <button class="btn btn-sm" id="catalog-refresh">🔄 Refresh</button>
+        <button class="btn btn-sm" id="catalog-add-mapping">+ Add Mapping</button>
+      </div>
+      <div id="catalog-list"><div class="catalog-empty">Open this panel to load the catalog.</div></div>
+    </div>
+  </div>
 </div>
 
 <div class="tab-panel" id="panel-subs">
@@ -3738,6 +3806,7 @@ function connectSSE() {
       else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; }
       else if(m.type==='models') updateModelInfo(m.data||{});
       else if(m.type==='fallback_priority') { const sel=document.getElementById('fb-priority'); if(m.data && m.data.priority) sel.value = m.data.priority; }
+      else if(m.type==='fallback_map_update') { loadFallbackStatus(); if (catalogLoaded) loadCatalog(true); }
     } catch(err){}
   };
 }
@@ -3760,6 +3829,26 @@ function providerBadge(p) {
   if (hasOC) return `<span class="provider-badge oc" title="ollama-cloud">OC</span>`;
   return `<span class="provider-badge nv" title="${p}">NV</span>`;
 }
+const expandedInFlight = new Set();  // request_ids that are currently expanded
+function escAttr(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+function escHtml(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function renderInFlightDetails(r) {
+  const startedIso = r.started_at ? new Date(r.started_at * 1000).toISOString() : '-';
+  const headers = r.headers || {};
+  const headerRows = Object.keys(headers).sort().map(k =>
+    `<div class="ifd-row"><span class="ifd-k">${escHtml(k)}</span><span class="ifd-v">${escHtml(headers[k])}</span></div>`
+  ).join('');
+  return `<div class="inflight-details">
+    <div class="ifd-row"><span class="ifd-k">request_id</span><span class="ifd-v">${escHtml(r.request_id)}</span></div>
+    <div class="ifd-row"><span class="ifd-k">target key</span><span class="ifd-v">${escHtml(r.target_key || '-')}</span></div>
+    <div class="ifd-row"><span class="ifd-k">provider</span><span class="ifd-v">${escHtml(r.target_provider || '-')}</span></div>
+    <div class="ifd-row"><span class="ifd-k">model</span><span class="ifd-v">${escHtml(r.model || '-')}</span></div>
+    <div class="ifd-row"><span class="ifd-k">client</span><span class="ifd-v">${escHtml(r.client_id || '-')}</span></div>
+    <div class="ifd-row"><span class="ifd-k">started_at</span><span class="ifd-v">${escHtml(startedIso)}</span></div>
+    ${r.path ? `<div class="ifd-row"><span class="ifd-k">path</span><span class="ifd-v">${escHtml(r.path)}</span></div>` : ''}
+    ${headerRows ? `<div class="ifd-headers">${headerRows}</div>` : '<div class="ifd-row"><span class="ifd-k">headers</span><span class="ifd-v" style="color:var(--dim)">(none captured)</span></div>'}
+  </div>`;
+}
 function renderInFlight() {
   const list = document.getElementById('inflight-list');
   const ids = Object.keys(inFlight);
@@ -3769,15 +3858,26 @@ function renderInFlight() {
   list.innerHTML = ids.map(id => {
     const r = inFlight[id];
     const elapsed = Math.max(0, Math.round((now - r.started_at) * 1000));
-    const cls = r._ending ? 'inflight-row ending-' + (r._ending === 'ok' ? 'ok' : 'err') : 'inflight-row';
-    return `<div class="${cls}" id="if-${id}" data-rid="${id}">
-      <div class="if-client">${r.client_id}</div>
-      <div><span class="if-model">${r.model}</span>${providerBadge(r.target_provider)}</div>
-      <div class="if-target" title="${r.target_key || ''}">${r.target_key || '-'}</div>
-      <div class="if-provider">${(r.target_provider || '').split(',')[0] || '-'}</div>
-      <div class="if-elapsed" data-started="${r.started_at}">${fmtElapsed(elapsed)}</div>
+    const expanded = expandedInFlight.has(id) ? ' expanded' : '';
+    const ending = r._ending ? ' ending-' + (r._ending === 'ok' ? 'ok' : 'err') : '';
+    const tin = r.tokens_in || 0, tout = r.tokens_out || 0;
+    return `<div class="inflight-item${expanded}${ending}" id="if-${escAttr(id)}" data-rid="${escAttr(id)}">
+      <div class="inflight-row" onclick="toggleInFlight('${escAttr(id)}')">
+        <div class="if-client">${escHtml(r.client_id)}</div>
+        <div><span class="if-model">${escHtml(r.model)}</span>${providerBadge(r.target_provider)}</div>
+        <div class="if-target" title="${escAttr(r.target_key || '')}">${escHtml(r.target_key || '-')}</div>
+        <div class="if-tokens"><span class="if-tin" data-tin>${fmt(tin)}</span> in / <span class="if-tout" data-tout>${fmt(tout)}</span> out</div>
+        <div class="if-elapsed" data-started="${r.started_at}">${fmtElapsed(elapsed)}</div>
+        <div class="if-caret">▶</div>
+      </div>
+      ${renderInFlightDetails(r)}
     </div>`;
   }).join('');
+}
+function toggleInFlight(id) {
+  if (expandedInFlight.has(id)) expandedInFlight.delete(id); else expandedInFlight.add(id);
+  const item = document.getElementById('if-' + id);
+  if (item) item.classList.toggle('expanded');
 }
 function addInFlight(d) {
   if (!d || !d.request_id) return;
@@ -3789,8 +3889,12 @@ function removeInFlight(d) {
   const cur = inFlight[d.request_id];
   if (!cur) return;
   cur._ending = (d.status >= 200 && d.status < 300) ? 'ok' : 'err';
-  renderInFlight();
-  setTimeout(() => { delete inFlight[d.request_id]; renderInFlight(); }, 350);
+  // Reflect final tokens on close
+  if (d.tokens_in != null) cur.tokens_in = d.tokens_in;
+  if (d.tokens_out != null) cur.tokens_out = d.tokens_out;
+  const item = document.getElementById('if-' + d.request_id);
+  if (item) item.classList.add('ending-' + cur._ending);
+  setTimeout(() => { delete inFlight[d.request_id]; expandedInFlight.delete(d.request_id); renderInFlight(); }, 350);
 }
 // Tick elapsed counters every 250ms without re-rendering rows.
 setInterval(() => {
@@ -3802,6 +3906,29 @@ setInterval(() => {
     el.textContent = fmtElapsed(ms);
   });
 }, 250);
+// Poll /admin/in-flight while there are active requests so token counters update.
+setInterval(async () => {
+  if (!Object.keys(inFlight).length) return;
+  try {
+    const r = await loadJSON('/admin/in-flight');
+    (r.in_flight || []).forEach(e => {
+      const cur = inFlight[e.request_id];
+      if (!cur) return;
+      if (e.tokens_in != null && e.tokens_in > (cur.tokens_in || 0)) {
+        cur.tokens_in = e.tokens_in;
+        const tin = document.querySelector('#if-' + e.request_id + ' [data-tin]');
+        if (tin) tin.textContent = fmt(e.tokens_in);
+      }
+      if (e.tokens_out != null && e.tokens_out > (cur.tokens_out || 0)) {
+        cur.tokens_out = e.tokens_out;
+        const tout = document.querySelector('#if-' + e.request_id + ' [data-tout]');
+        if (tout) tout.textContent = fmt(e.tokens_out);
+      }
+      if (e.headers && !cur.headers) cur.headers = e.headers;
+      if (e.path && !cur.path) cur.path = e.path;
+    });
+  } catch (e) { /* ignore */ }
+}, 2000);
 
 function callInCurrentRange(c) {
   const r=getDateRange(); if(!r.start||!r.end||!c.ts) return false;
@@ -3842,12 +3969,34 @@ async function loadFallbackStatus() {
 function renderFallbackMap() {
   if (!fbState) return;
   const panel = document.getElementById('fb-map-panel');
-  const rows = (fbState.model_map || []).map(a =>
-    `<tr><td><span class="if-model">${a.id}</span></td><td>→</td><td>${a.nvidia_model || a.fallback_model || '-'}</td><td class="fb-pri">${a.priority || ''}</td></tr>`
-  ).join('');
-  panel.innerHTML = rows
+  const addRow = `<div class="fb-add-row">
+    <input id="fb-add-ollama" placeholder="ollama name (e.g. qwen3-coder)">
+    <input id="fb-add-nvidia" placeholder="nvidia model (e.g. qwen/qwen3-coder-480b-a35b-instruct)">
+    <button class="btn btn-sm" onclick="fbMapAddInline()">+ Add</button>
+  </div>`;
+  const rows = (fbState.model_map || []).map(a => {
+    const nvidiaName = a.nvidia_model || a.fallback_model || '-';
+    return `<tr>
+      <td><span class="if-model">${escHtml(a.id)}</span></td>
+      <td>→</td>
+      <td>${escHtml(nvidiaName)}</td>
+      <td class="fb-pri">${escHtml(a.priority || '')}</td>
+      <td class="fb-actions"><button class="fb-rm" title="Remove mapping" onclick="fbMapRemove('${escAttr(a.id)}')">×</button></td>
+    </tr>`;
+  }).join('');
+  panel.innerHTML = addRow + (rows
     ? `<table>${rows}</table>`
-    : '<div style="color:var(--dim)">No model_map entries configured.</div>';
+    : '<div style="color:var(--dim)">No model_map entries configured.</div>');
+}
+async function fbMapAddInline() {
+  const ollama = (document.getElementById('fb-add-ollama').value || '').trim();
+  const nvidia = (document.getElementById('fb-add-nvidia').value || '').trim();
+  if (!ollama || !nvidia) { alert('Both ollama and nvidia names are required'); return; }
+  try {
+    await postJSON('/admin/fallback-map', { ollama_name: ollama, nvidia_name: nvidia });
+    await loadFallbackStatus();
+    if (catalogLoaded) await loadCatalog(true);
+  } catch (e) { alert('Failed to add mapping: ' + e.message); }
 }
 document.getElementById('fb-map-toggle').addEventListener('click', function() {
   const panel = document.getElementById('fb-map-panel');
@@ -3923,6 +4072,155 @@ function renderModelsGrid() {
 }
 document.getElementById('model-search').addEventListener('input', renderModelsGrid);
 document.getElementById('model-sort').addEventListener('change', renderModelsGrid);
+
+// --- NVIDIA Build Catalog ---
+let catalogData = null;          // { catalog: [...], by_org: {...}, count, enabled }
+let catalogLoaded = false;
+const catalogOpenOrgs = new Set();
+
+function fmtParamCount(n) {
+  if (!n || n <= 0) return '';
+  if (n >= 1e12) { const v = n / 1e12; return Math.abs(v - Math.round(v)) < 0.05 ? Math.round(v) + 'T' : v.toFixed(1) + 'T'; }
+  const v = n / 1e9; return Math.abs(v - Math.round(v)) < 0.05 ? Math.round(v) + 'B' : v.toFixed(1) + 'B';
+}
+
+async function loadCatalog(force) {
+  if (catalogLoaded && !force) return;
+  const list = document.getElementById('catalog-list');
+  list.innerHTML = '<div class="catalog-empty">Loading catalog...</div>';
+  try {
+    const r = await loadJSON('/admin/fallback-catalog');
+    catalogData = r;
+    catalogLoaded = true;
+    if (!r || !r.enabled) {
+      list.innerHTML = '<div class="catalog-empty">Fallback provider is not configured.</div>';
+      document.getElementById('catalog-count').textContent = '0';
+      return;
+    }
+    renderCatalog();
+  } catch (e) {
+    list.innerHTML = '<div class="catalog-empty">Failed to load catalog.</div>';
+  }
+}
+
+function renderCatalog() {
+  if (!catalogData || !catalogData.enabled) return;
+  const all = catalogData.catalog || [];
+  const q = (document.getElementById('catalog-search').value || '').toLowerCase().trim();
+  const filtered = q
+    ? all.filter(m => (m.id || '').toLowerCase().includes(q) || (m.org || '').toLowerCase().includes(q) || (m.owned_by || '').toLowerCase().includes(q))
+    : all;
+  const mappedCount = all.filter(m => m.is_mapped).length;
+  document.getElementById('catalog-count').textContent = String(all.length);
+  document.getElementById('catalog-summary').textContent = `${mappedCount} mapped · ${filtered.length}${q ? ' filtered' : ''} of ${all.length} total`;
+  const byOrg = {};
+  filtered.forEach(m => { const o = m.org || m.owned_by || 'unknown'; (byOrg[o] = byOrg[o] || []).push(m); });
+  const orgs = Object.keys(byOrg).sort((a, b) => a.localeCompare(b));
+  if (!orgs.length) {
+    document.getElementById('catalog-list').innerHTML = '<div class="catalog-empty">No models match the filter.</div>';
+    return;
+  }
+  // If a search query is active, auto-open all matching orgs.
+  if (q) orgs.forEach(o => catalogOpenOrgs.add(o));
+  document.getElementById('catalog-list').innerHTML = orgs.map(org => {
+    const rows = byOrg[org].slice().sort((a, b) => (a.id || '').localeCompare(b.id || ''));
+    const open = catalogOpenOrgs.has(org) ? ' open' : '';
+    const orgMapped = rows.filter(r => r.is_mapped).length;
+    const inner = rows.map(m => {
+      const params = fmtParamCount(m.parameter_count);
+      const ctx = m.context_length ? fmtCtx(m.context_length) : '';
+      const action = m.is_mapped
+        ? `<span class="cr-mapped">✓ <span class="cr-alias" title="ollama alias">${escHtml(m.ollama_equivalent || '')}</span></span>`
+        : `<button class="btn btn-sm" onclick="catalogAdd('${escAttr(m.id)}')">+ Add</button>`;
+      const url = m.model_card_url || ('https://build.nvidia.com/' + m.id);
+      return `<div class="catalog-row" data-mid="${escAttr(m.id)}">
+        <div class="cr-name"><a href="${escAttr(url)}" target="_blank" rel="noopener" title="Open model card">${escHtml(m.id)}</a></div>
+        <div class="cr-meta">${escHtml(params || '-')}</div>
+        <div class="cr-meta">${escHtml(ctx || '-')}</div>
+        <div class="cr-meta" title="${escAttr(m.description || '')}">${escHtml(m.description ? (m.description.length > 80 ? m.description.slice(0, 77) + '...' : m.description) : '')}</div>
+        <div class="cr-action">${action}</div>
+      </div>`;
+    }).join('');
+    return `<div class="catalog-org${open}" data-org="${escAttr(org)}">
+      <div class="catalog-org-header" onclick="catalogToggleOrg('${escAttr(org)}')">
+        <span class="co-caret">▶</span>
+        <span class="co-name">${escHtml(org)}</span>
+        <span class="co-count">${rows.length} model${rows.length !== 1 ? 's' : ''} · ${orgMapped} mapped</span>
+      </div>
+      <div class="catalog-org-body">${inner}</div>
+    </div>`;
+  }).join('');
+}
+function catalogToggleOrg(org) {
+  if (catalogOpenOrgs.has(org)) catalogOpenOrgs.delete(org); else catalogOpenOrgs.add(org);
+  const el = document.querySelector(`.catalog-org[data-org="${CSS.escape(org)}"]`);
+  if (el) el.classList.toggle('open');
+}
+function catalogAdd(nvidiaId) {
+  showModal(`<h3>Add Fallback Mapping</h3>
+    <p style="font-size:11px;color:var(--dim);margin-bottom:8px">Maps an Ollama model name to the NVIDIA Build model. Runtime-only — add to <code>config.yaml</code> to persist.</p>
+    <label>Ollama Model Name</label>
+    <input id="m-fb-ollama" placeholder="e.g. ${escAttr(nvidiaId.split('/').pop() || 'qwen3-coder')}" autofocus>
+    <label>NVIDIA Model</label>
+    <input id="m-fb-nvidia" value="${escAttr(nvidiaId)}" readonly>
+    <label>Priority <span style="color:var(--dim)">(optional)</span></label>
+    <select id="m-fb-priority">
+      <option value="">inherit (default)</option>
+      <option value="after">after — Ollama first</option>
+      <option value="before">before — Fallback first</option>
+      <option value="only">only — Fallback only</option>
+    </select>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" onclick="submitFbMapAdd()">Add</button>
+    </div>`);
+}
+async function submitFbMapAdd() {
+  const ollama = document.getElementById('m-fb-ollama').value.trim();
+  const nvidia = document.getElementById('m-fb-nvidia').value.trim();
+  const priority = document.getElementById('m-fb-priority').value;
+  if (!ollama || !nvidia) { alert('Both ollama_name and nvidia_name are required'); return; }
+  const body = { ollama_name: ollama, nvidia_name: nvidia };
+  if (priority) body.priority = priority;
+  try {
+    await postJSON('/admin/fallback-map', body);
+    closeModal();
+    await loadFallbackStatus();
+    await loadCatalog(true);
+  } catch (e) { alert('Failed to add mapping: ' + e.message); }
+}
+async function fbMapRemove(ollamaName) {
+  if (!confirm(`Remove fallback mapping for "${ollamaName}"? Runtime-only — also remove from config.yaml to persist.`)) return;
+  try {
+    await postJSON('/admin/fallback-map?ollama_name=' + encodeURIComponent(ollamaName), null, 'DELETE');
+    await loadFallbackStatus();
+    if (catalogLoaded) await loadCatalog(true);
+  } catch (e) { alert('Failed to remove mapping: ' + e.message); }
+}
+document.getElementById('catalog-header').addEventListener('click', function() {
+  const sec = document.getElementById('catalog-section');
+  const open = sec.classList.toggle('open');
+  if (open) loadCatalog(false);
+});
+document.getElementById('catalog-search').addEventListener('input', () => { if (catalogData) renderCatalog(); });
+document.getElementById('catalog-refresh').addEventListener('click', () => loadCatalog(true));
+document.getElementById('catalog-add-mapping').addEventListener('click', () => {
+  showModal(`<h3>Add Fallback Mapping</h3>
+    <p style="font-size:11px;color:var(--dim);margin-bottom:8px">Maps an Ollama model name to a NVIDIA Build model. Runtime-only — add to <code>config.yaml</code> to persist.</p>
+    <label>Ollama Model Name</label><input id="m-fb-ollama" placeholder="e.g. qwen3-coder" autofocus>
+    <label>NVIDIA Model</label><input id="m-fb-nvidia" placeholder="e.g. qwen/qwen3-coder-480b-a35b-instruct">
+    <label>Priority <span style="color:var(--dim)">(optional)</span></label>
+    <select id="m-fb-priority">
+      <option value="">inherit (default)</option>
+      <option value="after">after — Ollama first</option>
+      <option value="before">before — Fallback first</option>
+      <option value="only">only — Fallback only</option>
+    </select>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" onclick="submitFbMapAdd()">Add</button>
+    </div>`);
+});
 
 // --- Subscriptions Panel ---
 async function loadSubsPanel() {
