@@ -1438,6 +1438,7 @@ max_retries: int = 2
 queue_timeout: int = 60
 request_timeout: int = 120
 admin_token: str = ""
+reject_unknown_models: bool = False  # reject models unknown to both Ollama and fallback model_map
 
 DB_PATH = Path(__file__).parent / "proxy.db"
 
@@ -1628,7 +1629,7 @@ def _verify_admin(request: Request) -> None:
 async def lifespan(app: FastAPI):
     global manager, registry, usage_db, client_registry, usage_scraper, fallback_provider
     global upstream_url, retry_on_429, max_retries, queue_timeout, request_timeout
-    global admin_token, NATIVE_BRIDGE_MODELS
+    global admin_token, NATIVE_BRIDGE_MODELS, reject_unknown_models
 
     cfg = load_config()
     admin_token = cfg.get("admin_token", "")
@@ -1643,6 +1644,7 @@ async def lifespan(app: FastAPI):
     max_retries = cfg.get("max_retries", 2)
     queue_timeout = cfg.get("queue_timeout", 60)
     request_timeout = cfg.get("request_timeout", 120)
+    reject_unknown_models = cfg.get("reject_unknown_models", False)
 
     # Native bridge: models whose /v1 endpoint misreports truncation
     NATIVE_BRIDGE_MODELS = cfg.get("native_bridge_models", [])
@@ -1691,11 +1693,17 @@ async def lifespan(app: FastAPI):
         log.info("Fallback provider not configured")
 
     log.info(f"Proxy started: {len(manager.keys)} upstream keys ({len(usage_scraper.cookie_map)} with usage cookies), {len(registry.models)} models, {len(client_registry.clients)} clients")
+    if reject_unknown_models:
+        log.info("reject_unknown_models: enabled — unknown models will be rejected with 404")
+
+    # Stale in-flight entry sweeper — removes zombies (0 tokens, stuck >10 min)
+    sweep_task = asyncio.create_task(_sweep_stale_inflight(interval=300, max_age_seconds=600))
 
     yield
 
     sub_task.cancel()
     usage_task.cancel()
+    sweep_task.cancel()
     if fb_metadata_task is not None:
         fb_metadata_task.cancel()
     if registry:
@@ -1760,6 +1768,36 @@ async def _scrape_usage_loop(scraper: UsageScraper, mgr: KeyManager, interval: i
             log.error(f"Usage scrape loop error: {e}")
 
 
+async def _sweep_stale_inflight(interval: int = 300, max_age_seconds: int = 600):
+    """Periodically remove in-flight entries with 0 tokens that have been stuck too long.
+
+    These are zombie entries from disconnected clients — the request never completed
+    but the tracker entry was never removed. 5 minutes of 0 tokens = definitely stuck.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            now = time.time()
+            stale_ids = [
+                rid for rid, entry in _in_flight.items()
+                if entry.get("tokens_in", 0) == 0
+                and entry.get("tokens_out", 0) == 0
+                and (now - entry.get("started_at", now)) > max_age_seconds
+            ]
+            if stale_ids:
+                for rid in stale_ids:
+                    entry = _in_flight.pop(rid, None)
+                    if entry:
+                        log.warning(
+                            f"Swept stale in-flight entry: {rid} model={entry.get('model')} "
+                            f"client={entry.get('client_id')} "
+                            f"age={int(now - entry.get('started_at', now))}s"
+                        )
+                log.info(f"Swept {len(stale_ids)} stale in-flight entries")
+        except Exception as e:
+            log.error(f"Stale in-flight sweep error: {e}")
+
+
 app = FastAPI(title="Ollama Cloud Proxy", lifespan=lifespan)
 
 
@@ -1810,6 +1848,18 @@ async def _proxy_request(request: Request, path: str) -> Response:
     fp_mapped = bool(has_fallback and fp.resolve_model(model))
     fp_can_serve = bool(has_fallback and (fp.resolve_model(model) or fp.default_model))
     priority = fp.priority_for(model) if has_fallback else "after"
+
+    # Reject unknown models: when reject_unknown_models is true, models
+    # that aren't known to Ollama AND aren't in the fallback model_map
+    # get a 404 instead of silently routing to the fallback default_model.
+    if reject_unknown_models and not ollama_has_model and not fp_mapped:
+        _record_and_broadcast(client_id, "none", model, 0, 0, 0, 404,
+                              request_id=request_id, provider="proxy")
+        log.warning(f"Rejected unknown model: {model} (client={client_id})")
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"model '{model}' not found. Available models: /v1/models"},
+        )
 
     # priority=only — fallback only for mapped models; Ollama for others.
     if has_fallback and priority == "only" and fp_mapped:
