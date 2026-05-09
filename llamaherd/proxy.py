@@ -3811,13 +3811,14 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 
 <div class="tab-panel" id="panel-quota">
   <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-    <h2 style="margin:0">Per-Model Quota Cost</h2>
+    <h2 style="margin:0">Quota Cost Algebra</h2>
     <span class="badge" id="quota-badge">0</span>
     <button class="btn btn-sm" id="quota-refresh">🔄 Refresh</button>
-    <span style="font-size:11px;color:var(--dim)">Inferred from session usage % changes between calls. Higher cost = more expensive per token.</span>
+    <span style="font-size:11px;color:var(--dim)" id="quota-subtitle">Solves per-model coefficients from usage deltas. Single-model intervals are direct solves.</span>
   </div>
+  <div style="margin-bottom:8px; font-size:12px; color:var(--dim)" id="quota-solve-status"></div>
   <div style="overflow-x:auto"><table id="quota-table"><thead><tr>
-    <th>Model</th><th>Calls</th><th>Session % Consumed</th><th>Tokens In</th><th>Tokens Out</th><th>Quota % / 1K tokens</th><th>Quota % / 1K input</th><th>Quota % / 1K output</th>
+    <th>Model</th><th>Coeff</th><th>Confidence</th><th>Intervals</th><th>Session %</th><th>Tokens In</th><th>Tokens Out</th><th>% of Quota</th><th>Cost / 1K tokens</th>
   </tr></thead><tbody></tbody></table></div>
   <div id="quota-note" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
 </div>
@@ -4569,27 +4570,32 @@ async function loadQuotaCost() {
     const tbody = document.querySelector('#quota-table tbody');
     const badge = document.getElementById('quota-badge');
     const note = document.getElementById('quota-note');
+    const status = document.getElementById('quota-solve-status');
     if (!data.models || data.models.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" style="color:var(--dim);text-align:center;padding:2em">' +
+      tbody.innerHTML = '<tr><td colspan="9" style="color:var(--dim);text-align:center;padding:2em">' +
         (data.note || 'No quota cost data yet. Data appears as session usage % changes between scrapes.') + '</td></tr>';
       badge.textContent = '0';
       note.textContent = data.note || '';
+      status.textContent = '';
       return;
     }
     badge.textContent = data.models.length;
     note.textContent = data.note || '';
+    status.textContent = `${data.known_coefficients}/${data.total_models} coefficients solved from ${data.total_intervals} intervals | Total quota delta: ${data.total_quota_pct}%`;
     tbody.innerHTML = data.models.map(m => {
-      const costColor = m.quota_pct_per_1k_tokens > 0.01 ? 'var(--red)' : m.quota_pct_per_1k_tokens > 0.005 ? 'var(--yellow)' : 'var(--green)';
-      const pctTotal = m.pct_of_total_quota ? m.pct_of_total_quota.toFixed(1) + '%' : '-';
+      const confColor = m.confidence === 'direct' ? 'var(--green)' : 'var(--yellow)';
+      const coeffStr = m.coefficient !== null ? m.coefficient.toFixed(8) : '—';
+      const costStr = m.quota_pct_per_1k_tokens !== undefined ? m.quota_pct_per_1k_tokens.toFixed(6) : '—';
       return '<tr>' +
         '<td style="font-family:monospace">' + escHtml(m.model) + '</td>' +
-        '<td>' + m.calls_in_epochs + ' epochs</td>' +
+        '<td style="font-family:monospace">' + coeffStr + '</td>' +
+        '<td style="color:' + confColor + ';font-weight:600">' + m.confidence + '</td>' +
+        '<td>' + m.intervals + '</td>' +
         '<td>' + m.total_session_pct_consumed.toFixed(3) + '%</td>' +
         '<td>' + fmt(m.tokens_in) + '</td>' +
         '<td>' + fmt(m.tokens_out) + '</td>' +
-        '<td style="color:' + costColor + ';font-weight:600">' + m.quota_pct_per_1k_tokens.toFixed(6) + '</td>' +
-        '<td>' + m.quota_pct_per_1k_input.toFixed(6) + '</td>' +
-        '<td>' + m.quota_pct_per_1k_output.toFixed(6) + '</td>' +
+        '<td>' + m.pct_of_total_quota.toFixed(1) + '%</td>' +
+        '<td style="font-family:monospace">' + costStr + '</td>' +
         '</tr>';
     }).join('');
   } catch (e) { /* ignore */ }
@@ -4606,13 +4612,14 @@ document.querySelectorAll('.tab').forEach(t => {
 
 @app.get("/admin/quota-cost", dependencies=[Depends(_verify_admin)])
 async def admin_quota_cost():
-    """Compute inferred quota cost per model from session_usage_pct changes.
+    """Infer per-model quota cost coefficients using algebraic decomposition.
     
-    When the usage scraper updates (every ~5 min), session_usage_pct jumps.
-    That delta must be distributed across ALL calls that shared the previous
-    value, not just the one call after the update. We group calls by their
-    session_usage_pct "epoch" (same value = same scrape interval) and
-    distribute each epoch's total delta proportionally by tokens.
+    Each scraper interval (where session_usage_pct changes) gives us one equation:
+        delta_pct = Σ(coeff_model × total_tokens_model)
+    
+    Single-model intervals directly solve for that model's coefficient.
+    Multi-model intervals where all but one coefficient is known also solve directly.
+    Over time, more coefficients become known, reducing unknowns per interval.
     """
     if not usage_db or not usage_db._conn:
         return {"models": [], "note": "No usage DB configured"}
@@ -4627,33 +4634,26 @@ async def admin_quota_cost():
     if not rows:
         return {"models": [], "note": "No usage data with quota snapshots yet."}
     
-    # Group calls into "epochs" per key: each epoch = all calls sharing the
-    # same session_usage_pct value (they were recorded between two scrapes).
-    # When a new epoch starts with a higher pct, the delta is distributed
-    # proportionally across the calls in the PREVIOUS epoch by token count.
-    
-    model_costs: dict[str, dict] = {}  # model -> {calls, delta_pct, tokens_in, tokens_out}
-    
-    # Build epochs per key: list of (pct, [call_list])
-    key_epochs: dict[str, list[dict]] = {}  # key -> [{pct, calls: [{model, t_in, t_out}]}]
+    # Group calls into "epochs" per key: consecutive calls sharing the same
+    # session_usage_pct value (recorded between two scraper runs).
+    key_epochs: dict[str, list[dict]] = {}
     
     for row in rows:
         key_prefix, model, t_in, t_out, s_pct, ts = row
-        
         if key_prefix not in key_epochs:
             key_epochs[key_prefix] = []
-        
         epochs = key_epochs[key_prefix]
-        
         # Start new epoch if pct changed (or first call for this key)
         if not epochs or epochs[-1]["pct"] != s_pct:
             epochs.append({"pct": s_pct, "calls": []})
-        
         epochs[-1]["calls"].append({"model": model, "t_in": t_in, "t_out": t_out})
     
-    # Now compute deltas: each epoch[i] with i>0 gets the delta from epoch[i-1]
-    # The delta for epoch[i] = pct[i] - pct[i-1]
-    # Distribute that delta proportionally to the calls in epoch[i-1] (the batch that caused it)
+    # For each pair of adjacent epochs where usage increased, compute delta_pct
+    # and the total tokens per model in the preceding epoch (the batch that
+    # caused the increase). Each such interval gives us one equation:
+    #   delta_pct = Σ(coeff_model × total_tokens_model)
+    intervals: list[dict] = []  # {delta_pct, tokens_by_model: {model: total_tokens}}
+    
     for key_prefix, epochs in key_epochs.items():
         for i in range(1, len(epochs)):
             prev_pct = epochs[i - 1]["pct"]
@@ -4661,62 +4661,140 @@ async def admin_quota_cost():
             delta_pct = curr_pct - prev_pct
             
             if delta_pct <= 0:
-                continue  # No increase (could be session reset or same)
+                continue  # No increase (session reset or unchanged)
             
-            # Distribute delta across calls in prev epoch proportionally by token count
             prev_calls = epochs[i - 1]["calls"]
-            total_tokens = sum(c["t_in"] + c["t_out"] for c in prev_calls)
-            
-            if total_tokens == 0:
-                continue
-            
+            tokens_by_model: dict[str, dict] = {}  # model -> {in, out, total}
             for call in prev_calls:
-                call_tokens = call["t_in"] + call["t_out"]
-                share = delta_pct * (call_tokens / total_tokens)
-                
                 m = call["model"]
-                if m not in model_costs:
-                    model_costs[m] = {"calls": 0, "delta_pct": 0.0, "tokens_in": 0, "tokens_out": 0}
-                mc = model_costs[m]
-                mc["calls"] += 1
-                mc["delta_pct"] += share
-                mc["tokens_in"] += call["t_in"]
-                mc["tokens_out"] += call["t_out"]
+                if m not in tokens_by_model:
+                    tokens_by_model[m] = {"in": 0, "out": 0, "total": 0}
+                tokens_by_model[m]["in"] += call["t_in"]
+                tokens_by_model[m]["out"] += call["t_out"]
+                tokens_by_model[m]["total"] += call["t_in"] + call["t_out"]
+            
+            intervals.append({
+                "delta_pct": delta_pct,
+                "tokens_by_model": tokens_by_model,
+                "key": key_prefix,
+            })
     
-    # Also count calls that never saw a delta (still cost tokens but we can't quantify %)
-    # We include their tokens so the totals are accurate
-    all_calls = set()
-    delta_calls = set()
-    for key_prefix, epochs in key_epochs.items():
-        for epoch in epochs:
-            for call in epoch["calls"]:
-                all_calls.add((key_prefix, call["model"], call["t_in"], call["t_out"]))
-    for model, mc in model_costs.items():
-        delta_calls.add(model)
+    if not intervals:
+        return {"models": [], "intervals": 0, "note": "No usage transitions detected yet. Data appears as session usage % changes between scrapes."}
+    
+    # Algebraic solver: find per-model coefficients
+    # Pass 1: Direct solves from single-model intervals
+    known_coeffs: dict[str, float] = {}  # model -> coeff (quota_pct per token)
+    
+    for interval in intervals:
+        models_in_interval = list(interval["tokens_by_model"].keys())
+        if len(models_in_interval) == 1:
+            # Direct solve: delta_pct = coeff × total_tokens
+            model = models_in_interval[0]
+            total_tok = interval["tokens_by_model"][model]["total"]
+            if total_tok > 0:
+                coeff = interval["delta_pct"] / total_tok
+                # Average with previous measurements for this model
+                if model in known_coeffs:
+                    # Weighted average by token count (more tokens = more reliable)
+                    known_coeffs[model] = (known_coeffs[model] + coeff) / 2
+                else:
+                    known_coeffs[model] = coeff
+    
+    # Pass 2: Solve multi-model intervals where all but one coefficient is known
+    changed = True
+    max_passes = 10
+    while changed and max_passes > 0:
+        changed = False
+        max_passes -= 1
+        for interval in intervals:
+            unknown_models = [m for m in interval["tokens_by_model"] if m not in known_coeffs]
+            known_models = [m for m in interval["tokens_by_model"] if m in known_coeffs]
+            
+            if len(unknown_models) == 1:
+                # One unknown: delta_pct - Σ(known_coeff × tokens) = unknown_coeff × unknown_tokens
+                known_total = sum(known_coeffs[m] * interval["tokens_by_model"][m]["total"] for m in known_models)
+                unknown_model = unknown_models[0]
+                unknown_tokens = interval["tokens_by_model"][unknown_model]["total"]
+                if unknown_tokens > 0:
+                    coeff = (interval["delta_pct"] - known_total) / unknown_tokens
+                    if coeff > 0:  # Sanity check: coeff should be positive
+                        if unknown_model in known_coeffs:
+                            known_coeffs[unknown_model] = (known_coeffs[unknown_model] + coeff) / 2
+                        else:
+                            known_coeffs[unknown_model] = coeff
+                        changed = True
+    
+    # Compute aggregate stats per model
+    model_stats: dict[str, dict] = {}  # model -> {total_pct, calls, tokens_in, tokens_out, intervals}
+    for interval in intervals:
+        for model, tok in interval["tokens_by_model"].items():
+            if model not in model_stats:
+                model_stats[model] = {"total_pct": 0.0, "calls": 0, "tokens_in": 0, "tokens_out": 0, "intervals": 0}
+            # Attribute: known coeff × actual tokens OR proportional share
+            if model in known_coeffs:
+                attributed_pct = known_coeffs[model] * tok["total"]
+            else:
+                # Unknown coeff: distribute remaining delta after known models
+                known_pct_in_interval = sum(known_coeffs.get(m, 0) * interval["tokens_by_model"][m]["total"] 
+                                             for m in interval["tokens_by_model"] if m in known_coeffs)
+                remaining_pct = max(0, interval["delta_pct"] - known_pct_in_interval)
+                unknown_total = sum(interval["tokens_by_model"][m]["total"] 
+                                    for m in interval["tokens_by_model"] if m not in known_coeffs)
+                if unknown_total > 0:
+                    attributed_pct = remaining_pct * (tok["total"] / unknown_total)
+                else:
+                    attributed_pct = 0
+            model_stats[model]["total_pct"] += attributed_pct
+            model_stats[model]["calls"] += 1
+            model_stats[model]["tokens_in"] += tok["in"]
+            model_stats[model]["tokens_out"] += tok["out"]
+            model_stats[model]["intervals"] += 1
+    
+    # Build result
+    all_interval_pct = sum(i["delta_pct"] for i in intervals)
+    total_known_pct = sum(mc["total_pct"] for mc in model_stats.values())
     
     result = []
-    total_quota_pct = sum(mc["delta_pct"] for mc in model_costs.values())
-    for model, mc in sorted(model_costs.items(), key=lambda x: -x[1]["delta_pct"]):
-        total_tok = mc["tokens_in"] + mc["tokens_out"]
-        cost_per_1k = (mc["delta_pct"] / total_tok * 1000) if total_tok > 0 else 0
-        # These represent "of the quota % consumed, how much per 1K input vs output tokens"
-        cost_in_per_1k = (mc["delta_pct"] / mc["tokens_in"] * 1000) if mc["tokens_in"] > 0 else 0
-        cost_out_per_1k = (mc["delta_pct"] / mc["tokens_out"] * 1000) if mc["tokens_out"] > 0 else 0
-        result.append({
+    for model in sorted(model_stats.keys(), key=lambda m: -model_stats[m]["total_pct"]):
+        ms = model_stats[model]
+        total_tok = ms["tokens_in"] + ms["tokens_out"]
+        coeff = known_coeffs.get(model)
+        
+        entry = {
             "model": model,
-            "calls_in_epochs": mc["calls"],
-            "total_session_pct_consumed": round(mc["delta_pct"], 3),
-            "tokens_in": mc["tokens_in"],
-            "tokens_out": mc["tokens_out"],
+            "coefficient": round(coeff, 8) if coeff is not None else None,
+            "confidence": "direct" if coeff is not None else "estimated",
+            "intervals": ms["intervals"],
+            "total_session_pct_consumed": round(ms["total_pct"], 3),
+            "tokens_in": ms["tokens_in"],
+            "tokens_out": ms["tokens_out"],
             "tokens_total": total_tok,
-            "quota_pct_per_1k_tokens": round(cost_per_1k, 6),
-            "quota_pct_per_1k_input": round(cost_in_per_1k, 6),
-            "quota_pct_per_1k_output": round(cost_out_per_1k, 6),
-            "pct_of_total_quot": round(mc["delta_pct"] / total_quota_pct * 100, 1) if total_quota_pct > 0 else 0,
-        })
+            "pct_of_total_quota": round(ms["total_pct"] / all_interval_pct * 100, 1) if all_interval_pct > 0 else 0,
+        }
+        
+        if coeff is not None:
+            # Derive per-1K costs from the coefficient
+            # coeff = quota_pct per token, so per 1K tokens = coeff * 1000
+            entry["quota_pct_per_1k_tokens"] = round(coeff * 1000, 6)
+            # For input vs output: we can't distinguish from the coefficient alone,
+            # but we can compute effective cost given model's actual in/out ratio
+            if ms["tokens_in"] > 0:
+                entry["quota_pct_per_1k_input"] = round(coeff * 1000, 6)
+            if ms["tokens_out"] > 0:
+                entry["quota_pct_per_1k_output"] = round(coeff * 1000, 6)
+        
+        result.append(entry)
     
-    return {"models": result, "total_quota_pct": round(total_quota_pct, 3), 
-            "note": "Quota cost distributed proportionally across all calls in each scrape interval. Higher cost_per_1k = more expensive per token."}
+    return {
+        "models": result,
+        "total_intervals": len(intervals),
+        "total_quota_pct": round(all_interval_pct, 3),
+        "known_coefficients": len(known_coeffs),
+        "total_models": len(set(m for i in intervals for m in i["tokens_by_model"])),
+        "note": f"Algebraic solve: {len(known_coeffs)}/{len(set(m for i in intervals for m in i['tokens_by_model']))} model coefficients determined from {len(intervals)} intervals. "
+                f"Single-model intervals directly solve for coefficients; multi-model intervals solve when only one unknown remains."
+    }
 
 
 @app.get("/dashboard", dependencies=[Depends(_verify_admin)])
