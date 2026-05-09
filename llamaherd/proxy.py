@@ -4580,9 +4580,10 @@ async function loadQuotaCost() {
     note.textContent = data.note || '';
     tbody.innerHTML = data.models.map(m => {
       const costColor = m.quota_pct_per_1k_tokens > 0.01 ? 'var(--red)' : m.quota_pct_per_1k_tokens > 0.005 ? 'var(--yellow)' : 'var(--green)';
+      const pctTotal = m.pct_of_total_quota ? m.pct_of_total_quota.toFixed(1) + '%' : '-';
       return '<tr>' +
         '<td style="font-family:monospace">' + escHtml(m.model) + '</td>' +
-        '<td>' + m.calls + '</td>' +
+        '<td>' + m.calls_in_epochs + ' epochs</td>' +
         '<td>' + m.total_session_pct_consumed.toFixed(3) + '%</td>' +
         '<td>' + fmt(m.tokens_in) + '</td>' +
         '<td>' + fmt(m.tokens_out) + '</td>' +
@@ -4607,58 +4608,103 @@ document.querySelectorAll('.tab').forEach(t => {
 async def admin_quota_cost():
     """Compute inferred quota cost per model from session_usage_pct changes.
     
-    For consecutive calls on the same key where session_usage_pct changed,
-    computes the cost in quota-% per 1K tokens, split by input and output.
+    When the usage scraper updates (every ~5 min), session_usage_pct jumps.
+    That delta must be distributed across ALL calls that shared the previous
+    value, not just the one call after the update. We group calls by their
+    session_usage_pct "epoch" (same value = same scrape interval) and
+    distribute each epoch's total delta proportionally by tokens.
     """
     if not usage_db or not usage_db._conn:
         return {"models": [], "note": "No usage DB configured"}
     
-    # Get all calls with session_usage_pct recorded (not -1)
     rows = usage_db._conn.execute("""
         SELECT upstream_key, model, tokens_in, tokens_out, session_usage_pct, ts
         FROM usage 
-        WHERE session_usage_pct >= 0 AND status > 0
+        WHERE session_usage_pct >= 0 AND status > 0 AND tokens_in + tokens_out > 0
         ORDER BY upstream_key, ts ASC
     """).fetchall()
     
     if not rows:
-        return {"models": [], "note": "No usage data with quota snapshots yet. Data accumulates as the periodic usage scraper runs."}
+        return {"models": [], "note": "No usage data with quota snapshots yet."}
     
-    # Group consecutive calls by key, compute deltas
-    # For each pair of consecutive calls on same key where session_usage_pct changed,
-    # attribute the delta proportionally to tokens_in and tokens_out
+    # Group calls into "epochs" per key: each epoch = all calls sharing the
+    # same session_usage_pct value (they were recorded between two scrapes).
+    # When a new epoch starts with a higher pct, the delta is distributed
+    # proportionally across the calls in the PREVIOUS epoch by token count.
+    
     model_costs: dict[str, dict] = {}  # model -> {calls, delta_pct, tokens_in, tokens_out}
     
-    prev_by_key: dict[str, dict] = {}  # key -> {pct, ts, tokens_in, tokens_out}
+    # Build epochs per key: list of (pct, [call_list])
+    key_epochs: dict[str, list[dict]] = {}  # key -> [{pct, calls: [{model, t_in, t_out}]}]
     
     for row in rows:
         key_prefix, model, t_in, t_out, s_pct, ts = row
         
-        prev = prev_by_key.get(key_prefix)
-        if prev and s_pct > prev["pct"]:
-            delta_pct = s_pct - prev["pct"]
-            total_tok = t_in + t_out
-            if total_tok > 0 and delta_pct > 0:
-                if model not in model_costs:
-                    model_costs[model] = {"calls": 0, "delta_pct": 0.0, "tokens_in": 0, "tokens_out": 0}
-                mc = model_costs[model]
-                mc["calls"] += 1
-                mc["delta_pct"] += delta_pct
-                mc["tokens_in"] += t_in
-                mc["tokens_out"] += t_out
+        if key_prefix not in key_epochs:
+            key_epochs[key_prefix] = []
         
-        prev_by_key[key_prefix] = {"pct": s_pct, "ts": ts, "tokens_in": t_in, "tokens_out": t_out}
+        epochs = key_epochs[key_prefix]
+        
+        # Start new epoch if pct changed (or first call for this key)
+        if not epochs or epochs[-1]["pct"] != s_pct:
+            epochs.append({"pct": s_pct, "calls": []})
+        
+        epochs[-1]["calls"].append({"model": model, "t_in": t_in, "t_out": t_out})
     
-    # Compute per-model cost metrics
+    # Now compute deltas: each epoch[i] with i>0 gets the delta from epoch[i-1]
+    # The delta for epoch[i] = pct[i] - pct[i-1]
+    # Distribute that delta proportionally to the calls in epoch[i-1] (the batch that caused it)
+    for key_prefix, epochs in key_epochs.items():
+        for i in range(1, len(epochs)):
+            prev_pct = epochs[i - 1]["pct"]
+            curr_pct = epochs[i]["pct"]
+            delta_pct = curr_pct - prev_pct
+            
+            if delta_pct <= 0:
+                continue  # No increase (could be session reset or same)
+            
+            # Distribute delta across calls in prev epoch proportionally by token count
+            prev_calls = epochs[i - 1]["calls"]
+            total_tokens = sum(c["t_in"] + c["t_out"] for c in prev_calls)
+            
+            if total_tokens == 0:
+                continue
+            
+            for call in prev_calls:
+                call_tokens = call["t_in"] + call["t_out"]
+                share = delta_pct * (call_tokens / total_tokens)
+                
+                m = call["model"]
+                if m not in model_costs:
+                    model_costs[m] = {"calls": 0, "delta_pct": 0.0, "tokens_in": 0, "tokens_out": 0}
+                mc = model_costs[m]
+                mc["calls"] += 1
+                mc["delta_pct"] += share
+                mc["tokens_in"] += call["t_in"]
+                mc["tokens_out"] += call["t_out"]
+    
+    # Also count calls that never saw a delta (still cost tokens but we can't quantify %)
+    # We include their tokens so the totals are accurate
+    all_calls = set()
+    delta_calls = set()
+    for key_prefix, epochs in key_epochs.items():
+        for epoch in epochs:
+            for call in epoch["calls"]:
+                all_calls.add((key_prefix, call["model"], call["t_in"], call["t_out"]))
+    for model, mc in model_costs.items():
+        delta_calls.add(model)
+    
     result = []
+    total_quota_pct = sum(mc["delta_pct"] for mc in model_costs.values())
     for model, mc in sorted(model_costs.items(), key=lambda x: -x[1]["delta_pct"]):
         total_tok = mc["tokens_in"] + mc["tokens_out"]
         cost_per_1k = (mc["delta_pct"] / total_tok * 1000) if total_tok > 0 else 0
+        # These represent "of the quota % consumed, how much per 1K input vs output tokens"
         cost_in_per_1k = (mc["delta_pct"] / mc["tokens_in"] * 1000) if mc["tokens_in"] > 0 else 0
         cost_out_per_1k = (mc["delta_pct"] / mc["tokens_out"] * 1000) if mc["tokens_out"] > 0 else 0
         result.append({
             "model": model,
-            "calls": mc["calls"],
+            "calls_in_epochs": mc["calls"],
             "total_session_pct_consumed": round(mc["delta_pct"], 3),
             "tokens_in": mc["tokens_in"],
             "tokens_out": mc["tokens_out"],
@@ -4666,9 +4712,11 @@ async def admin_quota_cost():
             "quota_pct_per_1k_tokens": round(cost_per_1k, 6),
             "quota_pct_per_1k_input": round(cost_in_per_1k, 6),
             "quota_pct_per_1k_output": round(cost_out_per_1k, 6),
+            "pct_of_total_quot": round(mc["delta_pct"] / total_quota_pct * 100, 1) if total_quota_pct > 0 else 0,
         })
     
-    return {"models": result, "note": "Quota cost inferred from session_usage_pct deltas. Higher cost_per_1k = more expensive model."}
+    return {"models": result, "total_quota_pct": round(total_quota_pct, 3), 
+            "note": "Quota cost distributed proportionally across all calls in each scrape interval. Higher cost_per_1k = more expensive per token."}
 
 
 @app.get("/dashboard", dependencies=[Depends(_verify_admin)])
