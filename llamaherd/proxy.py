@@ -409,11 +409,13 @@ class KeyManager:
             if not candidates:
                 return None
 
+            # Least-connections with usage awareness:
+            # Spread concurrent load first (in_flight), then prefer less-used keys
             candidates.sort(key=lambda k: (
+                k.in_flight,
                 k.weekly_usage_pct if k.weekly_usage_pct >= 0 else 999,
                 k.session_usage_pct if k.session_usage_pct >= 0 else 999,
                 k.cycle_freshness,
-                k.in_flight,
                 k.total_tokens,
             ))
             best = candidates[0]
