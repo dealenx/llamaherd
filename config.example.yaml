@@ -94,9 +94,7 @@ usage_scrape_interval: 1800  # 30 minutes
 #   default_model: deepseek-ai/deepseek-v4-flash
 #   priority: after
 #   model_map:
-#     glm-5.1: z-ai/glm-5.1
 #     glm4.7: z-ai/glm4.7
-#     glm5: z-ai/glm5
 #     minimax-m2.5: minimaxai/minimax-m2.5
 #     minimax-m2.7: minimaxai/minimax-m2.7
 #     deepseek-v3.2: deepseek-ai/deepseek-v4-pro
@@ -108,6 +106,10 @@ usage_scrape_interval: 1800  # 30 minutes
 #     mistral-medium3.5: mistralai/mistral-medium-3.5-128b
 #     kimi-k2.6: moonshotai/kimi-k2.6
 #     # Per-model priority override:
-#     # glm-5.1:
-#     #   nvidia_model: z-ai/glm-5.1
+#     # minimax-m2.7:
+#     #   nvidia_model: minimaxai/minimax-m2.7
 #     #   priority: before
+#     #
+#     # Do not map GLM-5/5.1 to NVIDIA Build unless the Build page marks them
+#     # as Free Endpoint (nim_type_preview). NVIDIA /v1/models may list partner
+#     # or download-only models that are not usable through the free trial API.

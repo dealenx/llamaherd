@@ -74,9 +74,7 @@ fallback:
   default_model: deepseek-ai/deepseek-v4-flash  # used when no model_map match
   priority: after      # "after" = try ollama first, "before" = try nvidia first, "only" = nvidia only for mapped models
   model_map:
-    glm-5.1: z-ai/glm-5.1
     glm4.7: z-ai/glm4.7
-    glm5: z-ai/glm5
     minimax-m2.5: minimaxai/minimax-m2.5
     minimax-m2.7: minimaxai/minimax-m2.7
     deepseek-v3.2: deepseek-ai/deepseek-v4-pro
@@ -118,12 +116,13 @@ fallback:
 - Add per-model priority override in `model_map`:
 ```yaml
 model_map:
-  glm-5.1:
-    nvidia_model: z-ai/glm-5.1
+  minimax-m2.7:
+    nvidia_model: minimaxai/minimax-m2.7
     priority: before    # try nvidia first for this model specifically
 ```
   - When `model_map` value is a string, it's the NVIDIA model name (priority inherits global default)
   - When `model_map` value is a dict with `nvidia_model` and optional `priority`, use per-model priority
+  - Do not map GLM-5/5.1 to NVIDIA Build unless the Build page marks them as `nim_type_preview` / Free Endpoint. `/v1/models` may list partner/download-only models that hang or are not usable through the free trial API.
 - **Dashboard priority control:**
   - Add a small dropdown or toggle in the dashboard header to switch global priority (after/before/only)
   - This calls a new `/admin/fallback-priority` POST endpoint to change priority at runtime (no restart)
