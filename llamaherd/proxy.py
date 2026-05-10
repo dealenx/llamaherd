@@ -1779,6 +1779,7 @@ async def _sweep_stale_inflight(interval: int = 300, max_age_seconds: int = 600)
 
     These are zombie entries from disconnected clients — the request never completed
     but the tracker entry was never removed. 5 minutes of 0 tokens = definitely stuck.
+    Also releases the leaked KeyState.in_flight counter for each swept entry.
     """
     while True:
         await asyncio.sleep(interval)
@@ -1794,6 +1795,14 @@ async def _sweep_stale_inflight(interval: int = 300, max_age_seconds: int = 600)
                 for rid in stale_ids:
                     entry = _in_flight.pop(rid, None)
                     if entry:
+                        # Release the leaked KeyState.in_flight counter
+                        target_key_label = entry.get("target_key")
+                        if target_key_label:
+                            for k in manager.keys:
+                                if k.label == target_key_label and k.in_flight > 0:
+                                    k.in_flight = max(0, k.in_flight - 1)
+                                    log.info(f"Released leaked in_flight slot on {k.label} (now {k.in_flight})")
+                                    break
                         log.warning(
                             f"Swept stale in-flight entry: {rid} model={entry.get('model')} "
                             f"client={entry.get('client_id')} "
@@ -1943,6 +1952,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
             if resp.status_code == 429:
                 log.warning(f"429 from {key.label} for {model} (client={client_id}, attempt {attempt+1})")
                 await manager.mark_429(key)
+                await manager.release(key)
                 _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429)
                 prefer_key = None
                 continue
@@ -1950,6 +1960,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
             if resp.status_code == 402:
                 log.warning(f"402 from {key.label} for {model} (client={client_id})")
                 await manager.mark_402(key)
+                await manager.release(key)
                 _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402)
                 prefer_key = None
                 continue
@@ -2336,6 +2347,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             if resp.status_code == 429:
                 log.warning(f"429 from {key.label} for {model} (client={client_id}, attempt {attempt+1})")
                 await manager.mark_429(key)
+                await manager.release(key)
                 _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429)
                 prefer_key = None
                 continue
@@ -2343,6 +2355,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             if resp.status_code == 402:
                 log.warning(f"402 from {key.label} for {model} (client={client_id})")
                 await manager.mark_402(key)
+                await manager.release(key)
                 _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402)
                 prefer_key = None
                 continue
@@ -2543,12 +2556,14 @@ async def api_show(request: Request):
 
             if resp.status_code == 429:
                 await manager.mark_429(key)
+                await manager.release(key)
                 log.warning(f"429 from {key.label} for /api/show model={model}")
                 prefer_key = None
                 continue
 
             if resp.status_code == 402:
                 await manager.mark_402(key)
+                await manager.release(key)
                 log.warning(f"402 from {key.label} for /api/show model={model}")
                 prefer_key = None
                 continue
