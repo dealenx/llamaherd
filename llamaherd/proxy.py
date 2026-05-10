@@ -430,7 +430,11 @@ class KeyManager:
 
     async def mark_429(self, key: KeyState):
         async with self._lock:
-            key.mark_exhausted(3600)
+            # 429 from Ollama Cloud is a transient concurrency/rate backoff, not a
+            # quota exhaustion signal.  A one-hour cooldown strands healthy keys
+            # and sends known Ollama models to fallback long after the queue has
+            # drained.  Keep this short so routing re-probes Ollama quickly.
+            key.mark_exhausted(60)
 
     async def mark_402(self, key: KeyState):
         async with self._lock:
@@ -1888,9 +1892,14 @@ async def _proxy_request(request: Request, path: str) -> Response:
 
         if not key:
             # All keys at capacity — fall back if priority allows it.
-            if has_fallback and fp_can_serve and priority in ("after", "before"):
+            if has_fallback and fp_can_serve and priority in ("after", "before") and not ollama_has_model:
                 log.warning(f"Ollama keys at capacity for {model}; falling back to {fp.label}")
                 return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
+            if has_fallback and fp_can_serve and priority in ("after", "before") and ollama_has_model:
+                log.warning(
+                    f"Ollama keys at capacity for known Ollama model {model}; "
+                    "not falling back to secondary provider"
+                )
             _record_and_broadcast(client_id, "none", model, 0, 0, 0, 503,
                                   request_id=request_id, provider="ollama-cloud")
             return JSONResponse(
@@ -1973,11 +1982,16 @@ async def _proxy_request(request: Request, path: str) -> Response:
             continue
 
     # Ollama exhausted retries — try fallback as a last resort.
-    if has_fallback and fp_can_serve and priority in ("after", "before"):
+    if has_fallback and fp_can_serve and priority in ("after", "before") and not ollama_has_model:
         log.warning(f"Ollama exhausted retries for {model}; falling back to {fp.label}")
         # Pop the Ollama in-flight entry so the fallback emits a fresh start.
         _in_flight.pop(request_id, None)
         return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
+    if has_fallback and fp_can_serve and priority in ("after", "before") and ollama_has_model:
+        log.warning(
+            f"Ollama exhausted retries for known Ollama model {model}; "
+            "not falling back to secondary provider"
+        )
 
     _record_and_broadcast(client_id, "none", model, 0, 0, 0, 502,
                           request_id=request_id, provider="ollama-cloud")
