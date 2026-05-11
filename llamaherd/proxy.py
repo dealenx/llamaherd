@@ -2063,14 +2063,30 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
                             except (json.JSONDecodeError, IndexError, KeyError):
                                 pass
         except Exception as e:
-            log.error(f"Stream error for {model} (client={client_id}): {e}")
+            final_status = -1
+            error_type = type(e).__name__
+            error_message = str(e) or repr(e)
+            log.error(
+                f"Stream error for {model} (client={client_id}): "
+                f"{error_type}: {error_message}"
+            )
+            # The HTTP response has already started for SSE streams, so we cannot
+            # change the status code. Emit a structured SSE error and record the
+            # usage row as failed so dashboards/DB queries don't show fake 200s.
+            error_payload = json.dumps({
+                "error": "upstream_stream_error",
+                "error_type": error_type,
+                "detail": error_message,
+            })
+            yield f"data: {error_payload}\n\n"
         finally:
             elapsed_ms = int((time.time() - start) * 1000)
             await manager.release(key, tokens_out)
             _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
                                   final_status, request_id=request_id, provider="ollama-cloud")
             usage_src = "usage" if usage_captured else "estimate"
-            log.info(f"{client_id} -> {model} via {key.label}: stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src})")
+            status_suffix = "" if final_status == 200 else f" status={final_status}"
+            log.info(f"{client_id} -> {model} via {key.label}: stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src}){status_suffix}")
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
