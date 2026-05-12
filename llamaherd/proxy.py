@@ -1269,7 +1269,7 @@ class UsageDB:
                    SUM(tokens_out) as tokens_out,
                    SUM(tokens_in + tokens_out) as tokens_total,
                    AVG(latency_ms) as avg_latency_ms
-            FROM usage WHERE {where}
+            FROM usage WHERE {where} AND status != -1
             GROUP BY model ORDER BY tokens_total DESC
         """, params).fetchall()
         return [{
@@ -1280,6 +1280,93 @@ class UsageDB:
             "tokens_total": r[4] or 0,
             "avg_latency_ms": round(r[5] or 0, 1),
         } for r in rows]
+
+    def openrouter_costs(self, pricing: dict, days: int = 30,
+                         start_date: str = None, end_date: str = None,
+                         client_id: str = None) -> dict:
+        """Calculate what the usage WOULD have cost on OpenRouter.
+
+        Args:
+            pricing: dict from openrouter_pricing.yaml, keyed by model name.
+                     Each value has 'input_per_1m' and 'output_per_1m'.
+            days/start_date/end_date: time range filter.
+            client_id: optional filter by client.
+
+        Returns dict with 'models' (per-model breakdown), 'total_cost',
+        'total_input_cost', 'total_output_cost', 'unpriced_models'.
+        """
+        where, params = self._date_range_where(days, start_date, end_date)
+        extras = [" AND status != -1"]
+        if client_id:
+            extras.append(" AND client_id = ?")
+            params.append(client_id)
+        query = f"""
+            SELECT model,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   COUNT(*) as requests
+            FROM usage WHERE {where}{''.join(extras)}
+            GROUP BY model ORDER BY SUM(tokens_in + tokens_out) DESC
+        """
+        rows = self._conn.execute(query, params).fetchall()
+
+        models = []
+        total_cost = 0.0
+        total_input_cost = 0.0
+        total_output_cost = 0.0
+        unpriced = []
+
+        for r in rows:
+            model_raw = r[0]
+            tokens_in = r[1] or 0
+            tokens_out = r[2] or 0
+            requests = r[3] or 0
+
+            # Strip :cloud suffix for lookup
+            lookup_key = model_raw.replace(":cloud", "").replace(":cloud-", "-")
+            p = pricing.get(lookup_key) or pricing.get(model_raw)
+
+            if p:
+                in_cost = tokens_in / 1_000_000 * p.get("input_per_1m", 0)
+                out_cost = tokens_out / 1_000_000 * p.get("output_per_1m", 0)
+                cost = in_cost + out_cost
+                total_cost += cost
+                total_input_cost += in_cost
+                total_output_cost += out_cost
+                models.append({
+                    "model": model_raw,
+                    "openrouter_id": p.get("openrouter_id", ""),
+                    "requests": requests,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "input_cost_usd": round(in_cost, 4),
+                    "output_cost_usd": round(out_cost, 4),
+                    "total_cost_usd": round(cost, 4),
+                    "input_per_1m": p.get("input_per_1m", 0),
+                    "output_per_1m": p.get("output_per_1m", 0),
+                })
+            else:
+                unpriced.append(model_raw)
+                models.append({
+                    "model": model_raw,
+                    "openrouter_id": "",
+                    "requests": requests,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "input_cost_usd": 0,
+                    "output_cost_usd": 0,
+                    "total_cost_usd": 0,
+                    "input_per_1m": None,
+                    "output_per_1m": None,
+                })
+
+        return {
+            "models": models,
+            "total_cost_usd": round(total_cost, 2),
+            "total_input_cost_usd": round(total_input_cost, 2),
+            "total_output_cost_usd": round(total_output_cost, 2),
+            "unpriced_models": unpriced,
+        }
 
     def recent_calls(self, limit: int = 100, start_date: str = None, end_date: str = None,
                      client_id: str = None, model: str = None) -> list[dict]:
@@ -3023,6 +3110,38 @@ async def admin_usage_by_model(days: int = 30, start_date: str = None, end_date:
     if usage_db:
         return usage_db.by_model(days, start_date=start_date, end_date=end_date)
     return []
+
+
+# --- OpenRouter cost tracking ---
+
+_OPENROUTER_PRICING: Optional[dict] = None
+
+def _load_openrouter_pricing() -> dict:
+    """Load OpenRouter pricing from YAML. Caches after first load."""
+    global _OPENROUTER_PRICING
+    if _OPENROUTER_PRICING is not None:
+        return _OPENROUTER_PRICING
+    pricing_path = CONFIG_PATH.parent / "openrouter_pricing.yaml"
+    if pricing_path.exists():
+        with open(pricing_path) as f:
+            data = yaml.safe_load(f)
+        _OPENROUTER_PRICING = data.get("models", {}) if data else {}
+        log.info(f"Loaded OpenRouter pricing for {len(_OPENROUTER_PRICING)} models")
+    else:
+        _OPENROUTER_PRICING = {}
+        log.warning(f"No openrouter_pricing.yaml found at {pricing_path}")
+    return _OPENROUTER_PRICING
+
+
+@app.get("/admin/usage/openrouter-costs", dependencies=[Depends(_verify_admin)])
+async def admin_openrouter_costs(days: int = 30, start_date: str = None,
+                                  end_date: str = None, client: str = None):
+    """Calculate what usage WOULD have cost on OpenRouter (pay-per-token pricing reference)."""
+    if not usage_db:
+        return {"models": [], "total_cost_usd": 0, "unpriced_models": []}
+    pricing = _load_openrouter_pricing()
+    return usage_db.openrouter_costs(pricing, days, start_date=start_date,
+                                     end_date=end_date, client_id=client)
 
 
 @app.get("/admin/recent-calls", dependencies=[Depends(_verify_admin)])

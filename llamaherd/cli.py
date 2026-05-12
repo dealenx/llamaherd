@@ -216,6 +216,52 @@ def cmd_usage(args):
     _format_output(data, args.format)
 
 
+# ---- Costs command ----
+
+def cmd_costs(args):
+    params = {}
+    if args.days:
+        params["days"] = args.days
+    if args.start_date:
+        params["start_date"] = args.start_date
+    if args.end_date:
+        params["end_date"] = args.end_date
+    if args.client:
+        params["client"] = args.client
+    data = _api(args, "GET", "/admin/usage/openrouter-costs", params=params)
+    _format_output(data, args.format, _costs_table)
+
+
+def _costs_table(data):
+    models = data.get("models", [])
+    total = data.get("total_cost_usd", 0)
+    total_in = data.get("total_input_cost_usd", 0)
+    total_out = data.get("total_output_cost_usd", 0)
+    unpriced = data.get("unpriced_models", [])
+
+    if not models:
+        print("No usage data.")
+        return
+
+    print(f"{'Model':<30} {'Req':>6} {'Tok In':>12} {'Tok Out':>10} {'In $':>8} {'Out $':>8} {'Total $':>8} {'$/1M in':>7} {'$/1M out':>8}")
+    print("-" * 105)
+    for m in models:
+        name = m["model"][:29]
+        in_m = m.get("input_per_1m")
+        out_m = m.get("output_per_1m")
+        in_price = f"{in_m:.2f}" if in_m is not None else "?"
+        out_price = f"{out_m:.2f}" if out_m is not None else "?"
+        print(f"{name:<30} {m['requests']:>6} {m['tokens_in']:>12,} {m['tokens_out']:>10,} "
+              f"{m['input_cost_usd']:>8.2f} {m['output_cost_usd']:>8.2f} {m['total_cost_usd']:>8.2f} "
+              f"{in_price:>7} {out_price:>8}")
+
+    print("-" * 105)
+    print(f"{'TOTAL':<30} {'':>6} {'':>12} {'':>10} "
+          f"{total_in:>8.2f} {total_out:>8.2f} {total:>8.2f}")
+    if unpriced:
+        print(f"\nUnpriced models (no OpenRouter data): {', '.join(unpriced)}")
+
+
 # ---- Models command ----
 
 def cmd_models(args):
@@ -320,6 +366,14 @@ def build_parser():
     usage.add_argument("--client", default=None, help="Filter by client ID")
     usage.add_argument("--model", default=None, help="Filter by model")
     usage.set_defaults(func=cmd_usage)
+
+    # --- costs ---
+    costs = sub.add_parser("costs", help="Show OpenRouter equivalent costs")
+    costs.add_argument("--days", type=int, default=None, help="Last N days")
+    costs.add_argument("--start-date", default=None, help="Start date (YYYY-MM-DD)")
+    costs.add_argument("--end-date", default=None, help="End date (YYYY-MM-DD)")
+    costs.add_argument("--client", default=None, help="Filter by client ID")
+    costs.set_defaults(func=cmd_costs)
 
     # --- models ---
     models = sub.add_parser("models", help="List discovered models")

@@ -1,0 +1,221 @@
+# OpenRouter equivalent pricing for LlamaHerd models
+# All prices in USD per 1M tokens
+# Source: OpenRouter API (https://openrouter.ai/api/v1/models) + supplementary sources
+# Updated: 2026-05-12
+#
+# Strips :cloud suffix automatically — "glm-5.1:cloud" uses "glm-5.1" prices.
+
+models:
+  # --- Top-used (by token volume) ---
+  glm-5.1:
+    openrouter_id: z-ai/glm-5.1
+    input_per_1m: 0.98
+    output_per_1m: 3.08
+
+  kimi-k2.6:
+    openrouter_id: moonshotai/kimi-k2.6
+    input_per_1m: 0.74
+    output_per_1m: 3.50
+
+  deepseek-v4-flash:
+    openrouter_id: deepseek/deepseek-v4-flash
+    input_per_1m: 0.14
+    output_per_1m: 0.28
+
+  deepseek-v4-pro:
+    openrouter_id: deepseek/deepseek-v4-pro
+    input_per_1m: 0.435
+    output_per_1m: 0.87
+
+  kimi-k2.5:
+    openrouter_id: moonshotai/kimi-k2.5
+    input_per_1m: 0.40
+    output_per_1m: 1.98
+
+  minimax-m2.7:
+    openrouter_id: minimax/minimax-m2.7
+    input_per_1m: 0.20
+    output_per_1m: 1.20
+
+  qwen3.5:397b:
+    openrouter_id: qwen/qwen3.5-397b-a17b
+    input_per_1m: 0.39
+    output_per_1m: 2.34
+
+  gemma3:12b:
+    openrouter_id: google/gemma-3-12b-it
+    input_per_1m: 0.04
+    output_per_1m: 0.13
+
+  gpt-4o-mini:
+    openrouter_id: openai/gpt-4o-mini
+    input_per_1m: 0.15
+    output_per_1m: 0.60
+
+  gemma4:31b:
+    openrouter_id: google/gemma-4-31b-it
+    input_per_1m: 0.12
+    output_per_1m: 0.37
+
+  # --- Other used models ---
+  cogito-2.1:671b:
+    openrouter_id: deepcogito/cogito-v2.1-671b
+    input_per_1m: 1.25
+    output_per_1m: 1.25
+
+  gemma3:27b:
+    openrouter_id: google/gemma-3-27b-it
+    input_per_1m: 0.08
+    output_per_1m: 0.16
+
+  gemma3:4b:
+    openrouter_id: google/gemma-3-4b-it
+    input_per_1m: 0.04
+    output_per_1m: 0.08
+
+  glm-5:
+    openrouter_id: z-ai/glm-5
+    input_per_1m: 0.60
+    output_per_1m: 1.92
+
+  glm-4.7:
+    openrouter_id: z-ai/glm-4.7
+    input_per_1m: 0.40
+    output_per_1m: 1.75
+
+  glm-4.6:
+    openrouter_id: z-ai/glm-4.6
+    input_per_1m: 0.39
+    output_per_1m: 1.90
+
+  deepseek-v3.2:
+    openrouter_id: deepseek/deepseek-v3.2
+    input_per_1m: 0.252
+    output_per_1m: 0.378
+
+  deepseek-v3.1:671b:
+    openrouter_id: deepseek/deepseek-chat-v3.1
+    input_per_1m: 0.21
+    output_per_1m: 0.79
+
+  llama4-maverick:
+    openrouter_id: meta-llama/llama-4-maverick
+    input_per_1m: 0.15
+    output_per_1m: 0.60
+
+  mistral-large-3:675b:
+    openrouter_id: mistralai/mistral-large-2512
+    input_per_1m: 0.50
+    output_per_1m: 1.50
+
+  devstral-2:123b:
+    openrouter_id: mistralai/devstral-2512
+    input_per_1m: 0.40
+    output_per_1m: 2.00
+
+  devstral-small-2:24b:
+    openrouter_id: mistralai/devstral-small
+    input_per_1m: 0.10
+    output_per_1m: 0.30
+
+  kimi-k2-thinking:
+    openrouter_id: moonshotai/kimi-k2-thinking
+    input_per_1m: 0.60
+    output_per_1m: 2.50
+
+  kimi-k2:1t:
+    # Not on OpenRouter; estimated from kimi-k2 pricing
+    openrouter_id: ""
+    input_per_1m: 0.57
+    output_per_1m: 2.30
+
+  nemotron-3-super:
+    openrouter_id: nvidia/nemotron-3-super-120b-a12b
+    input_per_1m: 0.09
+    output_per_1m: 0.45
+
+  nemotron-3-nano:30b:
+    openrouter_id: nvidia/nemotron-3-nano-30b-a3b
+    input_per_1m: 0.05
+    output_per_1m: 0.20
+
+  qwen3-next:80b:
+    openrouter_id: qwen/qwen3-next-80b-a3b-instruct
+    input_per_1m: 0.09
+    output_per_1m: 1.10
+
+  qwen3-coder:480b:
+    openrouter_id: qwen/qwen3-coder
+    input_per_1m: 0.22
+    output_per_1m: 1.80
+
+  qwen3-coder-next:
+    openrouter_id: qwen/qwen3-coder-next
+    input_per_1m: 0.11
+    output_per_1m: 0.80
+
+  qwen3-vl:235b:
+    openrouter_id: qwen/qwen3-vl-235b-a22b-instruct
+    input_per_1m: 0.20
+    output_per_1m: 0.88
+
+  qwen3:8b:
+    openrouter_id: qwen/qwen3-8b
+    input_per_1m: 0.05
+    output_per_1m: 0.40
+
+  qwen3:0.6b:
+    # Not on OpenRouter; direct Qwen pricing
+    openrouter_id: ""
+    input_per_1m: 0.20
+    output_per_1m: 0.20
+
+  rnj-1:8b:
+    openrouter_id: essentialai/rnj-1-instruct
+    input_per_1m: 0.15
+    output_per_1m: 0.15
+
+  gpt-oss:20b:
+    openrouter_id: openai/gpt-oss-20b
+    input_per_1m: 0.03
+    output_per_1m: 0.14
+
+  gpt-oss:120b:
+    openrouter_id: openai/gpt-oss-120b
+    input_per_1m: 0.039
+    output_per_1m: 0.18
+
+  gemini-3-flash-preview:
+    openrouter_id: google/gemini-3-flash-preview
+    input_per_1m: 0.50
+    output_per_1m: 3.00
+
+  ministral-3:14b:
+    openrouter_id: mistralai/ministral-14b-2512
+    input_per_1m: 0.20
+    output_per_1m: 0.20
+
+  ministral-3:8b:
+    openrouter_id: mistralai/ministral-8b-2512
+    input_per_1m: 0.15
+    output_per_1m: 0.15
+
+  ministral-3:3b:
+    openrouter_id: mistralai/ministral-3b-2512
+    input_per_1m: 0.10
+    output_per_1m: 0.10
+
+  minimax-m2:
+    openrouter_id: minimax/minimax-m2
+    input_per_1m: 0.255
+    output_per_1m: 1.00
+
+  minimax-m2.1:
+    openrouter_id: minimax/minimax-m2.1
+    input_per_1m: 0.29
+    output_per_1m: 0.95
+
+  minimax-m2.5:
+    openrouter_id: minimax/minimax-m2.5
+    input_per_1m: 0.15
+    output_per_1m: 1.15
