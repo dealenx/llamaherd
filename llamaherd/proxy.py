@@ -3885,6 +3885,7 @@ tr:hover td { background: rgba(88,166,255,0.04); }
   <div class="tab" data-tab="models">Models</div>
   <div class="tab" data-tab="subs">Subscriptions</div>
   <div class="tab" data-tab="quota">Quota Cost</div>
+  <div class="tab" data-tab="costs">OpenRouter $</div>
 </div>
 
 <div class="tab-panel active" id="panel-overview">
@@ -3985,6 +3986,20 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     <th>Model</th><th>Confidence</th><th>Intervals</th><th>Session %</th><th>Tokens In</th><th>Tokens Out</th><th>% of Quota</th><th>Cost / 1K In</th><th>Cost / 1K Out</th><th>In/Out Ratio</th>
   </tr></thead><tbody></tbody></table></div>
   <div id="quota-note" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
+</div>
+
+<div class="tab-panel" id="panel-costs">
+  <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+    <h2 style="margin:0">OpenRouter Equivalent Cost</h2>
+    <button class="btn" id="costs-refresh">Refresh</button>
+    <span class="badge" id="costs-badge">0</span>
+    <span style="font-size:11px;color:var(--dim)">What usage WOULD have cost on OpenRouter pay-per-token pricing</span>
+  </div>
+  <div id="costs-total" class="grid" style="margin-bottom:16px"></div>
+  <div style="overflow-x:auto"><table id="costs-table"><thead><tr>
+    <th>Model</th><th>Req</th><th>Tokens In</th><th>Tokens Out</th><th>Input $</th><th>Output $</th><th>Total $</th><th>$/1M In</th><th>$/1M Out</th>
+  </tr></thead><tbody></tbody></table></div>
+  <div id="costs-unpriced" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
 </div>
 
 <div id="modal-root"></div>
@@ -4779,7 +4794,40 @@ document.getElementById('quota-refresh').addEventListener('click', loadQuotaCost
 // Load quota data when tab is clicked
 document.querySelectorAll('.tab').forEach(t => {
   if (t.dataset.tab === 'quota') t.addEventListener('click', loadQuotaCost);
+  if (t.dataset.tab === 'costs') t.addEventListener('click', loadCosts);
 });
+
+// --- OpenRouter Costs ---
+async function loadCosts() {
+  try {
+    const range = getDateRange(); if (!range.start || !range.end) return;
+    const data = await loadJSON(`/admin/usage/openrouter-costs?start_date=${range.start}&end_date=${range.end}`);
+    const models = data.models || [];
+    const total = data.total_cost_usd || 0;
+    const totalIn = data.total_input_cost_usd || 0;
+    const totalOut = data.total_output_cost_usd || 0;
+    const unpriced = data.unpriced_models || [];
+
+    document.getElementById('costs-badge').textContent = models.length;
+    document.getElementById('costs-total').innerHTML = `
+      <div class="card"><div class="label">Total Cost</div><div class="value" style="color:var(--green)">$${total.toFixed(2)}</div></div>
+      <div class="card"><div class="label">Input Cost</div><div class="value" style="color:var(--blue)">$${totalIn.toFixed(2)}</div></div>
+      <div class="card"><div class="label">Output Cost</div><div class="value" style="color:var(--purple)">$${totalOut.toFixed(2)}</div></div>`;
+
+    document.querySelector('#costs-table tbody').innerHTML = models.map(m => {
+      const inP = m.input_per_1m !== null ? '$' + m.input_per_1m.toFixed(2) : '?';
+      const outP = m.output_per_1m !== null ? '$' + m.output_per_1m.toFixed(2) : '?';
+      return `<tr><td style="font-family:monospace">${escHtml(m.model)}</td><td>${fmt(m.requests)}</td><td>${fmt(m.tokens_in)}</td><td>${fmt(m.tokens_out)}</td>
+        <td>$${m.input_cost_usd.toFixed(2)}</td><td>$${m.output_cost_usd.toFixed(2)}</td><td style="font-weight:600">$${m.total_cost_usd.toFixed(2)}</td>
+        <td style="font-family:monospace">${inP}</td><td style="font-family:monospace">${outP}</td></tr>`;
+    }).join('');
+
+    document.getElementById('costs-unpriced').textContent = unpriced.length
+      ? 'Unpriced models (no OpenRouter data): ' + unpriced.join(', ')
+      : '';
+  } catch (e) { console.error('Failed to load costs:', e); }
+}
+document.getElementById('costs-refresh').addEventListener('click', loadCosts);
 </script>
 </body>
 </html>"""
