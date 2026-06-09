@@ -1792,11 +1792,17 @@ async def lifespan(app: FastAPI):
     # Stale in-flight entry sweeper — removes zombies (0 tokens, stuck >10 min)
     sweep_task = asyncio.create_task(_sweep_stale_inflight(interval=300, max_age_seconds=600))
 
+    # OpenRouter pricing sync: immediate fetch + periodic refresh
+    pricing_sync_task = asyncio.create_task(_pricing_sync_loop(interval_hours=36.0))
+    # Immediate sync on startup (don't block — best-effort)
+    asyncio.create_task(_sync_pricing_from_openrouter())
+
     yield
 
     sub_task.cancel()
     usage_task.cancel()
     sweep_task.cancel()
+    pricing_sync_task.cancel()
     if fb_metadata_task is not None:
         fb_metadata_task.cancel()
     if registry:
@@ -3115,6 +3121,16 @@ async def admin_usage_by_model(days: int = 30, start_date: str = None, end_date:
 # --- OpenRouter cost tracking ---
 
 _OPENROUTER_PRICING: Optional[dict] = None
+_PRICING_LAST_SYNC: Optional[float] = None  # epoch seconds of last successful OpenRouter API sync
+
+# Mapping from LlamaHerd model names to OpenRouter model IDs.
+# Used to enrich local models with OpenRouter pricing when they aren't in the YAML already.
+# This is a best-effort mapping; models not listed here need manual openrouter_id in the YAML.
+_PRICING_MODEL_ALIASES: dict[str, str] = {
+    # Populated dynamically from the YAML's openrouter_id fields.
+    # Additional heuristics are applied in _sync_pricing_from_openrouter().
+}
+
 
 def _load_openrouter_pricing() -> dict:
     """Load OpenRouter pricing from YAML. Caches after first load."""
@@ -3127,10 +3143,241 @@ def _load_openrouter_pricing() -> dict:
             data = yaml.safe_load(f)
         _OPENROUTER_PRICING = data.get("models", {}) if data else {}
         log.info(f"Loaded OpenRouter pricing for {len(_OPENROUTER_PRICING)} models")
+        # Build alias map from existing openrouter_id entries
+        _rebuild_pricing_aliases()
     else:
         _OPENROUTER_PRICING = {}
         log.warning(f"No openrouter_pricing.yaml found at {pricing_path}")
     return _OPENROUTER_PRICING
+
+
+def _rebuild_pricing_aliases():
+    """Rebuild _PRICING_MODEL_ALIASES from current pricing data."""
+    global _PRICING_MODEL_ALIASES
+    aliases = {}
+    for name, entry in _OPENROUTER_PRICING.items():
+        or_id = entry.get("openrouter_id", "")
+        if or_id:
+            aliases[name] = or_id
+    _PRICING_MODEL_ALIASES = aliases
+
+
+def _save_pricing_yaml(pricing: dict):
+    """Write pricing data back to YAML file, preserving header comments."""
+    pricing_path = CONFIG_PATH.parent / "openrouter_pricing.yaml"
+    header = [
+        "# OpenRouter equivalent pricing for LlamaHerd models",
+        "# All prices in USD per 1M tokens",
+        "# Source: OpenRouter API (https://openrouter.ai/api/v1/models) + supplementary sources",
+        f"# Auto-synced: {datetime.now(timezone.utc).isoformat()}",
+        "#",
+        '# Strips :cloud suffix automatically — "glm-5.1:cloud" uses "glm-5.1" prices.',
+        "",
+    ]
+    # Build ordered dict for YAML output
+    output = {"models": pricing}
+    yaml_content = yaml.dump(output, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    with open(pricing_path, "w") as f:
+        f.write("\n".join(header) + "\n")
+        f.write(yaml_content)
+    log.info(f"Saved pricing YAML with {len(pricing)} models to {pricing_path}")
+
+
+async def _sync_pricing_from_openrouter() -> int:
+    """Fetch current pricing from OpenRouter API and merge into local pricing data.
+
+    - New models discovered on OpenRouter are added.
+    - Existing model prices are updated to match OpenRouter's live rates.
+    - Models not on OpenRouter (openrouter_id: "") keep their manual prices.
+    - Models with an openrouter_id get their prices refreshed.
+    - Returns the number of models updated/added.
+
+    This runs on startup (immediate) and periodically every 24-48h.
+    """
+    global _OPENROUTER_PRICING, _PRICING_LAST_SYNC
+
+    url = "https://openrouter.ai/api/v1/models"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        log.warning(f"OpenRouter pricing sync failed: {e}")
+        return 0
+
+    models_list = data.get("data", [])
+    if not models_list:
+        log.warning("OpenRouter pricing sync: empty model list received")
+        return 0
+
+    # Build a lookup: openrouter_id -> {prompt, completion} per-token pricing
+    or_pricing: dict[str, dict] = {}
+    for m in models_list:
+        mid = m.get("id", "")
+        p = m.get("pricing", {})
+        if not p:
+            continue
+        prompt = p.get("prompt", "0")
+        completion = p.get("completion", "0")
+        # Skip free models (both prices are "0")
+        try:
+            p_val = float(prompt)
+            c_val = float(completion)
+        except (ValueError, TypeError):
+            continue
+        if p_val == 0 and c_val == 0:
+            continue
+        # Convert per-token to per-1M tokens
+        or_pricing[mid] = {
+            "input_per_1m": round(p_val * 1_000_000, 6),
+            "output_per_1m": round(c_val * 1_000_000, 6),
+        }
+
+    # Make sure we have the current pricing loaded
+    if _OPENROUTER_PRICING is None:
+        _load_openrouter_pricing()
+    assert _OPENROUTER_PRICING is not None  # guaranteed by _load_openrouter_pricing
+
+    updated = 0
+    added = 0
+
+    # Phase 1: Update existing models that have an openrouter_id
+    for name, entry in list(_OPENROUTER_PRICING.items()):
+        or_id = entry.get("openrouter_id", "")
+        if not or_id:
+            continue  # Manual-only entry, skip
+        if or_id in or_pricing:
+            new_prices = or_pricing[or_id]
+            old_in = entry.get("input_per_1m", 0)
+            old_out = entry.get("output_per_1m", 0)
+            new_in = new_prices["input_per_1m"]
+            new_out = new_prices["output_per_1m"]
+            if old_in != new_in or old_out != new_out:
+                log.info(f"Pricing updated for {name} ({or_id}): "
+                         f"${old_in}/${old_out} -> ${new_in}/${new_out} per 1M")
+                entry["input_per_1m"] = new_in
+                entry["output_per_1m"] = new_out
+                updated += 1
+
+    # Phase 2: Discover Ollama Cloud models that have usage but no pricing entry
+    # Map Ollama model names to likely OpenRouter IDs using known patterns
+    # Build reverse lookup: openrouter_id -> local name (for discovery)
+    or_id_to_local = {}
+    for name, entry in _OPENROUTER_PRICING.items():
+        or_id = entry.get("openrouter_id", "")
+        if or_id:
+            or_id_to_local[or_id] = name
+
+    # Also check registry models against OpenRouter
+    if registry:
+        for model_id in registry.models:
+            # Strip :cloud suffix for lookup
+            lookup_key = model_id.replace(":cloud", "").replace(":cloud-", "-")
+            if lookup_key in _OPENROUTER_PRICING:
+                continue  # Already have pricing
+
+            # Try common naming patterns to find OpenRouter equivalent
+            candidates = _guess_openrouter_id(lookup_key)
+            for or_id in candidates:
+                if or_id in or_pricing and or_id not in or_id_to_local:
+                    prices = or_pricing[or_id]
+                    _OPENROUTER_PRICING[lookup_key] = {
+                        "openrouter_id": or_id,
+                        "input_per_1m": prices["input_per_1m"],
+                        "output_per_1m": prices["output_per_1m"],
+                    }
+                    or_id_to_local[or_id] = lookup_key
+                    added += 1
+                    log.info(f"New model discovered: {lookup_key} -> {or_id} "
+                             f"(${prices['input_per_1m']}/${prices['output_per_1m']} per 1M)")
+                    break
+
+    # Persist to YAML
+    if updated > 0 or added > 0:
+        try:
+            _save_pricing_yaml(_OPENROUTER_PRICING)
+            _rebuild_pricing_aliases()
+        except Exception as e:
+            log.error(f"Failed to save pricing YAML: {e}")
+
+    _PRICING_LAST_SYNC = time.time()
+    log.info(f"OpenRouter pricing sync complete: {len(or_pricing)} models fetched, "
+             f"{updated} updated, {added} added, {len(_OPENROUTER_PRICING)} total local entries")
+    return updated + added
+
+
+def _guess_openrouter_id(model_name: str) -> list[str]:
+    """Given a LlamaHerd/Ollama model name, guess likely OpenRouter model IDs.
+
+    Ollama and OpenRouter use different naming conventions. This function
+    produces candidate OpenRouter IDs in priority order for matching.
+    """
+    candidates = []
+
+    # Known provider prefixes on OpenRouter
+    providers = {
+        "glm": "z-ai",
+        "gemma": "google",
+        "deepseek": "deepseek",
+        "kimi": "moonshotai",
+        "qwen": "qwen",
+        "mistral": "mistralai",
+        "minimax": "minimax",
+        "nemotron": "nvidia",
+        "llama": "meta-llama",
+        "devstral": "mistralai",
+        "ministral": "mistralai",
+        "rnj": "essentialai",
+        "gpt-oss": "openai",
+        "cogito": "deepcogito",
+    }
+
+    # Extract base family name
+    name = model_name
+
+    # Strip quantization/size suffix common in Ollama (e.g. :latest, :7b, :q4_0)
+    base = name.split(":")[0] if ":" in name else name
+
+    # Try direct match first — some models share names
+    # e.g. "deepseek-v4-flash" -> "deepseek/deepseek-v4-flash"
+
+    # Provider prefix mapping
+    for prefix, or_provider in providers.items():
+        if base.startswith(prefix):
+            # e.g. "glm-5.1" -> ["z-ai/glm-5.1", "z-ai/glm5.1"]
+            # e.g. "gemma3:12b" -> "gemma3" -> ["google/gemma-3-12b-it"]
+            stem = base[len(prefix):]
+            if stem.startswith("-") or stem.startswith("_"):
+                stem = stem[1:]
+            # Try provider/stem as-is
+            candidates.append(f"{or_provider}/{base}")
+            # Try with hyphens-to-dashes normalization
+            candidates.append(f"{or_provider}/{prefix}-{stem}")
+            # Gemma special: google/gemma-X-Yb-it
+            if prefix == "gemma" and ":" in name:
+                size_part = name.split(":")[1]
+                # gemma3:12b -> google/gemma-3-12b-it
+                major = base.replace("gemma", "")
+                candidates.append(f"google/gemma-{major}-{size_part}-it")
+            break
+    else:
+        # No known provider — try common patterns
+        candidates.append(f"{base}/{base}")
+        # Try the model name itself as a slug
+        candidates.append(base)
+
+    return candidates
+
+
+async def _pricing_sync_loop(interval_hours: float = 36.0):
+    """Periodically sync OpenRouter pricing every N hours (default 36h = between 24-48h)."""
+    while True:
+        await asyncio.sleep(interval_hours * 3600)
+        try:
+            await _sync_pricing_from_openrouter()
+        except Exception as e:
+            log.error(f"Periodic pricing sync failed: {e}")
 
 
 @app.get("/admin/usage/openrouter-costs", dependencies=[Depends(_verify_admin)])
@@ -3142,6 +3389,36 @@ async def admin_openrouter_costs(days: int = 30, start_date: str = None,
     pricing = _load_openrouter_pricing()
     return usage_db.openrouter_costs(pricing, days, start_date=start_date,
                                      end_date=end_date, client_id=client)
+
+
+@app.post("/admin/sync-pricing", dependencies=[Depends(_verify_admin)])
+async def admin_sync_pricing():
+    """Trigger an immediate sync of OpenRouter pricing data.
+
+    Fetches current prices from https://openrouter.ai/api/v1/models,
+    updates existing model prices, discovers new models, and persists
+    changes to openrouter_pricing.yaml.
+    """
+    result = await _sync_pricing_from_openrouter()
+    return {
+        "sync_result": result,
+        "last_sync": _PRICING_LAST_SYNC,
+        "total_models": len(_OPENROUTER_PRICING) if _OPENROUTER_PRICING else 0,
+    }
+
+
+@app.get("/admin/pricing-status", dependencies=[Depends(_verify_admin)])
+async def admin_pricing_status():
+    """Show pricing data status: number of models, last sync time, unpriced models."""
+    pricing = _load_openrouter_pricing() if _OPENROUTER_PRICING is None else _OPENROUTER_PRICING
+    unpriced = [name for name, entry in pricing.items() if not entry.get("openrouter_id")]
+    return {
+        "total_models": len(pricing),
+        "priced_models": len(pricing) - len(unpriced),
+        "unpriced_models": unpriced,
+        "last_sync": _PRICING_LAST_SYNC,
+        "last_sync_iso": datetime.fromtimestamp(_PRICING_LAST_SYNC, tz=timezone.utc).isoformat() if _PRICING_LAST_SYNC else None,
+    }
 
 
 @app.get("/admin/recent-calls", dependencies=[Depends(_verify_admin)])

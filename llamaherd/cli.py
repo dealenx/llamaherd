@@ -269,6 +269,43 @@ def cmd_models(args):
     _format_output(data, args.format, _models_table)
 
 
+def cmd_sync_pricing(args):
+    """Trigger OpenRouter pricing sync and show results."""
+    data = _api(args, "POST", "/admin/sync-pricing")
+    _format_output(data, args.format, _sync_pricing_table)
+
+
+def _sync_pricing_table(data):
+    result = data.get("sync_result", 0)
+    total = data.get("total_models", 0)
+    last_sync = data.get("last_sync")
+    sync_time = ""
+    if last_sync:
+        from datetime import datetime, timezone
+        sync_time = datetime.fromtimestamp(last_sync, tz=timezone.utc).isoformat()
+    print(f"Models updated/added: {result}")
+    print(f"Total priced models: {total}")
+    print(f"Last sync: {sync_time or 'never'}")
+
+
+def cmd_pricing_status(args):
+    data = _api(args, "GET", "/admin/pricing-status")
+    _format_output(data, args.format, _pricing_status_table)
+
+
+def _pricing_status_table(data):
+    total = data.get("total_models", 0)
+    priced = data.get("priced_models", 0)
+    unpriced = data.get("unpriced_models", [])
+    last_sync = data.get("last_sync_iso", "never")
+    print(f"Total models: {total}")
+    print(f"Priced (OpenRouter): {priced}")
+    print(f"Unpriced (manual-only): {len(unpriced)}")
+    if unpriced:
+        print(f"  Unpriced models: {', '.join(unpriced)}")
+    print(f"Last sync: {last_sync}")
+
+
 def _models_table(data):
     models = data.get("models", [])
     if not models:
@@ -378,6 +415,14 @@ def build_parser():
     # --- models ---
     models = sub.add_parser("models", help="List discovered models")
     models.set_defaults(func=cmd_models)
+
+    # --- sync-pricing ---
+    sync_pricing = sub.add_parser("sync-pricing", help="Sync pricing from OpenRouter API")
+    sync_pricing.set_defaults(func=cmd_sync_pricing)
+
+    # --- pricing-status ---
+    pricing_status = sub.add_parser("pricing-status", help="Show pricing data status")
+    pricing_status.set_defaults(func=cmd_pricing_status)
 
     # --- banner ---
     banner = sub.add_parser("banner", help="Print the LlamaHerd ASCII banner")
