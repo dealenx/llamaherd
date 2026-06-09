@@ -817,6 +817,12 @@ class ModelRegistry:
         new_models = set(all_models.keys()) - old_models
         if new_models:
             log.info(f"New models discovered: {sorted(new_models)}")
+            # Trigger an immediate pricing sync so new models get OpenRouter
+            # pricing data right away (instead of waiting up to 24h).
+            try:
+                asyncio.create_task(_sync_pricing_from_openrouter())
+            except Exception as e:
+                log.debug(f"Pricing sync trigger for new models failed: {e}")
         log.info(f"Model registry: {len(self.models)} models discovered across {len(self.manager.keys)} keys")
         # Broadcast model changes via SSE
         try:
@@ -1792,8 +1798,8 @@ async def lifespan(app: FastAPI):
     # Stale in-flight entry sweeper — removes zombies (0 tokens, stuck >10 min)
     sweep_task = asyncio.create_task(_sweep_stale_inflight(interval=300, max_age_seconds=600))
 
-    # OpenRouter pricing sync: immediate fetch + periodic refresh
-    pricing_sync_task = asyncio.create_task(_pricing_sync_loop(interval_hours=36.0))
+    # OpenRouter pricing sync: immediate fetch + periodic refresh every 24h
+    pricing_sync_task = asyncio.create_task(_pricing_sync_loop(interval_hours=24.0))
     # Immediate sync on startup (don't block — best-effort)
     asyncio.create_task(_sync_pricing_from_openrouter())
 
@@ -1920,6 +1926,7 @@ def _resolve_client(request: Request) -> dict:
 
 async def _proxy_request(request: Request, path: str) -> Response:
     """Core proxy logic — acquire key, forward, handle 429s, release."""
+    global _LAST_DISCOVERY_REFRESH
 
     client = _resolve_client(request)
     client_id = client["id"]
@@ -1952,7 +1959,10 @@ async def _proxy_request(request: Request, path: str) -> Response:
     # Fallback routing decision (priority before/only/after).
     fp = fallback_provider
     has_fallback = bool(fp and fp.enabled)
-    ollama_has_model = bool(registry and registry.models.get(model))
+    # Strip :cloud suffix for registry lookup — Ollama Cloud may report
+    # model names without :cloud, but clients request "model:cloud".
+    model_base = model.replace(":cloud", "").replace(":cloud-", "-")
+    ollama_has_model = bool(registry and (registry.models.get(model) or registry.models.get(model_base)))
     fp_mapped = bool(has_fallback and fp.resolve_model(model))
     fp_can_serve = bool(has_fallback and (fp.resolve_model(model) or fp.default_model))
     priority = fp.priority_for(model) if has_fallback else "after"
@@ -1960,6 +1970,27 @@ async def _proxy_request(request: Request, path: str) -> Response:
     # Reject unknown models: when reject_unknown_models is true, models
     # that aren't known to Ollama AND aren't in the fallback model_map
     # get a 404 instead of silently routing to the fallback default_model.
+    # But first, try an immediate registry + pricing refresh to discover
+    # newly-available models before rejecting.
+    if reject_unknown_models and not ollama_has_model and not fp_mapped and registry:
+        # Attempt an immediate discovery refresh for the unknown model.
+        # This catches models that appeared on Ollama Cloud after our last
+        # periodic refresh (every 5 min for registry, 24h for pricing).
+        # Cooldown: don't refresh more than once per 60 seconds to avoid
+        # latency spikes on burst requests for the same unknown model.
+        now = time.time()
+        if now - _LAST_DISCOVERY_REFRESH > 60.0:
+            try:
+                log.info(f"Unknown model '{model}' requested — triggering immediate registry refresh + pricing sync")
+                _LAST_DISCOVERY_REFRESH = now
+                await registry.refresh()
+                await _sync_pricing_from_openrouter()
+                # Re-check after refresh
+                ollama_has_model = bool(registry.models.get(model) or registry.models.get(model_base))
+                fp_mapped = bool(fp and fp.enabled and fp.resolve_model(model))
+            except Exception as e:
+                log.warning(f"Immediate discovery refresh failed for '{model}': {e}")
+
     if reject_unknown_models and not ollama_has_model and not fp_mapped:
         _record_and_broadcast(client_id, "none", model, 0, 0, 0, 404,
                               request_id=request_id, provider="proxy")
@@ -3121,6 +3152,7 @@ async def admin_usage_by_model(days: int = 30, start_date: str = None, end_date:
 # --- OpenRouter cost tracking ---
 
 _OPENROUTER_PRICING: Optional[dict] = None
+_LAST_DISCOVERY_REFRESH: float = 0.0  # epoch seconds of last immediate discovery refresh
 _PRICING_LAST_SYNC: Optional[float] = None  # epoch seconds of last successful OpenRouter API sync
 
 # Mapping from LlamaHerd model names to OpenRouter model IDs.
@@ -3370,8 +3402,8 @@ def _guess_openrouter_id(model_name: str) -> list[str]:
     return candidates
 
 
-async def _pricing_sync_loop(interval_hours: float = 36.0):
-    """Periodically sync OpenRouter pricing every N hours (default 36h = between 24-48h)."""
+async def _pricing_sync_loop(interval_hours: float = 24.0):
+    """Periodically sync OpenRouter pricing every N hours (default 24h)."""
     while True:
         await asyncio.sleep(interval_hours * 3600)
         try:
