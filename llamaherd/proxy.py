@@ -2021,6 +2021,31 @@ async def _sweep_stale_inflight(interval: int = 300, max_age_seconds: int = 600)
 
 app = FastAPI(title="Ollama Cloud Proxy", lifespan=lifespan)
 
+# Temporary request-header capture for debugging session identifiers
+_REQUEST_HEADERS_LOG: list[dict] = []
+
+@app.middleware("http")
+async def _capture_request_headers(request: Request, call_next):
+    if request.url.path.startswith(("/v1/", "/api/")):
+        headers = dict(request.headers)
+        # Sanitize auth tokens
+        if "authorization" in headers:
+            headers["authorization"] = headers["authorization"][:12] + "..."
+        _REQUEST_HEADERS_LOG.append({
+            "ts": time.time(),
+            "path": request.url.path,
+            "method": request.method,
+            "headers": headers,
+        })
+        if len(_REQUEST_HEADERS_LOG) > 200:
+            _REQUEST_HEADERS_LOG.pop(0)
+    return await call_next(request)
+
+@app.get("/admin/request-headers", dependencies=[Depends(_verify_admin)])
+async def admin_request_headers(limit: int = 50):
+    """Return recently captured request headers for debugging session identifiers."""
+    return {"requests": _REQUEST_HEADERS_LOG[-limit:][::-1]}
+
 
 def _resolve_client(request: Request) -> dict:
     """Extract Bearer token from request and resolve to client identity."""
