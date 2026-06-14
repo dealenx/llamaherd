@@ -14,6 +14,7 @@ OpenAI-compatible proxy that routes requests across multiple Ollama Cloud API ke
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -2056,14 +2057,17 @@ def _resolve_client(request: Request) -> dict:
     return {"id": "anonymous", "label": "Anonymous", "token": ""}
 
 
-def _extract_session_id(request: Request) -> Optional[str]:
+def _extract_session_id(request: Request, body_json: Optional[dict] = None) -> Optional[str]:
     """Extract or generate a session id for sticky routing.
 
     Priority:
     1. X-LlamaHerd-Session request header
     2. llamaherd-session cookie
     3. X-Conversation-ID header (common alias)
-    4. None — will still be created from the first response
+    4. Hash the start of the conversation messages so repeated turns in the
+       same chat route to the same sub even when the client sends no session
+       identifier. This is a pragmatic fallback for OpenAI-compatible clients.
+    5. None — caller will generate a random id
     """
     sid = request.headers.get("x-llamaherd-session") or request.headers.get("x-conversation-id")
     if sid:
@@ -2074,6 +2078,25 @@ def _extract_session_id(request: Request) -> Optional[str]:
             return cookie.strip()
     except Exception:
         pass
+
+    # Fallback: derive a stable key from the leading conversation context.
+    # We hash the first user message plus the first system message (if any).
+    # This keeps turns from the same chat on the same sub for KV-cache reuse.
+    if body_json and isinstance(body_json, dict):
+        messages = body_json.get("messages") or body_json.get("prompt") or []
+        if isinstance(messages, list):
+            seed_parts = []
+            for msg in messages[:3]:
+                if isinstance(msg, dict):
+                    role = msg.get("role", "")
+                    content = msg.get("content") or ""
+                    if role in ("system", "user") and content:
+                        seed_parts.append(f"{role}:{content[:120]}")
+            if seed_parts:
+                seed = "|".join(seed_parts)
+                # Prefix with client id so different clients using identical prompts don't collide
+                client_hint = request.headers.get("authorization", "")[:16]
+                return "lh_ctx_" + hashlib.sha256(f"{client_hint}:{seed}".encode()).hexdigest()[:24]
     return None
 
 
@@ -2178,16 +2201,11 @@ async def _proxy_request(request: Request, path: str) -> Response:
         return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id, session_id=session_id)
 
     prefer_key = registry.get_preferred_key(model) if registry else None
-    session_id = _extract_session_id(request)
+    session_id = _extract_session_id(request, req_json)
     if not session_id:
         session_id = "lh_" + secrets.token_urlsafe(16)
     sticky_key = await sticky.get_preferred_key(session_id) if sticky else None
-    relevant_headers = {
-        k: request.headers.get(k)
-        for k in ["x-llamaherd-session", "x-conversation-id", "cookie", "authorization"]
-        if request.headers.get(k)
-    }
-    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8]+'...' if sticky_key else None} headers={relevant_headers}")
+    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8]+'...' if sticky_key else None}")
 
     last_error = None
     start_emitted = False
@@ -2664,16 +2682,11 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
     is_stream = req_json.get("stream", False)
 
     prefer_key = registry.get_preferred_key(model) if registry else None
-    session_id = _extract_session_id(request)
+    session_id = _extract_session_id(request, req_json)
     if not session_id:
         session_id = "lh_" + secrets.token_urlsafe(16)
     sticky_key = await sticky.get_preferred_key(session_id) if sticky else None
-    relevant_headers = {
-        k: request.headers.get(k)
-        for k in ["x-llamaherd-session", "x-conversation-id", "cookie", "authorization"]
-        if request.headers.get(k)
-    }
-    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8]+'...' if sticky_key else None} headers={relevant_headers}")
+    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8]+'...' if sticky_key else None}")
     log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8] + '...' if sticky_key else None}")
 
     last_error = None
