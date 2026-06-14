@@ -28,3 +28,4 @@ Thumbs.db
 .venv/
 venv/
 .env
+nvidia_model_cache.json
