@@ -16,6 +16,7 @@ OpenAI-compatible proxy that routes requests across multiple Ollama Cloud API ke
 import asyncio
 import json
 import logging
+import re
 import secrets
 import sqlite3
 import time
@@ -238,6 +239,8 @@ class KeyState:
     session_resets_at: Optional[str] = None
     weekly_usage_pct: float = -1.0
     weekly_resets_at: Optional[str] = None
+    session_models: dict = field(default_factory=dict)
+    weekly_models: dict = field(default_factory=dict)
 
     @property
     def available_slots(self) -> int:
@@ -527,6 +530,8 @@ class KeyManager:
             "weekly_usage_pct": k.weekly_usage_pct,
             "weekly_resets_at": k.weekly_resets_at,
             "weekly_elapsed_pct": k._weekly_elapsed_pct(),
+            "session_models": k.session_models,
+            "weekly_models": k.weekly_models,
         } for k in self.keys]
 
     def key_by_token_prefix(self, prefix: str) -> Optional[KeyState]:
@@ -601,11 +606,18 @@ class UsageScraper:
 
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            result = {"session_usage_pct": -1.0, "weekly_usage_pct": -1.0,
-                      "session_resets_at": None, "weekly_resets_at": None}
+            result: dict = {
+                "session_usage_pct": -1.0,
+                "weekly_usage_pct": -1.0,
+                "session_resets_at": None,
+                "weekly_resets_at": None,
+                "session_models": {},
+                "weekly_models": {},
+            }
 
-            # Parse usage percentages
-            for div in soup.find_all("div", class_="flex justify-between mb-2"):
+            # Parse top-level usage percentages and reset times
+            pct_divs = soup.find_all("div", class_="flex justify-between mb-2")
+            for i, div in enumerate(pct_divs):
                 spans = div.find_all("span")
                 if len(spans) >= 2:
                     label = spans[0].get_text(strip=True)
@@ -620,7 +632,6 @@ class UsageScraper:
                     elif "Weekly" in label:
                         result["weekly_usage_pct"] = pct
 
-            # Parse reset times
             for i, div in enumerate(soup.find_all("div", class_="local-time")):
                 iso_time = div.get("data-time", "")
                 text = div.get_text(strip=True)
@@ -629,9 +640,40 @@ class UsageScraper:
                 elif i == 1:
                     result["weekly_resets_at"] = iso_time or text
 
+            # Parse per-model usage bars: session (first meter), weekly (second meter)
+            meters = soup.find_all("div", attrs={"data-usage-meter": True})
+            for window, meter in [("session", meters[0] if len(meters) > 0 else None),
+                                  ("weekly", meters[1] if len(meters) > 1 else None)]:
+                if not meter:
+                    continue
+                window_key = f"{window}_models"
+                for seg in meter.find_all("button", attrs={"data-usage-segment": True}):
+                    model = seg.get("data-model", "")
+                    reqs = seg.get("data-requests", "")
+                    if not model:
+                        continue
+                    try:
+                        requests = int(re.sub(r"[^0-9]", "", str(reqs))) if reqs else 0
+                    except ValueError:
+                        requests = 0
+                    pct_str = "0"
+                    style = str(seg.get("style", ""))
+                    m = re.search(r"width:\s*([\d.]+)%", style)
+                    if m:
+                        pct_str = m.group(1)
+                    try:
+                        bar_pct = float(pct_str)
+                    except ValueError:
+                        bar_pct = 0.0
+                    result[window_key][model] = {
+                        "requests": requests,
+                        "bar_pct": round(bar_pct, 3),
+                    }
+
             log.info(f"Usage scrape for {key.label}: "
                      f"session {result['session_usage_pct']}% "
-                     f"weekly {result['weekly_usage_pct']}%")
+                     f"weekly {result['weekly_usage_pct']}% "
+                     f"models={len(result['session_models'])}/{len(result['weekly_models'])}")
             return result
 
         except Exception as e:
@@ -648,6 +690,8 @@ class UsageScraper:
                 key.session_resets_at = data["session_resets_at"]
                 key.weekly_usage_pct = data["weekly_usage_pct"]
                 key.weekly_resets_at = data["weekly_resets_at"]
+                key.session_models = data.get("session_models", {})
+                key.weekly_models = data.get("weekly_models", {})
                 results[key.label] = data
         return results
 
@@ -1232,14 +1276,12 @@ class UsageDB:
         self._conn.commit()
 
     def record(self, client_id: str, upstream_key: str, model: str,
-               tokens_in: int, tokens_out: int, latency_ms: int, status: int,
-               session_usage_pct: float = -1.0, weekly_usage_pct: float = -1.0):
+               tokens_in: int, tokens_out: int, latency_ms: int, status: int):
         today = datetime.now(timezone.utc).date().isoformat()
         self._conn.execute(
-            "INSERT INTO usage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO usage (ts, day, client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (time.time(), today, client_id, upstream_key, model,
-             tokens_in, tokens_out, latency_ms, status,
-             session_usage_pct, weekly_usage_pct),
+             tokens_in, tokens_out, latency_ms, status),
         )
         self._conn.commit()
 
@@ -1725,16 +1767,8 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
                            *, request_id: Optional[str] = None,
                            provider: Optional[str] = None):
     """Record usage to DB and broadcast call + request_end events to SSE subscribers."""
-    # Look up the key's cached usage percentages for quota cost tracking
-    s_pct = -1.0
-    w_pct = -1.0
-    if manager:
-        key = manager.key_by_token_prefix(upstream_key)
-        if key:
-            s_pct = key.session_usage_pct if key.session_usage_pct >= 0 else -1.0
-            w_pct = key.weekly_usage_pct if key.weekly_usage_pct >= 0 else -1.0
-    usage_db.record(client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status,
-                    session_usage_pct=s_pct, weekly_usage_pct=w_pct)
+    if usage_db:
+        usage_db.record(client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status)
     call_data = {
         "ts": time.time(),
         "client_id": client_id,
@@ -2100,19 +2134,20 @@ async def _proxy_request(request: Request, path: str) -> Response:
 
     # priority=only — fallback only for mapped models; Ollama for others.
     if has_fallback and priority == "only" and fp_mapped:
-        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id, session_id=session_id)
     # priority=before — try fallback first when a mapping exists.
     if has_fallback and priority == "before" and fp_mapped:
-        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id, session_id=session_id)
     # priority=after — model unknown to Ollama but fallback can serve it.
     if has_fallback and priority == "after" and not ollama_has_model and fp_can_serve:
-        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id, session_id=session_id)
 
     prefer_key = registry.get_preferred_key(model) if registry else None
     session_id = _extract_session_id(request)
     if not session_id:
         session_id = "lh_" + secrets.token_urlsafe(16)
     sticky_key = await sticky.get_preferred_key(session_id) if sticky else None
+    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8] + '...' if sticky_key else None}")
 
     last_error = None
     start_emitted = False
@@ -2129,7 +2164,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
             # All keys at capacity — fall back if priority allows it.
             if has_fallback and fp_can_serve and priority in ("after", "before") and not ollama_has_model:
                 log.warning(f"Ollama keys at capacity for {model}; falling back to {fp.label}")
-                return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
+                return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id, session_id=session_id)
             if has_fallback and fp_can_serve and priority in ("after", "before") and ollama_has_model:
                 log.warning(
                     f"Ollama keys at capacity for known Ollama model {model}; "
@@ -2243,7 +2278,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
         log.warning(f"Ollama exhausted retries for {model}; falling back to {fp.label}")
         # Pop the Ollama in-flight entry so the fallback emits a fresh start.
         _in_flight.pop(request_id, None)
-        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
+        return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id, session_id=session_id)
     if has_fallback and fp_can_serve and priority in ("after", "before") and ollama_has_model:
         log.warning(
             f"Ollama exhausted retries for known Ollama model {model}; "
@@ -2352,7 +2387,8 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
 
 async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
                               body: bytes, req_json: dict, original_model: str,
-                              is_stream: bool, request_id: Optional[str] = None) -> Response:
+                              is_stream: bool, request_id: Optional[str] = None,
+                              session_id: Optional[str] = None) -> Response:
     """Forward an OpenAI-style request to the fallback provider.
 
     Rewrites the model name in the request body using fp.resolve_model().
@@ -2382,7 +2418,7 @@ async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
     if is_stream:
         return await _proxy_fallback_stream(
             client_id, fp, url, headers, new_body, original_model, mapped, start, upstream_label,
-            request_id,
+            request_id, session_id=session_id,
         )
 
     async with httpx.AsyncClient(timeout=request_timeout) as ch:
@@ -2412,7 +2448,8 @@ async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
 async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
                                   headers: dict, body: bytes, original_model: str,
                                   mapped: str, start: float, upstream_label: str,
-                                  request_id: Optional[str] = None) -> StreamingResponse:
+                                  request_id: Optional[str] = None,
+                                  session_id: Optional[str] = None) -> StreamingResponse:
     async def generate():
         tokens_in = 0
         tokens_out = 0
@@ -2468,7 +2505,7 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
     if sticky and session_id:
         bridge_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
         bridge_headers["X-LlamaHerd-Session"] = session_id
-        bridge_headers["X-LlamaHerd-Key"] = key.label
+        bridge_headers["X-LlamaHerd-Key"] = upstream_label
     return StreamingResponse(generate(), media_type="text/event-stream", headers=bridge_headers)
 
 
@@ -2591,6 +2628,8 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
     if not session_id:
         session_id = "lh_" + secrets.token_urlsafe(16)
     sticky_key = await sticky.get_preferred_key(session_id) if sticky else None
+    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8] + '...' if sticky_key else None}")
+    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8] + '...' if sticky_key else None}")
 
     last_error = None
     start_emitted = False
@@ -4359,6 +4398,7 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 <div class="model-info" id="model-info">
   <span>Models: <span class="mi-val" id="mi-count">-</span></span>
   <span>Refreshed: <span class="mi-val" id="mi-refresh">-</span></span>
+  <span id="sticky-info" style="display:none">Sticky sessions: <span class="mi-val" id="sticky-count">-</span> / TTL <span class="mi-val" id="sticky-ttl">-</span>s</span>
   <span id="mi-new" class="new-models" style="display:none"></span>
   <button id="btn-refresh-models">🔄 Refresh</button>
   <span id="fallback-control" style="display:none; margin-left:auto; align-items:center; gap:6px;">
@@ -4482,8 +4522,9 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     <span style="font-size:11px;color:var(--dim)" id="quota-subtitle">Separate input/output coefficients solved via least-squares from usage deltas.</span>
   </div>
   <div style="margin-bottom:8px; font-size:12px; color:var(--dim)" id="quota-solve-status"></div>
-  <div style="overflow-x:auto"><table id="quota-table"><thead><tr>
-    <th>Model</th><th>Confidence</th><th>Intervals</th><th>Session %</th><th>Tokens In</th><th>Tokens Out</th><th>% of Quota</th><th>Cost / 1K In</th><th>Cost / 1K Out</th><th>In/Out Ratio</th>
+  <div style="overflow-x:auto"><div id="quota-status" style="color:var(--dim);margin-bottom:1em"></div>
+<table id="quota-table"><thead><tr>
+    <th>Key</th><th>Window</th><th>Usage %</th><th>Resets</th><th>Model</th><th>Requests</th><th>Bar %</th>
   </tr></thead><tbody></tbody></table></div>
   <div id="quota-note" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
 </div>
@@ -4567,7 +4608,7 @@ function connectSSE() {
   eventSource = new EventSource(url);
   eventSource.onopen = () => { reconnectDelay=1000; document.getElementById('sse-dot').className='sse-dot ok'; document.getElementById('sse-label').textContent='live'; };
   eventSource.onerror = () => { document.getElementById('sse-dot').className='sse-dot off'; document.getElementById('sse-label').textContent='reconnecting...'; eventSource.close(); setTimeout(connectSSE,reconnectDelay); reconnectDelay=Math.min(reconnectDelay*2,30000); };
-  eventSource.addEventListener('status', e => { const d=JSON.parse(e.data); renderKeyStatus(d.keys||[]); document.getElementById('upstream-url').textContent=d.upstream||''; });
+  eventSource.addEventListener('status', e => { const d=JSON.parse(e.data); renderKeyStatus(d.keys||[]); document.getElementById('upstream-url').textContent=d.upstream||''; updateStickyBadge(d); });
   eventSource.addEventListener('models', e => updateModelInfo(JSON.parse(e.data)));
   eventSource.onmessage = e => {
     try {
@@ -4575,7 +4616,7 @@ function connectSSE() {
       if(m.type==='call') { if(callInCurrentRange(m.data)) schedulePeriodRefresh(); }
       else if(m.type==='request_start') { addInFlight(m.data); }
       else if(m.type==='request_end') { addCallToFeed(m.data); removeInFlight(m.data); }
-      else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; }
+      else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; updateStickyBadge(d); }
       else if(m.type==='models') updateModelInfo(m.data||{});
       else if(m.type==='fallback_priority') { const sel=document.getElementById('fb-priority'); if(m.data && m.data.priority) sel.value = m.data.priority; }
       else if(m.type==='fallback_map_update') { loadFallbackStatus(); if (catalogLoaded) loadCatalog(true); }
@@ -4784,6 +4825,18 @@ document.getElementById('fb-priority').addEventListener('change', async function
   } catch (e) { alert('Failed to set priority: ' + e.message); }
 });
 
+function updateStickyBadge(d) {
+  const info = document.getElementById('sticky-info');
+  const count = document.getElementById('sticky-count');
+  const ttl = document.getElementById('sticky-ttl');
+  if (!info || !count || !ttl) return;
+  const sessions = d.sticky_sessions || {};
+  const active = Object.keys(sessions).length;
+  count.textContent = active;
+  ttl.textContent = d.sticky_ttl_seconds != null ? d.sticky_ttl_seconds : '?';
+  info.style.display = active > 0 ? 'inline' : 'none';
+}
+
 // --- Key Status ---
 function renderKeyStatus(keys) {
   document.getElementById('key-status').innerHTML = (keys||[]).map(k => {
@@ -4792,6 +4845,10 @@ function renderKeyStatus(keys) {
     const sEl=(k.session_elapsed_pct!=null&&k.session_elapsed_pct>=0)?k.session_elapsed_pct:-1;
     const wEl=(k.weekly_elapsed_pct!=null&&k.weekly_elapsed_pct>=0)?k.weekly_elapsed_pct:-1;
     const cls=k.exhausted?'status-err':k.suspended?'status-warn':'status-ok';
+    const sModels = k.session_models || {};
+    const topModels = Object.entries(sModels).sort((a,b)=>(b[1].requests||0)-(a[1].requests||0)).slice(0,3);
+    const modelBreakdown = topModels.length ? '<div class="key-row" style="margin-top:6px"><span class="kdim">Top models</span></div>' +
+      topModels.map(([mid, md]) => `<div class="key-row" style="font-size:11px"><span class="kdim" style="font-family:monospace">${escHtml(mid)}</span><span>${md.requests||0} req</span></div>`).join('') : '';
     return `<div class="key-card">
       <div class="key-header"><span class="key-label ${cls}">${k.label}</span><span class="key-plan">${k.plan||'?'}</span></div>
       <div class="key-row"><span class="kdim">Slots</span><span>${k.in_flight}/${k.max_concurrent}</span></div>${pctBar(slotPct,'var(--accent)')}
@@ -4800,6 +4857,7 @@ function renderKeyStatus(keys) {
       <div class="key-row"><span class="kdim">Billing</span><span>${k.period_remaining_pct?.toFixed(0)}% left</span></div>${pctBar(periodPct,'var(--green)')}
       <div class="key-row"><span class="kdim">Requests</span><span>${k.total_requests}</span></div>
       <div class="key-row"><span class="kdim">429s</span><span>${k.total_429s}</span></div>
+      ${modelBreakdown}
     </div>`;
   }).join('');
 }
@@ -5249,47 +5307,48 @@ async function loadQuotaCost() {
     const tbody = document.querySelector('#quota-table tbody');
     const badge = document.getElementById('quota-badge');
     const note = document.getElementById('quota-note');
-    const status = document.getElementById('quota-solve-status');
-    if (!data.models || data.models.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="10" style="color:var(--dim);text-align:center;padding:2em">' +
-        (data.note || 'No quota cost data yet.') + '</td></tr>';
+    const status = document.getElementById('quota-status');
+    if (!data.keys || data.keys.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" style="color:var(--dim);text-align:center;padding:2em">' +
+        (data.note || 'No quota data yet.') + '</td></tr>';
       badge.textContent = '0';
       note.textContent = data.note || '';
       status.textContent = '';
       return;
     }
-    badge.textContent = data.models.length;
-    note.textContent = data.note || '';
-    status.textContent = `${data.solved_coefficients}/${data.total_models} models solved from ${data.total_intervals} intervals | Total quota delta: ${data.total_quota_pct}%`;
-    tbody.innerHTML = data.models.map(m => {
-      const confColor = m.confidence === 'solved' ? 'var(--green)' : 'var(--yellow)';
-      const split = m.coefficients_split;
-      // For combined coefficients, show unified cost; for split, show in/out separately
-      let costIn, costOut, ratio;
-      if (split) {
-        costIn = m.quota_pct_per_1k_input !== undefined ? m.quota_pct_per_1k_input.toFixed(6) : '—';
-        costOut = m.quota_pct_per_1k_output !== undefined ? m.quota_pct_per_1k_output.toFixed(6) : '—';
-        ratio = m.ratio_in_out !== undefined ? m.ratio_in_out.toFixed(2) + '×' : '—';
-      } else {
-        costIn = m.quota_pct_per_1k_tokens ? m.quota_pct_per_1k_tokens.toFixed(6) + ' (combined)' : '—';
-        costOut = '—';
-        ratio = '=';
+    let rows = [];
+    for (const k of data.keys) {
+      const windows = [
+        { name: 'Session', pct: k.session_usage_pct, resets: k.session_resets_at, models: k.session_models || {} },
+        { name: 'Weekly', pct: k.weekly_usage_pct, resets: k.weekly_resets_at, models: k.weekly_models || {} }
+      ];
+      for (const w of windows) {
+        const modelNames = Object.keys(w.models).sort((a, b) => (w.models[b].requests || 0) - (w.models[a].requests || 0));
+        if (modelNames.length === 0) {
+          rows.push({ key: k.label, window: w.name, pct: w.pct, resets: w.resets, model: '—', requests: '—', bar: '—' });
+        } else {
+          for (const model of modelNames) {
+            const m = w.models[model];
+            rows.push({ key: k.label, window: w.name, pct: w.pct, resets: w.resets, model, requests: fmt(m.requests), bar: m.bar_pct + '%' });
+          }
+        }
       }
-      return '<tr>' +
-        '<td style="font-family:monospace">' + escHtml(m.model) + '</td>' +
-        '<td style="color:' + confColor + ';font-weight:600">' + m.confidence + '</td>' +
-        '<td>' + m.intervals + '</td>' +
-        '<td>' + m.total_session_pct_consumed.toFixed(3) + '%</td>' +
-        '<td>' + fmt(m.tokens_in) + '</td>' +
-        '<td>' + fmt(m.tokens_out) + '</td>' +
-        '<td>' + m.pct_of_total_quota.toFixed(1) + '%</td>' +
-        '<td style="font-family:monospace">' + costIn + '</td>' +
-        '<td style="font-family:monospace">' + costOut + '</td>' +
-        '<td style="font-family:monospace">' + ratio + '</td>' +
-        '</tr>';
-    }).join('');
-  } catch (e) { /* ignore */ }
+    }
+    badge.textContent = data.keys.length;
+    note.textContent = data.note || '';
+    status.textContent = `${rows.length} model-window rows from ${data.keys.length} keys`;
+    tbody.innerHTML = rows.map(r => '<tr>' +
+      '<td>' + escHtml(r.key) + '</td>' +
+      '<td>' + r.window + '</td>' +
+      '<td>' + (r.pct >= 0 ? r.pct + '%' : '?') + '</td>' +
+      '<td>' + (r.resets || '—') + '</td>' +
+      '<td style="font-family:monospace">' + escHtml(r.model) + '</td>' +
+      '<td>' + r.requests + '</td>' +
+      '<td>' + r.bar + '</td>' +
+      '</tr>').join('');
+  } catch (e) { console.error('Failed to load quota cost:', e); }
 }
+
 document.getElementById('quota-refresh').addEventListener('click', loadQuotaCost);
 // Load quota data when tab is clicked
 document.querySelectorAll('.tab').forEach(t => {
@@ -5335,281 +5394,32 @@ document.getElementById('costs-refresh').addEventListener('click', loadCosts);
 
 @app.get("/admin/quota-cost", dependencies=[Depends(_verify_admin)])
 async def admin_quota_cost():
-    """Infer per-model input/output quota cost coefficients via algebraic solve.
-    
-    Each scraper interval (where session_usage_pct jumps) gives us one equation:
-        delta_pct = Σ(coeff_in_model × total_tokens_in_model + coeff_out_model × total_tokens_out_model)
-    
-    Ollama Cloud likely charges differently for input vs output tokens, so we
-    track separate coefficients. Single-model intervals with 2+ observations at
-    different in/out ratios can solve for both coefficients directly via 2 equations.
-    Multi-model intervals solve when only one model's coefficients are unknown.
+    """Return per-model request counts and bar percentages from ollama.com/settings.
+
+    Unlike the old algebraic solver, this uses the per-model usage segments
+    Ollama already renders on the settings page. It gives you the actual model
+    mix contributing to each key's session and weekly quota bars.
     """
-    if not usage_db or not usage_db._conn:
-        return {"models": [], "note": "No usage DB configured"}
-    
-    rows = usage_db._conn.execute("""
-        SELECT upstream_key, model, tokens_in, tokens_out, session_usage_pct, ts
-        FROM usage 
-        WHERE session_usage_pct >= 0 AND status > 0 AND tokens_in + tokens_out > 0
-        ORDER BY upstream_key, ts ASC
-    """).fetchall()
-    
-    if not rows:
-        return {"models": [], "note": "No usage data with quota snapshots yet."}
-    
-    # Group calls into epochs per key: consecutive calls sharing same session_usage_pct
-    key_epochs: dict[str, list[dict]] = {}
-    
-    for row in rows:
-        key_prefix, model, t_in, t_out, s_pct, ts = row
-        if key_prefix not in key_epochs:
-            key_epochs[key_prefix] = []
-        epochs = key_epochs[key_prefix]
-        if not epochs or epochs[-1]["pct"] != s_pct:
-            epochs.append({"pct": s_pct, "calls": []})
-        epochs[-1]["calls"].append({"model": model, "t_in": t_in, "t_out": t_out})
-    
-    # Build intervals: each is one equation delta_pct = Σ(c_in × t_in + c_out × t_out)
-    intervals: list[dict] = []
-    
-    for key_prefix, epochs in key_epochs.items():
-        for i in range(1, len(epochs)):
-            delta_pct = epochs[i]["pct"] - epochs[i - 1]["pct"]
-            if delta_pct <= 0:
-                continue
-            prev_calls = epochs[i - 1]["calls"]
-            tokens_by_model: dict[str, dict] = {}
-            for call in prev_calls:
-                m = call["model"]
-                if m not in tokens_by_model:
-                    tokens_by_model[m] = {"in": 0, "out": 0}
-                tokens_by_model[m]["in"] += call["t_in"]
-                tokens_by_model[m]["out"] += call["t_out"]
-            intervals.append({
-                "delta_pct": delta_pct,
-                "tokens_by_model": tokens_by_model,
-                "key": key_prefix,
-            })
-    
-    if not intervals:
-        return {"models": [], "intervals": 0, "note": "No usage transitions detected yet."}
-    
-    all_models = sorted(set(m for i in intervals for m in i["tokens_by_model"]))
-    
-    # --- Algebraic solver with separate input/output coefficients ---
-    # Each model has two unknowns: coeff_in and coeff_out
-    # Each interval gives one equation:
-    #   delta_pct = Σ(coeff_in_m × t_in_m + coeff_out_m × t_out_m)
-    # We need N equations to solve for N unknowns.
-    
-    # For single-model intervals: 1 eq, 2 unknowns → not directly solvable
-    # But multiple single-model intervals with different in/out ratios give 2+ equations
-    # for the same model, which IS solvable (2 equations, 2 unknowns).
-    
-    # known_coeffs: model -> {in: float, out: float}
-    known_coeffs: dict[str, dict] = {}
-    
-    # Collect single-model intervals per model for 2-variable solve
-    single_model_intervals: dict[str, list[dict]] = {}
-    for interval in intervals:
-        models = list(interval["tokens_by_model"].keys())
-        if len(models) == 1:
-            model = models[0]
-            if model not in single_model_intervals:
-                single_model_intervals[model] = []
-            single_model_intervals[model].append({
-                "delta_pct": interval["delta_pct"],
-                "t_in": interval["tokens_by_model"][model]["in"],
-                "t_out": interval["tokens_by_model"][model]["out"],
-            })
-    
-    # Pass 1: Solve single-model intervals via least-squares (2+ observations)
-    # For model M with observations: delta_i = c_in × t_in_i + c_out × t_out_i
-    # This is a standard 2-variable linear regression.
-    # When in/out ratio is nearly constant (ill-conditioned), fall back to
-    # combined coefficient: delta = c × (t_in + t_out)
-    for model, obs in single_model_intervals.items():
-        if len(obs) < 2:
-            continue  # Need at least 2 observations with different ratios
-        # Solve via normal equations: A^T A x = A^T b
-        n = len(obs)
-        sum_tt = sum(o["t_in"] * o["t_in"] for o in obs)
-        sum_tu = sum(o["t_in"] * o["t_out"] for o in obs)
-        sum_uu = sum(o["t_out"] * o["t_out"] for o in obs)
-        sum_td = sum(o["t_in"] * o["delta_pct"] for o in obs)
-        sum_ud = sum(o["t_out"] * o["delta_pct"] for o in obs)
-        det = sum_tt * sum_uu - sum_tu * sum_tu
-        
-        # Check condition number: if matrix is ill-conditioned, the in/out
-        # ratio is too similar across observations to distinguish coefficients.
-        # Fall back to combined coefficient (treat all tokens equally).
-        total_in = sum(o["t_in"] for o in obs)
-        total_out = sum(o["t_out"] for o in obs)
-        ratio_variety = (max(o["t_in"] / max(o["t_out"], 1) for o in obs) / 
-                        max(min(o["t_in"] / max(o["t_out"], 1) for o in obs), 0.001))
-        min_det = (sum_tt + sum_uu) * 1e-10  # Scale-relative threshold
-        
-        if abs(det) < min_det or ratio_variety < 10:
-            # Ill-conditioned: can't distinguish input vs output cost.
-            # Fall back to combined coefficient: delta = c × total_tokens
-            total_tokens = sum(o["t_in"] + o["t_out"] for o in obs)
-            total_delta = sum(o["delta_pct"] for o in obs)
-            if total_tokens > 0:
-                c_combined = total_delta / total_tokens
-                if c_combined >= 0:
-                    known_coeffs[model] = {"in": c_combined, "out": c_combined}
-            continue
-        
-        c_in = (sum_uu * sum_td - sum_tu * sum_ud) / det
-        c_out = (sum_tt * sum_ud - sum_tu * sum_td) / det
-        # Sanity: coefficients should be non-negative (quota cost can't be negative)
-        if c_in >= 0 and c_out >= 0:
-            known_coeffs[model] = {"in": c_in, "out": c_out}
-    
-    # Pass 2: Solve multi-model intervals iteratively
-    # If all models but one have known coefficients, we have 1 equation with 2 unknowns
-    # → can't solve. But if one unknown model has known coefficients from pass 1
-    # AND appears in a multi-model interval, we can extract the remaining model.
-    # For the case of 1 unknown model in an interval:
-    #   delta - Σ(known) = c_in × t_in + c_out × t_out  (1 eq, 2 unknowns)
-    # We can only solve if we make an assumption. We'll use weighted average of known
-    # models' in/out ratio as a fallback, or skip if impossible.
-    # Instead, for 1 unknown model, if we have multiple such intervals, we get
-    # multiple equations and can least-squares solve for that model's c_in/c_out.
-    
-    changed = True
-    max_passes = 10
-    while changed and max_passes > 0:
-        changed = False
-        max_passes -= 1
-        
-        # Collect equations for unknown models
-        unknown_obs: dict[str, list[dict]] = {}
-        for interval in intervals:
-            unknown_models = [m for m in interval["tokens_by_model"] if m not in known_coeffs]
-            known_models = [m for m in interval["tokens_by_model"] if m in known_coeffs]
-            
-            if len(unknown_models) != 1:
-                continue  # Can't solve with 0 or 2+ unknowns in this pass
-            
-            unknown = unknown_models[0]
-            # Compute residual: delta_pct minus all known models' contributions
-            known_contrib = sum(
-                known_coeffs[m]["in"] * interval["tokens_by_model"][m]["in"] +
-                known_coeffs[m]["out"] * interval["tokens_by_model"][m]["out"]
-                for m in known_models
-            )
-            residual = interval["delta_pct"] - known_contrib
-            if residual <= 0:
-                continue  # Sanity check
-            
-            if unknown not in unknown_obs:
-                unknown_obs[unknown] = []
-            unknown_obs[unknown].append({
-                "delta_pct": residual,
-                "t_in": interval["tokens_by_model"][unknown]["in"],
-                "t_out": interval["tokens_by_model"][unknown]["out"],
-            })
-        
-        # Try to solve each unknown model via least-squares
-        for model, obs in unknown_obs.items():
-            if model in known_coeffs:
-                continue
-            if len(obs) < 2:
-                continue  # Need 2+ equations for 2 unknowns
-            sum_tt = sum(o["t_in"] * o["t_in"] for o in obs)
-            sum_tu = sum(o["t_in"] * o["t_out"] for o in obs)
-            sum_uu = sum(o["t_out"] * o["t_out"] for o in obs)
-            sum_td = sum(o["t_in"] * o["delta_pct"] for o in obs)
-            sum_ud = sum(o["t_out"] * o["delta_pct"] for o in obs)
-            det = sum_tt * sum_uu - sum_tu * sum_tu
-            if abs(det) < 1e-20:
-                continue
-            c_in = (sum_uu * sum_td - sum_tu * sum_ud) / det
-            c_out = (sum_tt * sum_ud - sum_tu * sum_td) / det
-            if c_in >= 0 and c_out >= 0:
-                known_coeffs[model] = {"in": c_in, "out": c_out}
-                changed = True
-    
-    # Build result
-    model_stats: dict[str, dict] = {}
-    for interval in intervals:
-        for model, tok in interval["tokens_by_model"].items():
-            if model not in model_stats:
-                model_stats[model] = {
-                    "total_pct": 0.0, "intervals": 0,
-                    "tokens_in": 0, "tokens_out": 0,
-                }
-            # Attribute: use known coefficients if available
-            if model in known_coeffs:
-                attributed_pct = (known_coeffs[model]["in"] * tok["in"] +
-                                  known_coeffs[model]["out"] * tok["out"])
-            else:
-                # Unknown: distribute remaining delta proportionally
-                known_pct_in_interval = sum(
-                    known_coeffs[m]["in"] * interval["tokens_by_model"][m]["in"] +
-                    known_coeffs[m]["out"] * interval["tokens_by_model"][m]["out"]
-                    for m in interval["tokens_by_model"] if m in known_coeffs
-                )
-                remaining_pct = max(0, interval["delta_pct"] - known_pct_in_interval)
-                unknown_total = sum(
-                    interval["tokens_by_model"][m]["in"] + interval["tokens_by_model"][m]["out"]
-                    for m in interval["tokens_by_model"] if m not in known_coeffs
-                )
-                if unknown_total > 0:
-                    attributed_pct = remaining_pct * ((tok["in"] + tok["out"]) / unknown_total)
-                else:
-                    attributed_pct = 0
-            model_stats[model]["total_pct"] += attributed_pct
-            model_stats[model]["intervals"] += 1
-            model_stats[model]["tokens_in"] += tok["in"]
-            model_stats[model]["tokens_out"] += tok["out"]
-    
-    all_interval_pct = sum(i["delta_pct"] for i in intervals)
-    solved_count = len(known_coeffs)
-    total_models = len(all_models)
-    
-    result = []
-    for model in sorted(model_stats.keys(), key=lambda m: -model_stats[m]["total_pct"]):
-        ms = model_stats[model]
-        total_tok = ms["tokens_in"] + ms["tokens_out"]
-        coeff = known_coeffs.get(model)
-        
-        entry = {
-            "model": model,
-            "confidence": "solved" if coeff else "estimated",
-            "intervals": ms["intervals"],
-            "total_session_pct_consumed": round(ms["total_pct"], 3),
-            "tokens_in": ms["tokens_in"],
-            "tokens_out": ms["tokens_out"],
-            "tokens_total": total_tok,
-            "pct_of_total_quota": round(ms["total_pct"] / all_interval_pct * 100, 1) if all_interval_pct > 0 else 0,
-        }
-        
-        if coeff:
-            entry["coeff_in"] = round(coeff["in"], 10)
-            entry["coeff_out"] = round(coeff["out"], 10)
-            entry["quota_pct_per_1k_input"] = round(coeff["in"] * 1000, 6)
-            entry["quota_pct_per_1k_output"] = round(coeff["out"] * 1000, 6)
-            # Mark whether coefficients were actually separated or combined (equal)
-            entry["coefficients_split"] = abs(coeff["in"] - coeff["out"]) > coeff["in"] * 0.01
-            if not entry["coefficients_split"]:
-                # Combined: just show the unified cost per 1K tokens
-                entry["quota_pct_per_1k_tokens"] = round(coeff["in"] * 1000, 6)
-            if coeff["out"] > 0:
-                entry["ratio_in_out"] = round(coeff["in"] / coeff["out"], 2)
-        
-        result.append(entry)
-    
+    if not manager:
+        return {"keys": [], "note": "Manager not initialized"}
+
+    result_keys = []
+    for key in manager.keys:
+        result_keys.append({
+            "label": key.label,
+            "token_prefix": key.token[:8] + "...",
+            "session_usage_pct": key.session_usage_pct,
+            "session_resets_at": key.session_resets_at,
+            "weekly_usage_pct": key.weekly_usage_pct,
+            "weekly_resets_at": key.weekly_resets_at,
+            "session_models": key.session_models,
+            "weekly_models": key.weekly_models,
+        })
+
     return {
-        "models": result,
-        "total_intervals": len(intervals),
-        "total_quota_pct": round(all_interval_pct, 3),
-        "solved_coefficients": solved_count,
-        "total_models": total_models,
-        "note": f"Algebraic solve with separate input/output coefficients: {solved_count}/{total_models} models solved from {len(intervals)} intervals. "
-                f"Each model has 2 unknowns (coeff_in, coeff_out); solved via least-squares when 2+ observations exist."
+        "keys": result_keys,
+        "note": "Per-model request counts and bar percentages scraped from ollama.com/settings. "
+                "Use this to see which models dominate each key's quota usage.",
     }
 
 
