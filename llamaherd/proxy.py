@@ -1399,6 +1399,95 @@ class UsageDB:
             "avg_latency_ms": round(r[5] or 0, 1),
         } for r in rows]
 
+    def quota_coefficients(self, manager_keys: list, days: int = 7) -> dict:
+        """Derive implied Ollama quota cost per token for each model.
+
+        Combines the per-key weekly quota-share bars scraped from ollama.com/settings
+        with actual token usage in the local DB. Models appearing in both the
+        scraped quota data and the DB with non-trivial usage get a coefficient.
+        """
+        if not manager_keys:
+            return {"models": [], "note": "No keys configured"}
+
+        since = time.time() - days * 86400
+        rows = self._conn.execute("""
+            SELECT model,
+                   COUNT(*) as requests,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   SUM(tokens_in + tokens_out) as tokens_total,
+                   upstream_key
+            FROM usage WHERE ts > ? AND status != -1
+            GROUP BY upstream_key, model
+        """, [since]).fetchall()
+
+        # Aggregate totals per key and per model across all keys
+        key_totals: dict[str, int] = {}
+        model_key_data: dict[str, list[tuple[str, int, float]]] = {}
+        for model, requests, tokens_in, tokens_out, tokens_total, upstream_key in rows:
+            if tokens_total <= 0:
+                continue
+            key_totals[upstream_key] = key_totals.get(upstream_key, 0) + tokens_total
+            model_key_data.setdefault(model, []).append(
+                (upstream_key, tokens_total, requests)
+            )
+
+        # Build per-model coefficients by averaging across keys where both
+        # scraped quota share and DB usage are available.
+        out = []
+        for model, key_list in model_key_data.items():
+            ratios = []
+            quota_shares = []
+            token_shares = []
+            calls = 0
+            tokens = 0
+            for upstream_key, tokens_total, requests in key_list:
+                key = next((k for k in manager_keys if k.token[:8] == upstream_key), None)
+                if not key or not key.weekly_models:
+                    continue
+                weekly = key.weekly_models.get(model, {})
+                quota_pct = weekly.get("bar_pct", 0.0) or 0.0
+                if quota_pct <= 0:
+                    continue
+                total_for_key = key_totals.get(upstream_key, 1) or 1
+                token_pct = 100.0 * tokens_total / total_for_key
+                if token_pct <= 0:
+                    continue
+                ratios.append(quota_pct / token_pct)
+                quota_shares.append(quota_pct)
+                token_shares.append(token_pct)
+                calls += requests
+                tokens += tokens_total
+            if not ratios:
+                continue
+            avg_ratio = sum(ratios) / len(ratios)
+            avg_quota = sum(quota_shares) / len(quota_shares)
+            avg_token = sum(token_shares) / len(token_shares)
+            out.append({
+                "model": model,
+                "coefficient": round(avg_ratio, 2),
+                "quota_share_pct": round(avg_quota, 2),
+                "token_share_pct": round(avg_token, 2),
+                "requests": calls,
+                "tokens": tokens,
+                "keys_used": len(ratios),
+            })
+
+        if not out:
+            return {"models": [], "note": f"No model had both scraped quota share and DB usage in the last {days} days"}
+
+        # Normalize so the cheapest model (by coefficient) is 1.0
+        min_coeff = min(m["coefficient"] for m in out)
+        if min_coeff > 0:
+            for m in out:
+                m["relative"] = round(m["coefficient"] / min_coeff, 1)
+        else:
+            for m in out:
+                m["relative"] = None
+
+        out.sort(key=lambda x: -x["coefficient"])
+        return {"models": out, "note": f"Implied Ollama quota cost per token, averaged across keys (last {days} days)."}
+
     def openrouter_costs(self, pricing: dict, days: int = 30,
                          start_date: str = None, end_date: str = None,
                          client_id: str = None) -> dict:
@@ -4558,11 +4647,16 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     <h2 style="margin:0">Model Usage by Quota Window</h2>
     <span class="badge" id="quota-badge">0</span>
     <button class="btn btn-sm" id="quota-refresh">🔄 Refresh</button>
-    <span style="font-size:11px;color:var(--dim)" id="quota-subtitle">Pie charts of model mix contributing to each key's session and weekly quota bars (scraped from ollama.com/settings).</span>
+  <span style="font-size:11px;color:var(--dim)" id="quota-subtitle">Pie charts of model mix contributing to each key's session and weekly quota bars (scraped from ollama.com/settings).</span>
   </div>
   <div id="quota-status" style="color:var(--dim);margin-bottom:1em"></div>
   <div id="quota-charts" style="display:flex;flex-wrap:wrap;gap:24px;justify-content:center"></div>
   <div id="quota-note" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
+  <h3 style="margin-top:24px;margin-bottom:8px">Implied Quota Cost per Token</h3>
+  <div style="font-size:11px;color:var(--dim);margin-bottom:8px">Derived from scraped quota share ÷ actual token share, averaged across keys. Cheapest model = 1.0.</div>
+  <div style="overflow-x:auto"><table id="quota-coefs-table"><thead><tr>
+    <th>Model</th><th>Req</th><th>Tokens</th><th>Quota Share</th><th>Token Share</th><th>Coefficient</th><th>Relative</th><th>Keys</th>
+  </tr></thead><tbody></tbody></table></div>
 </div>
 
 <div class="tab-panel" id="panel-costs">
@@ -5406,6 +5500,7 @@ function modelSlices(models) {
 async function loadQuotaCost() {
   try {
     const data = await loadJSON('/admin/quota-cost');
+    const coefData = await loadJSON('/admin/quota-coefficients?days=7');
     const badge = document.getElementById('quota-badge');
     const note = document.getElementById('quota-note');
     const status = document.getElementById('quota-status');
@@ -5415,43 +5510,64 @@ async function loadQuotaCost() {
       badge.textContent = '0';
       note.textContent = data.note || '';
       status.textContent = '';
-      return;
-    }
-    badge.textContent = data.keys.length;
-    note.textContent = data.note || '';
-    let chartCount = 0;
-    let html = '';
-    const colors = ['#22c55e','#3b82f6','#a855f7','#f59e0b','#ef4444','#06b6d4','#ec4899','#84cc16','#6366f1','#f97316'];
-    for (const k of data.keys) {
-      const windows = [
-        { name: 'Session', pct: k.session_usage_pct, resets: k.session_resets_at, models: k.session_models || {} },
-        { name: 'Weekly', pct: k.weekly_usage_pct, resets: k.weekly_resets_at, models: k.weekly_models || {} }
-      ];
-      for (const w of windows) {
-        const slices = modelSlices(w.models);
-        if (slices.length === 0) continue;
-        chartCount++;
-        const title = `${escHtml(k.label)} — ${w.name} (${w.pct >= 0 ? w.pct + '%' : '?'})`;
-        html += `<div style="background:var(--panel-bg);border:1px solid var(--border);border-radius:8px;padding:12px">
-          <div style="font-weight:600;margin-bottom:8px;font-size:13px">${title}</div>
-          <canvas id="quota-pie-${k.token_prefix}-${w.name}"></canvas>
-          <div style="margin-top:8px;font-size:11px;color:var(--dim)">${slices.map((s,i)=>`<span style="display:inline-block;margin-right:8px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${colors[i%colors.length]}"></span> ${escHtml(s.name)} ${s.value.toFixed(1)}% (${fmt(s.requests)})</span>`).join('')}</div>
-        </div>`;
+    } else {
+      badge.textContent = data.keys.length;
+      note.textContent = data.note || '';
+      let chartCount = 0;
+      let html = '';
+      const colors = ['#22c55e','#3b82f6','#a855f7','#f59e0b','#ef4444','#06b6d4','#ec4899','#84cc16','#6366f1','#f97316'];
+      for (const k of data.keys) {
+        const windows = [
+          { name: 'Session', pct: k.session_usage_pct, resets: k.session_resets_at, models: k.session_models || {} },
+          { name: 'Weekly', pct: k.weekly_usage_pct, resets: k.weekly_resets_at, models: k.weekly_models || {} }
+        ];
+        for (const w of windows) {
+          const slices = modelSlices(w.models);
+          if (slices.length === 0) continue;
+          chartCount++;
+          const title = `${escHtml(k.label)} — ${w.name} (${w.pct >= 0 ? w.pct + '%' : '?'})`;
+          html += `<div style="background:var(--panel-bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+            <div style="font-weight:600;margin-bottom:8px;font-size:13px">${title}</div>
+            <canvas id="quota-pie-${k.token_prefix}-${w.name}"></canvas>
+            <div style="margin-top:8px;font-size:11px;color:var(--dim)">${slices.map((s,i)=>`<span style="display:inline-block;margin-right:8px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${colors[i%colors.length]}"></span> ${escHtml(s.name)} ${s.value.toFixed(1)}% (${fmt(s.requests)})</span>`).join('')}</div>
+          </div>`;
+        }
+      }
+      charts.innerHTML = html || '<div style="color:var(--dim);padding:2em">No model usage data yet.</div>';
+      status.textContent = `${chartCount} charts from ${data.keys.length} keys`;
+      // draw after DOM insertion
+      for (const k of data.keys) {
+        const windows = [
+          { name: 'Session', models: k.session_models || {} },
+          { name: 'Weekly', models: k.weekly_models || {} }
+        ];
+        for (const w of windows) {
+          const slices = modelSlices(w.models);
+          const canvas = document.getElementById(`quota-pie-${k.token_prefix}-${w.name}`);
+          if (canvas) drawPie(canvas, slices, `${k.label} ${w.name}`);
+        }
       }
     }
-    charts.innerHTML = html || '<div style="color:var(--dim);padding:2em">No model usage data yet.</div>';
-    status.textContent = `${chartCount} charts from ${data.keys.length} keys`;
-    // draw after DOM insertion
-    for (const k of data.keys) {
-      const windows = [
-        { name: 'Session', models: k.session_models || {} },
-        { name: 'Weekly', models: k.weekly_models || {} }
-      ];
-      for (const w of windows) {
-        const slices = modelSlices(w.models);
-        const canvas = document.getElementById(`quota-pie-${k.token_prefix}-${w.name}`);
-        if (canvas) drawPie(canvas, slices, `${k.label} ${w.name}`);
-      }
+
+    // Coefficients table
+    const tbody = document.querySelector('#quota-coefs-table tbody');
+    const models = coefData.models || [];
+    if (models.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" style="color:var(--dim);padding:1em">${coefData.note || 'No coefficient data yet.'}</td></tr>`;
+    } else {
+      tbody.innerHTML = models.map(m => {
+        const rel = m.relative != null ? `x${m.relative}` : '—';
+        return `<tr>
+          <td style="font-family:monospace">${escHtml(m.model)}</td>
+          <td>${fmt(m.requests)}</td>
+          <td>${fmt(m.tokens)}</td>
+          <td>${m.quota_share_pct.toFixed(1)}%</td>
+          <td>${m.token_share_pct.toFixed(2)}%</td>
+          <td style="font-weight:600">${m.coefficient}</td>
+          <td style="font-weight:600;color:${m.relative > 10 ? 'var(--red)' : m.relative > 3 ? 'var(--yellow)' : 'var(--green)'}">${rel}</td>
+          <td>${m.keys_used}</td>
+        </tr>`;
+      }).join('');
     }
   } catch (e) { console.error('Failed to load quota cost:', e); }
 }
@@ -5528,6 +5644,21 @@ async def admin_quota_cost():
         "note": "Per-model request counts and bar percentages scraped from ollama.com/settings. "
                 "Use this to see which models dominate each key's quota usage.",
     }
+
+
+@app.get("/admin/quota-coefficients", dependencies=[Depends(_verify_admin)])
+async def admin_quota_coefficients(days: int = 7):
+    """Return implied Ollama quota cost coefficients per model.
+
+    Coefficients are derived by dividing each model's scraped quota-share
+    percentage by its actual token-share percentage, averaged across all
+    configured keys. This lets you compare models by Ollama's internal
+    quota cost, not just raw token volume.
+    """
+    if not usage_db:
+        return {"models": [], "note": "Usage DB not available"}
+    keys = manager.keys if manager else []
+    return usage_db.quota_coefficients(keys, days=days)
 
 
 @app.get("/dashboard", dependencies=[Depends(_verify_admin)])
