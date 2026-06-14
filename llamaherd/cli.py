@@ -173,12 +173,43 @@ def _keys_table(keys):
     if not keys:
         print("No upstream keys.")
         return
-    print(f"{'#':<3} {'Label':<25} {'Token':<15} {'Slots':>6} {'429s':>5} {'Plan':<15}")
-    print("-" * 72)
+    print(f"{'#':<3} {'Label':<25} {'Token':<15} {'Slots':>6} {'429s':>5} {'Plan':<15} {'Session':>8} {'Weekly':>8}")
+    print("-" * 90)
     for i, k in enumerate(keys):
         tok = k.get("token_prefix", "")
         slots = f"{k.get('available_slots', '?')}/{k.get('max_concurrent', '?')}"
-        print(f"{i:<3} {k.get('label', ''):<25} {tok:<15} {slots:>6} {k.get('total_429s', 0):>5} {k.get('plan', ''):<15}")
+        sess = k.get("session_usage_pct", -1)
+        week = k.get("weekly_usage_pct", -1)
+        sess_str = f"{sess:.1f}%" if sess >= 0 else "?"
+        week_str = f"{week:.1f}%" if week >= 0 else "?"
+        print(f"{i:<3} {k.get('label', ''):<25} {tok:<15} {slots:>6} {k.get('total_429s', 0):>5} {k.get('plan', ''):<15} {sess_str:>8} {week_str:>8}")
+    # Show per-model cloud usage if available
+    any_models = False
+    for k in keys:
+        for window in ("session_models", "weekly_models"):
+            models = k.get(window, {})
+            if models:
+                any_models = True
+                break
+    if any_models:
+        print()
+        print("Cloud usage by model (from ollama.com/settings):")
+        for k in keys:
+            label = k.get("label", "")
+            for window, header in [("session_models", "Session"), ("weekly_models", "Weekly")]:
+                models = k.get(window, {})
+                if models:
+                    total = sum(v if isinstance(v, int) else v.get("requests", 0) for v in models.values())
+                    total_pct = sum(v if isinstance(v, (int, float)) else v.get("usage_pct", 0) for v in models.values())
+                    print(f"  {label} {header}: {total} requests, ~{total_pct:.1f}% of quota used")
+                    for model, val in sorted(models.items(), key=lambda x: -(x[1] if isinstance(x[1], int) else x[1].get("usage_pct", 0))):
+                        if isinstance(val, dict):
+                            reqs = val.get("requests", 0)
+                            pct = val.get("usage_pct", -1)
+                            pct_str = f"{pct:.1f}%" if pct >= 0 else "?"
+                            print(f"    {model:<25} {reqs:>6} requests  {pct_str:>6} of usage bar")
+                        else:
+                            print(f"    {model:<25} {val:>6} requests")
 
 
 # ---- Status command ----
