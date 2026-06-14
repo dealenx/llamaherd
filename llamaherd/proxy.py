@@ -1252,21 +1252,27 @@ class UsageDB:
                 tokens_out INTEGER NOT NULL,
                 latency_ms INTEGER NOT NULL,
                 status INTEGER NOT NULL,
-                session_usage_pct REAL DEFAULT -1.0,
-                weekly_usage_pct REAL DEFAULT -1.0
+                session_id TEXT DEFAULT ''
             )
             """)
         # Backward-compatible migration for existing DBs
-        for col, default in [("session_usage_pct", -1.0), ("weekly_usage_pct", -1.0)]:
+        for col, default in [("session_id", "''")]:
             try:
-                self._conn.execute(f"ALTER TABLE usage ADD COLUMN {col} REAL DEFAULT {default}")
+                self._conn.execute(f"ALTER TABLE usage ADD COLUMN {col} TEXT DEFAULT {default}")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+        # Drop obsolete quota columns if present
+        for col in ["session_usage_pct", "weekly_usage_pct"]:
+            try:
+                self._conn.execute(f"ALTER TABLE usage DROP COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass
         for idx_cols in [
             "client_id, day",
             "model, day",
             "day",
             "client_id, model, day",
+            "session_id",
         ]:
             idx_name = f"idx_usage_{'_'.join(idx_cols.replace(' ', '').split(','))}"
             try:
@@ -1276,12 +1282,13 @@ class UsageDB:
         self._conn.commit()
 
     def record(self, client_id: str, upstream_key: str, model: str,
-               tokens_in: int, tokens_out: int, latency_ms: int, status: int):
+               tokens_in: int, tokens_out: int, latency_ms: int, status: int,
+               session_id: str = ""):
         today = datetime.now(timezone.utc).date().isoformat()
         self._conn.execute(
-            "INSERT INTO usage (ts, day, client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO usage (ts, day, client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (time.time(), today, client_id, upstream_key, model,
-             tokens_in, tokens_out, latency_ms, status),
+             tokens_in, tokens_out, latency_ms, status, session_id or ""),
         )
         self._conn.commit()
 
@@ -1765,10 +1772,12 @@ def _update_in_flight_tokens(request_id: Optional[str],
 def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
                            tokens_in: int, tokens_out: int, latency_ms: int, status: int,
                            *, request_id: Optional[str] = None,
-                           provider: Optional[str] = None):
+                           provider: Optional[str] = None,
+                           session_id: Optional[str] = None):
     """Record usage to DB and broadcast call + request_end events to SSE subscribers."""
     if usage_db:
-        usage_db.record(client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status)
+        usage_db.record(client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status,
+                        session_id=session_id or "")
     call_data = {
         "ts": time.time(),
         "client_id": client_id,
@@ -1778,6 +1787,7 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
         "tokens_out": tokens_out,
         "latency_ms": latency_ms,
         "status": status,
+        "session_id": session_id or "",
     }
     end_data: Optional[dict] = None
     if request_id:
@@ -2125,7 +2135,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
 
     if reject_unknown_models and not ollama_has_model and not fp_mapped:
         _record_and_broadcast(client_id, "none", model, 0, 0, 0, 404,
-                              request_id=request_id, provider="proxy")
+                              request_id=request_id, provider="proxy", session_id=session_id)
         log.warning(f"Rejected unknown model: {model} (client={client_id})")
         return JSONResponse(
             status_code=404,
@@ -2147,7 +2157,12 @@ async def _proxy_request(request: Request, path: str) -> Response:
     if not session_id:
         session_id = "lh_" + secrets.token_urlsafe(16)
     sticky_key = await sticky.get_preferred_key(session_id) if sticky else None
-    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8] + '...' if sticky_key else None}")
+    relevant_headers = {
+        k: request.headers.get(k)
+        for k in ["x-llamaherd-session", "x-conversation-id", "cookie", "authorization"]
+        if request.headers.get(k)
+    }
+    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8]+'...' if sticky_key else None} headers={relevant_headers}")
 
     last_error = None
     start_emitted = False
@@ -2171,7 +2186,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
                     "not falling back to secondary provider"
                 )
             _record_and_broadcast(client_id, "none", model, 0, 0, 0, 503,
-                                  request_id=request_id, provider="ollama-cloud")
+                                  request_id=request_id, provider="ollama-cloud", session_id=session_id)
             return JSONResponse(
                 status_code=503,
                 content={"error": "all keys at capacity, queue timeout exceeded"},
@@ -2221,7 +2236,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
                 await manager.release(key)
                 if sticky and session_id:
                     await sticky.clear_session(session_id)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud")
+                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
                 continue
@@ -2232,7 +2247,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
                 await manager.release(key)
                 if sticky and session_id:
                     await sticky.clear_session(session_id)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud")
+                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
                 continue
@@ -2243,7 +2258,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
             tokens_out = usage.get("completion_tokens", 0)
             await manager.release(key, tokens_out)
             _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
-                                  resp.status_code, request_id=request_id, provider="ollama-cloud")
+                                  resp.status_code, request_id=request_id, provider="ollama-cloud", session_id=session_id)
 
             log.info(f"{client_id} -> {model} via {key.label}: {tokens_in}+{tokens_out}tok {elapsed_ms}ms")
 
@@ -2266,7 +2281,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
             await manager.release(key)
             if sticky and session_id:
                 await sticky.clear_session(session_id)
-            _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, -1, request_id=request_id, provider="ollama-cloud")
+            _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, -1, request_id=request_id, provider="ollama-cloud", session_id=session_id)
             last_error = str(e)
             log.error(f"Proxy error for {model} (client={client_id}): {e}")
             prefer_key = None
@@ -2286,7 +2301,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
         )
 
     _record_and_broadcast(client_id, "none", model, 0, 0, 0, 502,
-                          request_id=request_id, provider="ollama-cloud")
+                          request_id=request_id, provider="ollama-cloud", session_id=session_id)
     return JSONResponse(
         status_code=502,
         content={"error": f"all retries exhausted: {last_error}"},
@@ -2365,7 +2380,7 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
             elapsed_ms = int((time.time() - start) * 1000)
             await manager.release(key, tokens_out)
             _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
-                                  final_status, request_id=request_id, provider="ollama-cloud")
+                                  final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
             usage_src = "usage" if usage_captured else "estimate"
             status_suffix = "" if final_status == 200 else f" status={final_status}"
             log.info(f"{client_id} -> {model} via {key.label}: stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src}){status_suffix}")
@@ -2435,7 +2450,7 @@ async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
             pass
     _record_and_broadcast(client_id, upstream_label, original_model,
                           tokens_in, tokens_out, elapsed_ms, resp.status_code,
-                          request_id=request_id, provider=fp.provider)
+                          request_id=request_id, provider=fp.provider, session_id=session_id)
     log.info(f"{client_id} -> {original_model} via {upstream_label}({mapped}): "
              f"{tokens_in}+{tokens_out}tok {elapsed_ms}ms")
     if resp.status_code >= 400:
@@ -2493,7 +2508,7 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
             elapsed_ms = int((time.time() - start) * 1000)
             _record_and_broadcast(client_id, upstream_label, original_model,
                                   tokens_in, tokens_out, elapsed_ms, status_code,
-                                  request_id=request_id, provider=fp.provider)
+                                  request_id=request_id, provider=fp.provider, session_id=session_id)
             src = "usage" if usage_captured else "estimate"
             log.info(f"{client_id} -> {original_model} via {upstream_label}({mapped}): "
                      f"stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({src})")
@@ -2597,7 +2612,7 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
             elapsed_ms = int((time.time() - start) * 1000)
             await manager.release(key, tokens_out)
             _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
-                                  final_status, request_id=request_id, provider="ollama-cloud")
+                                  final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
             usage_src = "usage" if usage_captured else "estimate"
             log.info(f"{client_id} -> {model} via {key.label}: ndjson {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src})")
 
@@ -2628,7 +2643,12 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
     if not session_id:
         session_id = "lh_" + secrets.token_urlsafe(16)
     sticky_key = await sticky.get_preferred_key(session_id) if sticky else None
-    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8] + '...' if sticky_key else None}")
+    relevant_headers = {
+        k: request.headers.get(k)
+        for k in ["x-llamaherd-session", "x-conversation-id", "cookie", "authorization"]
+        if request.headers.get(k)
+    }
+    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8]+'...' if sticky_key else None} headers={relevant_headers}")
     log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8] + '...' if sticky_key else None}")
 
     last_error = None
@@ -2644,7 +2664,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
 
         if not key:
             _record_and_broadcast(client_id, "none", model, 0, 0, 0, 503,
-                                  request_id=request_id, provider="ollama-cloud")
+                                  request_id=request_id, provider="ollama-cloud", session_id=session_id)
             return JSONResponse(
                 status_code=503,
                 content={"error": "all keys at capacity, queue timeout exceeded"},
@@ -2689,7 +2709,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
                 await manager.release(key)
                 if sticky and session_id:
                     await sticky.clear_session(session_id)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud")
+                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
                 continue
@@ -2700,7 +2720,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
                 await manager.release(key)
                 if sticky and session_id:
                     await sticky.clear_session(session_id)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud")
+                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
                 continue
@@ -2711,7 +2731,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             tokens_out = resp_data.get("eval_count", 0) or 0
             await manager.release(key, tokens_out)
             _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
-                                  resp.status_code, request_id=request_id, provider="ollama-cloud")
+                                  resp.status_code, request_id=request_id, provider="ollama-cloud", session_id=session_id)
 
             log.info(f"{client_id} -> {model} via {key.label}: {tokens_in}+{tokens_out}tok {elapsed_ms}ms (native)")
 
@@ -2734,7 +2754,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             await manager.release(key)
             if sticky and session_id:
                 await sticky.clear_session(session_id)
-            _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, -1, request_id=request_id, provider="ollama-cloud")
+            _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, -1, request_id=request_id, provider="ollama-cloud", session_id=session_id)
             last_error = str(e)
             log.error(f"Native proxy error for {model} (client={client_id}): {e}")
             prefer_key = None
@@ -2742,7 +2762,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             continue
 
     _record_and_broadcast(client_id, "none", model, 0, 0, 0, 502,
-                          request_id=request_id, provider="ollama-cloud")
+                          request_id=request_id, provider="ollama-cloud", session_id=session_id)
     return JSONResponse(
         status_code=502,
         content={"error": f"all retries exhausted: {last_error}"},
@@ -3319,7 +3339,7 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
             elapsed_ms = int((time.time() - start) * 1000)
             await manager.release(key, tokens_out)
             _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
-                                  final_status, request_id=request_id, provider="ollama-cloud")
+                                  final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
             usage_src = "usage" if usage_captured else "estimate"
             log.info(f"{client_id} -> {model} via {key.label}: bridge {tokens_in}+{tokens_out}tok {elapsed_ms}ms done={bridge_reason} ({usage_src})")
 
