@@ -5389,13 +5389,14 @@ function drawPie(canvas, slices, title) {
 }
 
 function modelSlices(models) {
+  // Graph by actual Ollama quota share (bar_pct), not request count.
   const entries = Object.entries(models || {})
-    .map(([name, m]) => ({ name, value: m.requests || 0, bar: m.bar_pct || 0 }))
+    .map(([name, m]) => ({ name, value: m.bar_pct || 0, requests: m.requests || 0 }))
     .filter(s => s.value > 0)
     .sort((a,b) => b.value - a.value);
   if (entries.length > 10) {
     const top = entries.slice(0, 9);
-    const other = entries.slice(9).reduce((a,b)=>({ name: 'Other', value: a.value + b.value, bar: 0 }), { name: 'Other', value: 0, bar: 0 });
+    const other = entries.slice(9).reduce((a,b)=>({ name: 'Other', value: a.value + b.value, requests: a.requests + b.requests }), { name: 'Other', value: 0, requests: 0 });
     top.push(other);
     return top;
   }
@@ -5420,6 +5421,7 @@ async function loadQuotaCost() {
     note.textContent = data.note || '';
     let chartCount = 0;
     let html = '';
+    const colors = ['#22c55e','#3b82f6','#a855f7','#f59e0b','#ef4444','#06b6d4','#ec4899','#84cc16','#6366f1','#f97316'];
     for (const k of data.keys) {
       const windows = [
         { name: 'Session', pct: k.session_usage_pct, resets: k.session_resets_at, models: k.session_models || {} },
@@ -5433,7 +5435,7 @@ async function loadQuotaCost() {
         html += `<div style="background:var(--panel-bg);border:1px solid var(--border);border-radius:8px;padding:12px">
           <div style="font-weight:600;margin-bottom:8px;font-size:13px">${title}</div>
           <canvas id="quota-pie-${k.token_prefix}-${w.name}"></canvas>
-          <div style="margin-top:8px;font-size:11px;color:var(--dim)">${slices.map(s=>`<span style="display:inline-block;margin-right:8px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${['#22c55e','#3b82f6','#a855f7','#f59e0b','#ef4444','#06b6d4','#ec4899','#84cc16','#6366f1','#f97316'][slices.indexOf(s)%10]}"></span> ${escHtml(s.name)} ${fmt(s.value)}</span>`).join('')}</div>
+          <div style="margin-top:8px;font-size:11px;color:var(--dim)">${slices.map((s,i)=>`<span style="display:inline-block;margin-right:8px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${colors[i%colors.length]}"></span> ${escHtml(s.name)} ${s.value.toFixed(1)}% (${fmt(s.requests)})</span>`).join('')}</div>
         </div>`;
       }
     }
