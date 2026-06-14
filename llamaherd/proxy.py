@@ -2022,31 +2022,6 @@ async def _sweep_stale_inflight(interval: int = 300, max_age_seconds: int = 600)
 
 app = FastAPI(title="Ollama Cloud Proxy", lifespan=lifespan)
 
-# Temporary request-header capture for debugging session identifiers
-_REQUEST_HEADERS_LOG: list[dict] = []
-
-@app.middleware("http")
-async def _capture_request_headers(request: Request, call_next):
-    if request.url.path.startswith(("/v1/", "/api/")):
-        headers = dict(request.headers)
-        # Sanitize auth tokens
-        if "authorization" in headers:
-            headers["authorization"] = headers["authorization"][:12] + "..."
-        _REQUEST_HEADERS_LOG.append({
-            "ts": time.time(),
-            "path": request.url.path,
-            "method": request.method,
-            "headers": headers,
-        })
-        if len(_REQUEST_HEADERS_LOG) > 200:
-            _REQUEST_HEADERS_LOG.pop(0)
-    return await call_next(request)
-
-@app.get("/admin/request-headers", dependencies=[Depends(_verify_admin)])
-async def admin_request_headers(limit: int = 50):
-    """Return recently captured request headers for debugging session identifiers."""
-    return {"requests": _REQUEST_HEADERS_LOG[-limit:][::-1]}
-
 
 def _resolve_client(request: Request) -> dict:
     """Extract Bearer token from request and resolve to client identity."""
@@ -2060,13 +2035,19 @@ def _resolve_client(request: Request) -> dict:
 def _extract_session_id(request: Request, body_json: Optional[dict] = None) -> Optional[str]:
     """Extract or generate a session id for sticky routing.
 
+    This implements an **optimistic cache-affinity strategy**: LlamaHerd assumes
+    Ollama Cloud keeps a per-subscriber KV/context cache for recent requests
+    (especially important for 1M-context and long-context models). When a
+    stable session identifier is unavailable from the client, we derive one
+    from the leading conversation context so repeated turns in the same chat
+    route to the same upstream subscription and maximize the chance of a warm
+    cache hit.
+
     Priority:
     1. X-LlamaHerd-Session request header
     2. llamaherd-session cookie
     3. X-Conversation-ID header (common alias)
-    4. Hash the start of the conversation messages so repeated turns in the
-       same chat route to the same sub even when the client sends no session
-       identifier. This is a pragmatic fallback for OpenAI-compatible clients.
+    4. Hash of the first system + user messages (fallback for OpenAI clients)
     5. None — caller will generate a random id
     """
     sid = request.headers.get("x-llamaherd-session") or request.headers.get("x-conversation-id")

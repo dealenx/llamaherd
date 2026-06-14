@@ -19,6 +19,7 @@ clients --> [ LlamaHerd ] --> { Sub 1 | Sub 2 | Sub N }
 
 ## ✨ Features
 
+- **Sticky session routing** — keeps the same conversation on the same upstream subscription to maximize KV-cache reuse. Falls back to hashing the start of the conversation context when clients don't send a session ID.
 - **Multi-key load balancing** — routes across N Ollama Cloud keys, preferring freshest billing cycle and least usage
 - **Auto model discovery** — polls `/v1/models` from each key, merges into one list
 - **Live dashboard** — SSE-powered real-time updates, time-period filtering, per-model usage, session/weekly progress tracking
@@ -29,6 +30,21 @@ clients --> [ LlamaHerd ] --> { Sub 1 | Sub 2 | Sub N }
 - **Overflow queuing** — requests queue (up to 60s) instead of failing fast
 - **OpenAI & native Ollama protocol** — both `/v1/*` and `/api/*` routes supported
 - **Context length metadata** — injects correct context windows into `/v1/models` so clients don't fall back to 128K defaults
+
+## Sticky sessions and cache affinity
+
+LlamaHerd implements sticky session routing with the goal of maximizing the chance that repeated turns of the same conversation hit a warm KV/context cache on the upstream Ollama Cloud subscription. This is particularly valuable for long-context and 1M-context models, where re-transmitting the full prompt to a different subscriber on every turn would be expensive.
+
+How sessions are identified (in order):
+
+1. `X-LlamaHerd-Session` request header.
+2. `llamaherd-session` cookie returned by LlamaHerd.
+3. `X-Conversation-ID` request header.
+4. Hash of the first system + user messages from the request body.
+
+If a client (e.g. OpenClaw using the OpenAI JS client) does not send an explicit session identifier, LlamaHerd falls back to option 4. The TTL is configurable via `sticky_ttl_seconds` (default 3600s).
+
+On upstream 429/402 or other errors, the sticky mapping for that session is cleared so the next turn can rebalance to a healthier subscription.
 
 ## 🚀 Quick Start
 
