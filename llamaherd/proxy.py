@@ -353,6 +353,59 @@ class KeyState:
         return -1.0
 
 
+class StickySessionManager:
+    """Manages sticky session -> upstream key mappings with TTL for cache affinity.
+
+    Follows industry standards for session stickiness (e.g. nginx/ELB cookie
+    expiration defaults around 20min-1h). Default 3600s (1h) balances cache
+    reuse against staleness risk. Sessions auto-expire; on upstream errors
+    (429/402) the caller should clear to allow rebalancing.
+    """
+
+    def __init__(self, ttl_seconds: int = 3600):
+        self.ttl = ttl_seconds
+        self._sessions: dict[str, dict] = {}  # session_id -> {"key_token": str, "expires_at": float}
+        self._lock = asyncio.Lock()
+
+    async def get_preferred_key(self, session_id: Optional[str]) -> Optional[str]:
+        if not session_id:
+            return None
+        async with self._lock:
+            entry = self._sessions.get(session_id)
+            if entry and time.time() < entry["expires_at"]:
+                return entry["key_token"]
+            if entry:
+                self._sessions.pop(session_id, None)
+            return None
+
+    async def set_session(self, session_id: str, key_token: str) -> None:
+        async with self._lock:
+            self._sessions[session_id] = {
+                "key_token": key_token,
+                "expires_at": time.time() + self.ttl,
+            }
+
+    async def clear_session(self, session_id: Optional[str]) -> None:
+        if not session_id:
+            return
+        async with self._lock:
+            self._sessions.pop(session_id, None)
+
+    def get_status(self) -> dict:
+        """Return active sticky sessions for admin/debug (sanitized)."""
+        now = time.time()
+        active = {}
+        for sid, entry in list(self._sessions.items()):
+            if entry["expires_at"] > now:
+                active[sid] = {
+                    "key_prefix": entry["key_token"][:8] + "...",
+                    "expires_in_sec": int(entry["expires_at"] - now),
+                }
+            else:
+                self._sessions.pop(sid, None)
+        return active
+
+
 class KeyManager:
     def __init__(self, keys_config: list[dict]):
         self.keys: list[KeyState] = []
@@ -397,8 +450,17 @@ class KeyManager:
                 except Exception as e:
                     log.warning(f"Sub poll error for {key.label}: {e}")
 
-    async def acquire(self, prefer_key: Optional[str] = None) -> Optional[KeyState]:
+    async def acquire(self, prefer_key: Optional[str] = None, sticky_key: Optional[str] = None) -> Optional[KeyState]:
         async with self._lock:
+            # Sticky key takes precedence for cache affinity (even if higher load)
+            if sticky_key:
+                for k in self.keys:
+                    if k.token == sticky_key and k.available_slots > 0:
+                        k.in_flight += 1
+                        return k
+                # Sticky key exhausted or unavailable — will fall through to normal selection
+                # Caller should clear the sticky session on error paths
+
             if prefer_key:
                 for k in self.keys:
                     if k.token == prefer_key and k.available_slots > 0:
@@ -1726,7 +1788,7 @@ def _verify_admin(request: Request) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, registry, usage_db, client_registry, usage_scraper, fallback_provider
+    global manager, registry, usage_db, client_registry, usage_scraper, fallback_provider, sticky
     global upstream_url, retry_on_429, max_retries, queue_timeout, request_timeout
     global admin_token, NATIVE_BRIDGE_MODELS, reject_unknown_models
 
@@ -1738,6 +1800,7 @@ async def lifespan(app: FastAPI):
         log.info("Admin authentication enabled")
     manager = KeyManager(cfg["keys"])
     client_registry = ClientRegistry(str(DB_PATH), seed_clients=cfg.get("clients"))
+    sticky = StickySessionManager(ttl_seconds=cfg.get("sticky_ttl_seconds", 3600))
     upstream_url = cfg.get("upstream", "https://ollama.com/v1")
     retry_on_429 = cfg.get("retry_on_429", True)
     max_retries = cfg.get("max_retries", 2)
@@ -1924,6 +1987,41 @@ def _resolve_client(request: Request) -> dict:
     return {"id": "anonymous", "label": "Anonymous", "token": ""}
 
 
+def _extract_session_id(request: Request) -> Optional[str]:
+    """Extract or generate a session id for sticky routing.
+
+    Priority:
+    1. X-LlamaHerd-Session request header
+    2. llamaherd-session cookie
+    3. X-Conversation-ID header (common alias)
+    4. None — will still be created from the first response
+    """
+    sid = request.headers.get("x-llamaherd-session") or request.headers.get("x-conversation-id")
+    if sid:
+        return sid.strip()
+    try:
+        cookie = request.cookies.get("llamaherd-session")
+        if cookie:
+            return cookie.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _session_cookie_for_response(session_id: str, ttl: int) -> str:
+    """Build a Set-Cookie header for the sticky session."""
+    from datetime import datetime, timezone
+    expires = datetime.now(timezone.utc) + timedelta(seconds=ttl)
+    cookie = (
+        f"llamaherd-session={session_id}; "
+        f"Max-Age={ttl}; "
+        f"Path=/; "
+        f"HttpOnly; "
+        f"SameSite=Lax"
+    )
+    return cookie
+
+
 async def _proxy_request(request: Request, path: str) -> Response:
     """Core proxy logic — acquire key, forward, handle 429s, release."""
     global _LAST_DISCOVERY_REFRESH
@@ -2011,6 +2109,10 @@ async def _proxy_request(request: Request, path: str) -> Response:
         return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id)
 
     prefer_key = registry.get_preferred_key(model) if registry else None
+    session_id = _extract_session_id(request)
+    if not session_id:
+        session_id = "lh_" + secrets.token_urlsafe(16)
+    sticky_key = await sticky.get_preferred_key(session_id) if sticky else None
 
     last_error = None
     start_emitted = False
@@ -2018,7 +2120,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
         key = None
         deadline = time.time() + queue_timeout
         while time.time() < deadline:
-            key = await manager.acquire(prefer_key=prefer_key)
+            key = await manager.acquire(prefer_key=prefer_key, sticky_key=sticky_key)
             if key:
                 break
             await asyncio.sleep(0.5)
@@ -2047,6 +2149,11 @@ async def _proxy_request(request: Request, path: str) -> Response:
             )
             start_emitted = True
 
+        # Pin this session to the chosen sub (new or refreshed TTL)
+        if sticky and session_id:
+            await sticky.set_session(session_id, key.token)
+            sticky_key = key.token
+
         try:
             start = time.time()
             headers = {
@@ -2059,10 +2166,10 @@ async def _proxy_request(request: Request, path: str) -> Response:
             if is_stream and _should_bridge_to_native(model):
                 bridge_body = _convert_openai_to_ollama_body(req_json)
                 log.info(f"Bridge: {model} via native /api/chat (client={client_id})")
-                return await _proxy_bridge_stream(client_id, key, bridge_body, model, start, request_id)
+                return await _proxy_bridge_stream(client_id, key, bridge_body, model, start, request_id, session_id=session_id)
 
             if is_stream:
-                return await _proxy_stream(client_id, key, path, headers, body, model, start, request_id)
+                return await _proxy_stream(client_id, key, path, headers, body, model, start, request_id, session_id=session_id)
 
             async with httpx.AsyncClient(timeout=request_timeout) as client_http:
                 resp = await client_http.post(
@@ -2077,16 +2184,22 @@ async def _proxy_request(request: Request, path: str) -> Response:
                 log.warning(f"429 from {key.label} for {model} (client={client_id}, attempt {attempt+1})")
                 await manager.mark_429(key)
                 await manager.release(key)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429)
+                if sticky and session_id:
+                    await sticky.clear_session(session_id)
+                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud")
                 prefer_key = None
+                sticky_key = None
                 continue
 
             if resp.status_code == 402:
                 log.warning(f"402 from {key.label} for {model} (client={client_id})")
                 await manager.mark_402(key)
                 await manager.release(key)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402)
+                if sticky and session_id:
+                    await sticky.clear_session(session_id)
+                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud")
                 prefer_key = None
+                sticky_key = None
                 continue
 
             resp_data = resp.json() if resp.status_code == 200 else {}
@@ -2102,18 +2215,27 @@ async def _proxy_request(request: Request, path: str) -> Response:
             if resp.status_code >= 400:
                 log.warning(f"{resp.status_code} from {key.label} for {model}: {resp.text[:200]}")
 
+            resp_headers = dict(resp.headers)
+            if sticky and session_id and resp.status_code == 200:
+                resp_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
+                resp_headers["X-LlamaHerd-Session"] = session_id
+                resp_headers["X-LlamaHerd-Key"] = key.label
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
-                headers=dict(resp.headers),
+                headers=resp_headers,
             )
 
         except Exception as e:
             elapsed_ms = int((time.time() - start) * 1000)
             await manager.release(key)
-            _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, -1)
+            if sticky and session_id:
+                await sticky.clear_session(session_id)
+            _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, -1, request_id=request_id, provider="ollama-cloud")
             last_error = str(e)
             log.error(f"Proxy error for {model} (client={client_id}): {e}")
+            prefer_key = None
+            sticky_key = None
             continue
 
     # Ollama exhausted retries — try fallback as a last resort.
@@ -2138,7 +2260,8 @@ async def _proxy_request(request: Request, path: str) -> Response:
 
 async def _proxy_stream(client_id: str, key: KeyState, path: str,
                          headers: dict, body: bytes, model: str, start: float,
-                         request_id: Optional[str] = None) -> StreamingResponse:
+                         request_id: Optional[str] = None,
+                         session_id: Optional[str] = None) -> StreamingResponse:
 
     async def generate():
         tokens_out = 0
@@ -2212,7 +2335,15 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
             status_suffix = "" if final_status == 200 else f" status={final_status}"
             log.info(f"{client_id} -> {model} via {key.label}: stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src}){status_suffix}")
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    stream_headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+    }
+    if sticky and session_id:
+        stream_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
+        stream_headers["X-LlamaHerd-Session"] = session_id
+        stream_headers["X-LlamaHerd-Key"] = key.label
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=stream_headers)
 
 
 # ---------------------------------------------------------------------------
@@ -2330,7 +2461,15 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
             log.info(f"{client_id} -> {original_model} via {upstream_label}({mapped}): "
                      f"stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({src})")
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    bridge_headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+    }
+    if sticky and session_id:
+        bridge_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
+        bridge_headers["X-LlamaHerd-Session"] = session_id
+        bridge_headers["X-LlamaHerd-Key"] = key.label
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=bridge_headers)
 
 
 # ---------------------------------------------------------------------------
@@ -2350,7 +2489,8 @@ def _native_api_upstream() -> str:
 
 async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
                                 headers: dict, body: bytes, model: str,
-                                start: float, request_id: Optional[str] = None) -> StreamingResponse:
+                                start: float, request_id: Optional[str] = None,
+                                session_id: Optional[str] = None) -> StreamingResponse:
     """Stream NDJSON from the native Ollama API, capturing usage from the final chunk."""
 
     async def generate():
@@ -2365,11 +2505,15 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
                                               content=body, headers=headers) as resp:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
+                        if sticky and session_id:
+                            await sticky.clear_session(session_id)
                         final_status = 429
                         yield json.dumps({"error": "429 from upstream"}) + "\n"
                         return
                     if resp.status_code == 402:
                         await manager.mark_402(key)
+                        if sticky and session_id:
+                            await sticky.clear_session(session_id)
                         final_status = 402
                         yield json.dumps({"error": "402 from upstream"}) + "\n"
                         return
@@ -2409,6 +2553,8 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
                         except (json.JSONDecodeError, ValueError, TypeError):
                             pass
         except Exception as e:
+            if sticky and session_id:
+                await sticky.clear_session(session_id)
             log.error(f"NDJSON stream error for {model} (client={client_id}): {e}")
         finally:
             elapsed_ms = int((time.time() - start) * 1000)
@@ -2418,7 +2564,12 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
             usage_src = "usage" if usage_captured else "estimate"
             log.info(f"{client_id} -> {model} via {key.label}: ndjson {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src})")
 
-    return StreamingResponse(generate(), media_type="application/x-ndjson")
+    ndjson_headers = {"Content-Type": "application/x-ndjson"}
+    if sticky and session_id:
+        ndjson_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
+        ndjson_headers["X-LlamaHerd-Session"] = session_id
+        ndjson_headers["X-LlamaHerd-Key"] = key.label
+    return StreamingResponse(generate(), media_type="application/x-ndjson", headers=ndjson_headers)
 
 
 async def _proxy_ndjson_request(request: Request, path: str) -> Response:
@@ -2436,6 +2587,10 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
     is_stream = req_json.get("stream", False)
 
     prefer_key = registry.get_preferred_key(model) if registry else None
+    session_id = _extract_session_id(request)
+    if not session_id:
+        session_id = "lh_" + secrets.token_urlsafe(16)
+    sticky_key = await sticky.get_preferred_key(session_id) if sticky else None
 
     last_error = None
     start_emitted = False
@@ -2443,7 +2598,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
         key = None
         deadline = time.time() + queue_timeout
         while time.time() < deadline:
-            key = await manager.acquire(prefer_key=prefer_key)
+            key = await manager.acquire(prefer_key=prefer_key, sticky_key=sticky_key)
             if key:
                 break
             await asyncio.sleep(0.5)
@@ -2463,6 +2618,11 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             )
             start_emitted = True
 
+        # Pin this native session to the chosen sub (new or refreshed TTL)
+        if sticky and session_id:
+            await sticky.set_session(session_id, key.token)
+            sticky_key = key.token
+
         try:
             start = time.time()
             headers = {
@@ -2472,7 +2632,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             api_upstream = _native_api_upstream()
 
             if is_stream:
-                return await _proxy_ndjson_stream(client_id, key, path, headers, body, model, start, request_id)
+                return await _proxy_ndjson_stream(client_id, key, path, headers, body, model, start, request_id, session_id=session_id)
 
             # Non-streaming: regular JSON response
             async with httpx.AsyncClient(timeout=request_timeout) as client_http:
@@ -2488,16 +2648,22 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
                 log.warning(f"429 from {key.label} for {model} (client={client_id}, attempt {attempt+1})")
                 await manager.mark_429(key)
                 await manager.release(key)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429)
+                if sticky and session_id:
+                    await sticky.clear_session(session_id)
+                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud")
                 prefer_key = None
+                sticky_key = None
                 continue
 
             if resp.status_code == 402:
                 log.warning(f"402 from {key.label} for {model} (client={client_id})")
                 await manager.mark_402(key)
                 await manager.release(key)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402)
+                if sticky and session_id:
+                    await sticky.clear_session(session_id)
+                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud")
                 prefer_key = None
+                sticky_key = None
                 continue
 
             # Extract usage from non-streaming response
@@ -2513,18 +2679,27 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             if resp.status_code >= 400:
                 log.warning(f"{resp.status_code} from {key.label} for {model}: {resp.text[:200]}")
 
+            resp_headers = dict(resp.headers)
+            if sticky and session_id and resp.status_code == 200:
+                resp_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
+                resp_headers["X-LlamaHerd-Session"] = session_id
+                resp_headers["X-LlamaHerd-Key"] = key.label
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
-                headers=dict(resp.headers),
+                headers=resp_headers,
             )
 
         except Exception as e:
             elapsed_ms = int((time.time() - start) * 1000)
             await manager.release(key)
-            _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, -1)
+            if sticky and session_id:
+                await sticky.clear_session(session_id)
+            _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, -1, request_id=request_id, provider="ollama-cloud")
             last_error = str(e)
             log.error(f"Native proxy error for {model} (client={client_id}): {e}")
+            prefer_key = None
+            sticky_key = None
             continue
 
     _record_and_broadcast(client_id, "none", model, 0, 0, 0, 502,
@@ -2709,10 +2884,15 @@ async def api_show(request: Request):
                 continue
 
             await manager.release(key)
+            resp_headers = dict(resp.headers)
+            if sticky and session_id and resp.status_code == 200:
+                resp_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
+                resp_headers["X-LlamaHerd-Session"] = session_id
+                resp_headers["X-LlamaHerd-Key"] = key.label
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
-                headers=dict(resp.headers),
+                headers=resp_headers,
             )
 
         except Exception as e:
@@ -3014,7 +3194,8 @@ def _ollama_chunk_to_sse(ollama_chunk: dict, chunk_id: str, model: str) -> str |
 
 async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
                                 model: str, start: float,
-                                request_id: Optional[str] = None) -> StreamingResponse:
+                                request_id: Optional[str] = None,
+                                session_id: Optional[str] = None) -> StreamingResponse:
     """Bridge stream: receive NDJSON from /api/chat, emit SSE for /v1/chat/completions client.
 
     This is the core of the native bridge. It re-routes the upstream request
@@ -3103,7 +3284,15 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
             usage_src = "usage" if usage_captured else "estimate"
             log.info(f"{client_id} -> {model} via {key.label}: bridge {tokens_in}+{tokens_out}tok {elapsed_ms}ms done={bridge_reason} ({usage_src})")
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    bridge_headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+    }
+    if sticky and session_id:
+        bridge_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
+        bridge_headers["X-LlamaHerd-Session"] = session_id
+        bridge_headers["X-LlamaHerd-Key"] = key.label
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=bridge_headers)
 
 
 # ---------------------------------------------------------------------------
@@ -3118,6 +3307,8 @@ async def admin_status():
         "last_refresh": registry.last_refresh if registry else 0,
         "upstream": upstream_url,
         "clients": client_registry.clients if client_registry else [],
+        "sticky_sessions": sticky.get_status() if sticky else {},
+        "sticky_ttl_seconds": sticky.ttl if sticky else None,
     }
 
 

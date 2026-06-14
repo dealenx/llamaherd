@@ -1,7 +1,7 @@
 # OpenRouter equivalent pricing for LlamaHerd models
 # All prices in USD per 1M tokens
 # Source: OpenRouter API (https://openrouter.ai/api/v1/models) + supplementary sources
-# Auto-synced: 2026-06-09T10:18:35.996510+00:00
+# Auto-synced: 2026-06-13T22:52:30.782440+00:00
 #
 # Strips :cloud suffix automatically — "glm-5.1:cloud" uses "glm-5.1" prices.
 
@@ -16,20 +16,20 @@ models:
     output_per_1m: 3.41
   deepseek-v4-flash:
     openrouter_id: deepseek/deepseek-v4-flash
-    input_per_1m: 0.0983
-    output_per_1m: 0.1966
+    input_per_1m: 0.09
+    output_per_1m: 0.18
   deepseek-v4-pro:
     openrouter_id: deepseek/deepseek-v4-pro
     input_per_1m: 0.435
     output_per_1m: 0.87
   kimi-k2.5:
     openrouter_id: moonshotai/kimi-k2.5
-    input_per_1m: 0.4
-    output_per_1m: 1.9
+    input_per_1m: 0.375
+    output_per_1m: 2.025
   minimax-m2.7:
     openrouter_id: minimax/minimax-m2.7
-    input_per_1m: 0.279
-    output_per_1m: 1.2
+    input_per_1m: 0.25
+    output_per_1m: 1.0
   qwen3.5:397b:
     openrouter_id: qwen/qwen3.5-397b-a17b
     input_per_1m: 0.39
@@ -45,7 +45,7 @@ models:
   gemma4:31b:
     openrouter_id: google/gemma-4-31b-it
     input_per_1m: 0.12
-    output_per_1m: 0.36
+    output_per_1m: 0.35
   cogito-2.1:671b:
     openrouter_id: deepcogito/cogito-v2.1-671b
     input_per_1m: 1.25
@@ -173,8 +173,12 @@ models:
   minimax-m2.5:
     openrouter_id: minimax/minimax-m2.5
     input_per_1m: 0.15
-    output_per_1m: 1.15
+    output_per_1m: 0.9
   minimax-m3:
     openrouter_id: minimax/minimax-m3
     input_per_1m: 0.3
     output_per_1m: 1.2
+  kimi-k2.7-code:
+    openrouter_id: moonshotai/kimi-k2.7-code
+    input_per_1m: 0.75
+    output_per_1m: 3.5
