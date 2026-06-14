@@ -4555,16 +4555,13 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 
 <div class="tab-panel" id="panel-quota">
   <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-    <h2 style="margin:0">Quota Cost Algebra</h2>
+    <h2 style="margin:0">Model Usage by Quota Window</h2>
     <span class="badge" id="quota-badge">0</span>
     <button class="btn btn-sm" id="quota-refresh">🔄 Refresh</button>
-    <span style="font-size:11px;color:var(--dim)" id="quota-subtitle">Separate input/output coefficients solved via least-squares from usage deltas.</span>
+    <span style="font-size:11px;color:var(--dim)" id="quota-subtitle">Pie charts of model mix contributing to each key's session and weekly quota bars (scraped from ollama.com/settings).</span>
   </div>
-  <div style="margin-bottom:8px; font-size:12px; color:var(--dim)" id="quota-solve-status"></div>
-  <div style="overflow-x:auto"><div id="quota-status" style="color:var(--dim);margin-bottom:1em"></div>
-<table id="quota-table"><thead><tr>
-    <th>Key</th><th>Window</th><th>Usage %</th><th>Resets</th><th>Model</th><th>Requests</th><th>Bar %</th>
-  </tr></thead><tbody></tbody></table></div>
+  <div id="quota-status" style="color:var(--dim);margin-bottom:1em"></div>
+  <div id="quota-charts" style="display:flex;flex-wrap:wrap;gap:24px;justify-content:center"></div>
   <div id="quota-note" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
 </div>
 
@@ -5339,52 +5336,121 @@ loadFallbackStatus();
 loadInFlightInitial();
 connectSSE();
 
-// --- Quota Cost ---
+// --- Quota Cost (now usage pie charts) ---
+function drawPie(canvas, slices, title) {
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = 260, h = 260;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  ctx.scale(dpr, dpr);
+  const cx = w/2, cy = h/2 - 10, radius = 90;
+  const colors = ['#22c55e','#3b82f6','#a855f7','#f59e0b','#ef4444','#06b6d4','#ec4899','#84cc16','#6366f1','#f97316'];
+  let total = slices.reduce((a,b)=>a+b.value,0);
+  if (total <= 0) {
+    ctx.fillStyle = 'var(--dim)';
+    ctx.textAlign = 'center';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('No data', cx, cy);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillText(title, cx, h - 10);
+    return;
+  }
+  let angle = -Math.PI/2;
+  slices.forEach((s, i) => {
+    const a = (s.value/total) * 2 * Math.PI;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, radius, angle, angle + a);
+    ctx.closePath();
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fill();
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // label wedge if > 8%
+    if (s.value/total > 0.08) {
+      const mid = angle + a/2;
+      const lx = cx + Math.cos(mid)*(radius*0.65);
+      const ly = cy + Math.sin(mid)*(radius*0.65);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(Math.round((s.value/total)*100)+'%', lx, ly);
+    }
+    angle += a;
+  });
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(title, cx, h - 10);
+}
+
+function modelSlices(models) {
+  const entries = Object.entries(models || {})
+    .map(([name, m]) => ({ name, value: m.requests || 0, bar: m.bar_pct || 0 }))
+    .filter(s => s.value > 0)
+    .sort((a,b) => b.value - a.value);
+  if (entries.length > 10) {
+    const top = entries.slice(0, 9);
+    const other = entries.slice(9).reduce((a,b)=>({ name: 'Other', value: a.value + b.value, bar: 0 }), { name: 'Other', value: 0, bar: 0 });
+    top.push(other);
+    return top;
+  }
+  return entries;
+}
+
 async function loadQuotaCost() {
   try {
     const data = await loadJSON('/admin/quota-cost');
-    const tbody = document.querySelector('#quota-table tbody');
     const badge = document.getElementById('quota-badge');
     const note = document.getElementById('quota-note');
     const status = document.getElementById('quota-status');
+    const charts = document.getElementById('quota-charts');
     if (!data.keys || data.keys.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" style="color:var(--dim);text-align:center;padding:2em">' +
-        (data.note || 'No quota data yet.') + '</td></tr>';
+      charts.innerHTML = '<div style="color:var(--dim);padding:2em">' + (data.note || 'No quota data yet.') + '</div>';
       badge.textContent = '0';
       note.textContent = data.note || '';
       status.textContent = '';
       return;
     }
-    let rows = [];
+    badge.textContent = data.keys.length;
+    note.textContent = data.note || '';
+    let chartCount = 0;
+    let html = '';
     for (const k of data.keys) {
       const windows = [
         { name: 'Session', pct: k.session_usage_pct, resets: k.session_resets_at, models: k.session_models || {} },
         { name: 'Weekly', pct: k.weekly_usage_pct, resets: k.weekly_resets_at, models: k.weekly_models || {} }
       ];
       for (const w of windows) {
-        const modelNames = Object.keys(w.models).sort((a, b) => (w.models[b].requests || 0) - (w.models[a].requests || 0));
-        if (modelNames.length === 0) {
-          rows.push({ key: k.label, window: w.name, pct: w.pct, resets: w.resets, model: '—', requests: '—', bar: '—' });
-        } else {
-          for (const model of modelNames) {
-            const m = w.models[model];
-            rows.push({ key: k.label, window: w.name, pct: w.pct, resets: w.resets, model, requests: fmt(m.requests), bar: m.bar_pct + '%' });
-          }
-        }
+        const slices = modelSlices(w.models);
+        if (slices.length === 0) continue;
+        chartCount++;
+        const title = `${escHtml(k.label)} — ${w.name} (${w.pct >= 0 ? w.pct + '%' : '?'})`;
+        html += `<div style="background:var(--panel-bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+          <div style="font-weight:600;margin-bottom:8px;font-size:13px">${title}</div>
+          <canvas id="quota-pie-${k.token_prefix}-${w.name}"></canvas>
+          <div style="margin-top:8px;font-size:11px;color:var(--dim)">${slices.map(s=>`<span style="display:inline-block;margin-right:8px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${['#22c55e','#3b82f6','#a855f7','#f59e0b','#ef4444','#06b6d4','#ec4899','#84cc16','#6366f1','#f97316'][slices.indexOf(s)%10]}"></span> ${escHtml(s.name)} ${fmt(s.value)}</span>`).join('')}</div>
+        </div>`;
       }
     }
-    badge.textContent = data.keys.length;
-    note.textContent = data.note || '';
-    status.textContent = `${rows.length} model-window rows from ${data.keys.length} keys`;
-    tbody.innerHTML = rows.map(r => '<tr>' +
-      '<td>' + escHtml(r.key) + '</td>' +
-      '<td>' + r.window + '</td>' +
-      '<td>' + (r.pct >= 0 ? r.pct + '%' : '?') + '</td>' +
-      '<td>' + (r.resets || '—') + '</td>' +
-      '<td style="font-family:monospace">' + escHtml(r.model) + '</td>' +
-      '<td>' + r.requests + '</td>' +
-      '<td>' + r.bar + '</td>' +
-      '</tr>').join('');
+    charts.innerHTML = html || '<div style="color:var(--dim);padding:2em">No model usage data yet.</div>';
+    status.textContent = `${chartCount} charts from ${data.keys.length} keys`;
+    // draw after DOM insertion
+    for (const k of data.keys) {
+      const windows = [
+        { name: 'Session', models: k.session_models || {} },
+        { name: 'Weekly', models: k.weekly_models || {} }
+      ];
+      for (const w of windows) {
+        const slices = modelSlices(w.models);
+        const canvas = document.getElementById(`quota-pie-${k.token_prefix}-${w.name}`);
+        if (canvas) drawPie(canvas, slices, `${k.label} ${w.name}`);
+      }
+    }
   } catch (e) { console.error('Failed to load quota cost:', e); }
 }
 
