@@ -2118,6 +2118,12 @@ async def _sweep_stale_inflight(interval: int = 300, max_age_seconds: int = 600)
 app = FastAPI(title="Ollama Cloud Proxy", lifespan=lifespan)
 
 
+@app.get("/healthz")
+async def healthz():
+    """Unauthenticated liveness endpoint for Docker/systemd health checks."""
+    return {"status": "ok"}
+
+
 def _resolve_client(request: Request) -> dict:
     """Extract Bearer token from request and resolve to client identity.
 
