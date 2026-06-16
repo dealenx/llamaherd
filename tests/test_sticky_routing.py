@@ -183,6 +183,48 @@ async def chat(proxy_url: str, api_key: str, session_id: str | None = None, stre
 
 
 @pytest.mark.asyncio
+async def test_public_endpoints_require_registered_client_token(proxy_server):
+    cfg = proxy_server
+    proxy_url = f"http://{cfg['host']}:{cfg['port']}"
+    body = {
+        "model": "gemma3:4b",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": False,
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        missing_chat = await client.post(f"{proxy_url}/v1/chat/completions", json=body)
+        assert missing_chat.status_code == 401
+        assert missing_chat.json()["detail"] == "missing_api_key"
+
+        unknown_chat = await client.post(
+            f"{proxy_url}/v1/chat/completions",
+            headers={"Authorization": "Bearer not-a-registered-token"},
+            json=body,
+        )
+        assert unknown_chat.status_code == 403
+        assert unknown_chat.json()["detail"] == "invalid_api_key"
+
+        missing_models = await client.get(f"{proxy_url}/v1/models")
+        assert missing_models.status_code == 401
+
+        unknown_models = await client.get(
+            f"{proxy_url}/v1/models",
+            headers={"Authorization": "Bearer not-a-registered-token"},
+        )
+        assert unknown_models.status_code == 403
+
+        valid_models = await client.get(
+            f"{proxy_url}/v1/models",
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert valid_models.status_code == 200
+
+        missing_native_tags = await client.get(f"{proxy_url}/api/tags")
+        assert missing_native_tags.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_sticky_session_pins_to_same_key(proxy_server):
     cfg = proxy_server
     proxy_url = f"http://{cfg['host']}:{cfg['port']}"

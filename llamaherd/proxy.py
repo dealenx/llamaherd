@@ -137,14 +137,20 @@ class ClientRegistry:
                 "daily_token_limit": daily_token_limit, "daily_request_limit": daily_request_limit,
                 "rpm_limit": rpm_limit}
 
-    def resolve(self, token: str) -> dict:
-        """Resolve a Bearer token to a client identity. Unknown tokens still work."""
+    def resolve(self, token: str) -> Optional[dict]:
+        """Resolve a Bearer token to a registered client identity.
+
+        Unknown tokens are rejected by the caller. LlamaHerd used to allow
+        unknown tokens through as client_id="unknown" for attribution only,
+        but production deployments are API-key-only: downstream clients must
+        use a token registered in the client DB.
+        """
         if token in self._by_token:
             return self._by_token[token]
         # Check if it's an ID used as a token (convenience)
         if token in self._by_id:
             return self._by_id[token]
-        return {"id": "unknown", "label": f"Unknown ({token[:8]}...)", "token": token}
+        return None
 
     def create(self, client_id: str, label: str, notes: str = "",
                token: Optional[str] = None,
@@ -2113,12 +2119,43 @@ app = FastAPI(title="Ollama Cloud Proxy", lifespan=lifespan)
 
 
 def _resolve_client(request: Request) -> dict:
-    """Extract Bearer token from request and resolve to client identity."""
+    """Extract Bearer token from request and resolve to client identity.
+
+    Public model/proxy endpoints require a valid registered LlamaHerd client
+    token. Admin endpoints use the separate admin token dependency.
+    """
     auth = request.headers.get("authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[7:].strip()
-        return client_registry.resolve(token)
-    return {"id": "anonymous", "label": "Anonymous", "token": ""}
+    if not auth:
+        raise HTTPException(
+            status_code=401,
+            detail="missing_api_key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not auth.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid_authorization_header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = auth[7:].strip()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="missing_api_key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if client_registry is None:
+        raise HTTPException(status_code=503, detail="client_registry_not_ready")
+    client = client_registry.resolve(token)
+    if client is None:
+        peer = request.client.host if request.client else "unknown"
+        log.warning(
+            "Rejected request with unknown client token: source=%s token_prefix=%s...",
+            peer,
+            token[:8],
+        )
+        raise HTTPException(status_code=403, detail="invalid_api_key")
+    return client
 
 
 def _extract_session_id(request: Request, body_json: Optional[dict] = None) -> Optional[str]:
@@ -2757,7 +2794,6 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
         session_id = "lh_" + secrets.token_urlsafe(16)
     sticky_key = await sticky.get_preferred_key(session_id) if sticky else None
     log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8]+'...' if sticky_key else None}")
-    log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8] + '...' if sticky_key else None}")
 
     last_error = None
     start_emitted = False
@@ -2883,7 +2919,8 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
 
 @app.get("/v1/models")
 @app.get("/v1/models/")
-async def list_models():
+async def list_models(request: Request):
+    _resolve_client(request)
     base = registry.get_models_response() if registry else {"object": "list", "data": []}
     data = list(base.get("data") or [])
     seen = {entry.get("id") for entry in data}
@@ -2913,7 +2950,8 @@ async def list_models():
 
 
 @app.get("/v1/models/{model_id}")
-async def get_model(model_id: str):
+async def get_model(model_id: str, request: Request):
+    _resolve_client(request)
     if registry and model_id in registry.models:
         entry = registry._model_entry(model_id)
         entry["provider"] = "ollama-cloud"
@@ -2956,8 +2994,9 @@ async def embeddings(request: Request):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/tags")
-async def api_tags():
+async def api_tags(request: Request):
     """Return model list in Ollama native /api/tags format."""
+    _resolve_client(request)
     if not registry:
         return {"models": []}
     models = []
@@ -3003,6 +3042,7 @@ async def api_show(request: Request):
     body = await request.body()
     req_json = json.loads(body) if body else {}
     model = req_json.get("name", req_json.get("model", "unknown"))
+    session_id = _extract_session_id(request, req_json)
 
     prefer_key = registry.get_preferred_key(model) if registry else None
 
@@ -3075,8 +3115,9 @@ async def api_show(request: Request):
 
 
 @app.get("/api/ps")
-async def api_ps():
+async def api_ps(request: Request):
     """Native Ollama /api/ps — return empty models list (we don't track running models)."""
+    _resolve_client(request)
     return {"models": []}
 
 
