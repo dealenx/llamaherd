@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from starlette.requests import Request
 
 from llamaherd import proxy
 
@@ -99,12 +100,14 @@ async def test_routes_use_registry_metadata(monkeypatch):
     registry = proxy.ModelRegistry(FakeManager(), "https://ollama.com/v1")
     await registry.refresh()
     monkeypatch.setattr(proxy, "registry", registry)
+    monkeypatch.setattr(proxy, "_resolve_client", lambda request: {"id": "test-client"})
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
 
-    model = await proxy.get_model("model-a")
+    model = await proxy.get_model("model-a", request)
     assert model["context_length"] == 131072
     assert model["capabilities"] == ["completion", "tools", "vision"]
 
-    tags = await proxy.api_tags()
+    tags = await proxy.api_tags(request)
     assert tags["models"][0]["model"] == "model-a"
     assert tags["models"][0]["modified_at"] == "2026-01-03T00:00:00Z"
     assert tags["models"][0]["details"]["context_length"] == 131072
