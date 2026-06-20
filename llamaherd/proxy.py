@@ -5778,14 +5778,25 @@ async function saveKey(idx) {
   }
 }
 
-function editCookies(idx) {
-  showModal(`<h3>Edit Cookies for Key ${idx}</h3>
+async function editCookies(idx) {
+  // Fetch current keys to get label and check cookie status
+  let label = 'Key ' + idx;
+  let hasCookies = false;
+  try {
+    const keys = await loadJSON('/admin/keys');
+    if (keys[idx]) {
+      label = keys[idx].label;
+      hasCookies = keys[idx].has_cookies;
+    }
+  } catch (e) { /* ignore */ }
+  showModal(`<h3>Edit Cookies for ${escHtml(label)}</h3>
     <p style="font-size:11px;color:var(--dim);margin-bottom:12px">Extract from browser DevTools → Application → Cookies → ollama.com</p>
     <label>__Secure-session <span style="color:var(--red)">*</span></label><textarea id="m-ss" placeholder="Required — unique per account"></textarea>
     <label>aid</label><input id="m-aid" placeholder="Account ID (shared across accounts)">
     <label>cf_clearance</label><input id="m-cf" placeholder="Cloudflare bypass (optional)">
     <label>__stripe_mid</label><input id="m-stripe" placeholder="Stripe session (optional)">
     <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="saveCookies(${idx})">Save</button></div>`);
+  setTimeout(() => { const inp = document.getElementById('m-ss'); if (inp) inp.focus(); }, 50);
 }
 async function saveCookies(idx) {
   const body = {};
@@ -5793,14 +5804,24 @@ async function saveCookies(idx) {
   const aid=document.getElementById('m-aid').value.trim(); if(aid) body.aid=aid;
   const cf=document.getElementById('m-cf').value.trim(); if(cf) body.cf_clearance=cf;
   const stripe=document.getElementById('m-stripe').value.trim(); if(stripe) body.stripe_mid=stripe;
-  await postJSON(`/admin/keys/${idx}/cookies`, body, 'PUT');
-  closeModal(); loadSubsPanel();
+  if (!ss) { alert('__Secure-session is required'); return; }
+  try {
+    const r = await postJSON(`/admin/keys/${idx}/cookies`, body, 'PUT');
+    alert('Cookies saved: ' + (r.cookies_set || []).join(', '));
+    closeModal(); loadSubsPanel();
+  } catch (e) {
+    alert('Failed to save cookies: ' + e.message);
+  }
 }
 
 async function deleteKey(idx, label) {
   if (!confirm(`Remove "${label}"? This takes effect immediately but you should also remove it from config.yaml.`)) return;
-  await postJSON(`/admin/keys/${idx}`, null, 'DELETE');
-  loadSubsPanel();
+  try {
+    await postJSON(`/admin/keys/${idx}`, null, 'DELETE');
+    loadSubsPanel();
+  } catch (e) {
+    alert('Failed to delete: ' + e.message);
+  }
 }
 
 // --- Client Key Management ---
