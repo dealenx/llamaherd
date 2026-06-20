@@ -969,10 +969,10 @@ class TelegramNotifier:
             return "unknown"
 
     def format_message(self, keys: list) -> str:
-        """Format the notification message matching the requested layout."""
+        """Format the notification message matching the dashboard layout."""
         now_str = datetime.now(timezone.utc).strftime("%d.%m.%Y, %H:%M:%S")
 
-        # Count statuses
+        # Count statuses by weekly usage
         red = sum(1 for k in keys if k.weekly_usage_pct >= 80)
         yellow = sum(1 for k in keys if 50 <= k.weekly_usage_pct < 80)
         green = sum(1 for k in keys if 0 <= k.weekly_usage_pct < 50)
@@ -981,25 +981,54 @@ class TelegramNotifier:
         lines.append(f"🔴{red} 🟡{yellow} 🟢{green}")
 
         for k in keys:
-            # Key header: label (plan) email
+            # Key header: email (plan)
             plan = k.plan or "?"
-            label = k.label or "Unknown"
-            email = k.account_email or ""
-            lines.append(f"• {label} ({plan}) {email}")
+            email = k.account_email or k.label or "Unknown"
+            lines.append(f"\n• {email} ({plan})")
 
-            # Session usage
+            # Slots: in_flight / max_concurrent
+            slots = f"{k.in_flight}/{k.max_concurrent}"
+            lines.append(f"  Slots: {slots}")
+
+            # Session usage with elapsed %
             s_pct = k.session_usage_pct
             s_emoji = self._status_emoji(s_pct)
             s_bar = self._make_progress_bar(s_pct)
             s_reset = self._format_reset_time(k.session_resets_at)
-            lines.append(f"  {s_emoji} Час: {s_bar} → {s_reset}")
+            s_elapsed = k._session_elapsed_pct()
+            s_elapsed_str = f" ({s_elapsed:.0f}% elapsed)" if s_elapsed >= 0 else ""
+            lines.append(f"  {s_emoji} Session: {s_bar}{s_elapsed_str} → {s_reset}")
 
-            # Weekly usage
+            # Weekly usage with elapsed %
             w_pct = k.weekly_usage_pct
             w_emoji = self._status_emoji(w_pct)
             w_bar = self._make_progress_bar(w_pct)
             w_reset = self._format_reset_time(k.weekly_resets_at)
-            lines.append(f"  {w_emoji} Нед: {w_bar} → {w_reset}")
+            w_elapsed = k._weekly_elapsed_pct()
+            w_elapsed_str = f" ({w_elapsed:.0f}% elapsed)" if w_elapsed >= 0 else ""
+            lines.append(f"  {w_emoji} Weekly: {w_bar}{w_elapsed_str} → {w_reset}")
+
+            # Billing (progress bar shows remaining %)
+            billing = k.period_remaining_pct
+            b_bar = self._make_progress_bar(billing)
+            lines.append(f"  💰 Billing: {b_bar} left")
+
+            # Requests & 429s
+            lines.append(f"  Requests: {k.total_requests}")
+            lines.append(f"  429s: {k.total_429s}")
+
+            # Top models (from session_models, sorted by requests)
+            s_models = k.session_models or {}
+            top = sorted(s_models.items(), key=lambda x: x[1].get("requests", 0), reverse=True)[:3]
+            if top:
+                lines.append("  Top models:")
+                for mid, md in top:
+                    lines.append(f"    {mid}: {md.get('requests', 0)} req")
+
+        # Summary: total slots
+        total_in_flight = sum(k.in_flight for k in keys)
+        total_max = sum(k.max_concurrent for k in keys)
+        lines.append(f"\n📊 Total slots: {total_in_flight}/{total_max}")
 
         return "\n".join(lines)
 
