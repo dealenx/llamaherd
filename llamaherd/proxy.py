@@ -2236,11 +2236,19 @@ async def lifespan(app: FastAPI):
     global admin_token, NATIVE_BRIDGE_MODELS, reject_unknown_models
 
     cfg = load_config()
+    # Allow env var overrides (also applied in main(), but lifespan reloads
+    # config independently — re-apply here so .env / Dokploy env vars win)
+    if os.environ.get("LLAMAHERD_ADMIN_TOKEN"):
+        cfg["admin_token"] = os.environ["LLAMAHERD_ADMIN_TOKEN"]
+    if os.environ.get("LLAMAHERD_HOST"):
+        cfg["host"] = os.environ["LLAMAHERD_HOST"]
+    if os.environ.get("LLAMAHERD_PORT"):
+        cfg["port"] = int(os.environ["LLAMAHERD_PORT"])
     admin_token = cfg.get("admin_token", "")
     if not admin_token:
         log.warning("admin_token not set in config — admin endpoints will be inaccessible")
     else:
-        log.info("Admin authentication enabled")
+        log.info(f"Admin authentication enabled (token: {admin_token[:8]}...)")
     manager = KeyManager(cfg["keys"])
     db_auth_token = cfg.get("db_auth_token") or os.environ.get("LLAMAHERD_DB_AUTH_TOKEN")
     db_auth_user = cfg.get("db_auth_user") or os.environ.get("LLAMAHERD_DB_AUTH_USER")
