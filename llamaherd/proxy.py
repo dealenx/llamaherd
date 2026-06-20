@@ -907,6 +907,138 @@ class KeyRegistry:
                              "cf_clearance": r[6] or "", "stripe_mid": r[7] or ""}}
 
 
+# ---------------------------------------------------------------------------
+# Telegram Notifier — sends usage alerts to Telegram chat/group/topic
+# ---------------------------------------------------------------------------
+
+class TelegramNotifier:
+    """Sends Ollama Cloud usage notifications to Telegram.
+
+    Configured via environment variables (no DB, no UI):
+      LLAMAHERD_TELEGRAM_BOT_TOKEN  — Bot token from @BotFather
+      LLAMAHERD_TELEGRAM_CHAT_ID    — Chat/group ID (negative for groups)
+      LLAMAHERD_TELEGRAM_TOPIC_ID   — Topic ID for groups with topics (optional)
+      LLAMAHERD_TELEGRAM_INTERVAL   — Seconds between notifications (default: 1800 = 30min)
+
+    If BOT_TOKEN or CHAT_ID is not set, the notifier is disabled.
+    """
+
+    def __init__(self):
+        self.bot_token = os.environ.get("LLAMAHERD_TELEGRAM_BOT_TOKEN", "") or os.environ.get("LLAMAHERD_TELEGRAM_TOKEN", "")
+        self.chat_id = os.environ.get("LLAMAHERD_TELEGRAM_CHAT_ID", "")
+        self.topic_id = os.environ.get("LLAMAHERD_TELEGRAM_TOPIC_ID", "")
+        self.interval = int(os.environ.get("LLAMAHERD_TELEGRAM_INTERVAL", "1800"))
+        self.enabled = bool(self.bot_token and self.chat_id)
+        self._client = httpx.AsyncClient(timeout=30.0) if self.enabled else None
+
+    def _make_progress_bar(self, pct: float, width: int = 16) -> str:
+        """Create a text progress bar: ████░░░░░░░░░░░░ 25%"""
+        if pct < 0:
+            return "░" * width + " ?"
+        pct = max(0, min(100, pct))
+        filled = int(pct / 100 * width)
+        return "█" * filled + "░" * (width - filled) + f" {pct:.1f}%"
+
+    def _status_emoji(self, pct: float) -> str:
+        """🟢 < 50%, 🟡 50-80%, 🔴 > 80%"""
+        if pct < 0:
+            return "⚪"
+        if pct >= 80:
+            return "🔴"
+        if pct >= 50:
+            return "🟡"
+        return "🟢"
+
+    def _format_reset_time(self, resets_at: Optional[str]) -> str:
+        """Format reset time as 'in X hours/days'."""
+        if not resets_at:
+            return "unknown"
+        try:
+            end = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            remaining = end - now
+            if remaining.total_seconds() <= 0:
+                return "now"
+            hours = remaining.total_seconds() / 3600
+            if hours < 1:
+                return f"in {int(remaining.total_seconds() / 60)} min"
+            if hours < 24:
+                return f"in {int(hours)} hours"
+            return f"in {int(hours / 24)} days"
+        except (ValueError, TypeError):
+            return "unknown"
+
+    def format_message(self, keys: list) -> str:
+        """Format the notification message matching the requested layout."""
+        now_str = datetime.now(timezone.utc).strftime("%d.%m.%Y, %H:%M:%S")
+
+        # Count statuses
+        red = sum(1 for k in keys if k.weekly_usage_pct >= 80)
+        yellow = sum(1 for k in keys if 50 <= k.weekly_usage_pct < 80)
+        green = sum(1 for k in keys if 0 <= k.weekly_usage_pct < 50)
+
+        lines = ["☁️ Ollama Cloud Monitor", now_str, ""]
+        lines.append(f"🔴{red} 🟡{yellow} 🟢{green}")
+
+        for k in keys:
+            # Key header: label (plan) email
+            plan = k.plan or "?"
+            label = k.label or "Unknown"
+            email = k.account_email or ""
+            lines.append(f"• {label} ({plan}) {email}")
+
+            # Session usage
+            s_pct = k.session_usage_pct
+            s_emoji = self._status_emoji(s_pct)
+            s_bar = self._make_progress_bar(s_pct)
+            s_reset = self._format_reset_time(k.session_resets_at)
+            lines.append(f"  {s_emoji} Час: {s_bar} → {s_reset}")
+
+            # Weekly usage
+            w_pct = k.weekly_usage_pct
+            w_emoji = self._status_emoji(w_pct)
+            w_bar = self._make_progress_bar(w_pct)
+            w_reset = self._format_reset_time(k.weekly_resets_at)
+            lines.append(f"  {w_emoji} Нед: {w_bar} → {w_reset}")
+
+        return "\n".join(lines)
+
+    async def send(self, text: str) -> bool:
+        """Send a message to Telegram. Returns True on success."""
+        if not self.enabled or not self._client:
+            return False
+        try:
+            payload: dict = {
+                "chat_id": self.chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+            }
+            if self.topic_id:
+                payload["message_thread_id"] = int(self.topic_id)
+            r = await self._client.post(
+                f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+                json=payload,
+            )
+            if r.status_code != 200:
+                log.warning(f"Telegram send failed: {r.status_code} {r.text[:200]}")
+                return False
+            return True
+        except Exception as e:
+            log.warning(f"Telegram send error: {e}")
+            return False
+
+    async def send_usage_notification(self, manager) -> bool:
+        """Format and send a usage notification for all keys."""
+        if not self.enabled or not manager:
+            return False
+        text = self.format_message(manager.keys)
+        return await self.send(text)
+
+    async def close(self):
+        if self._client:
+            await self._client.aclose()
+
+
 class KeyManager:
     def __init__(self, keys_config: list[dict]):
         self.keys: list[KeyState] = []
@@ -2225,6 +2357,7 @@ registry: Optional[ModelRegistry] = None
 usage_db: Optional[UsageDB] = None
 client_registry: Optional[ClientRegistry] = None
 usage_scraper: Optional[UsageScraper] = None
+telegram_notifier: Optional[TelegramNotifier] = None
 fallback_provider: Optional[FallbackProvider] = None
 upstream_url: str = ""
 retry_on_429: bool = True
@@ -2417,7 +2550,7 @@ def _verify_admin(request: Request) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, key_registry, registry, usage_db, client_registry, usage_scraper, fallback_provider, sticky
+    global manager, key_registry, registry, usage_db, client_registry, usage_scraper, telegram_notifier, fallback_provider, sticky
     global upstream_url, retry_on_429, max_retries, queue_timeout, request_timeout
     global admin_token, NATIVE_BRIDGE_MODELS, reject_unknown_models
 
@@ -2490,6 +2623,15 @@ async def lifespan(app: FastAPI):
     # Start periodic usage scraping (every 30 min)
     usage_scrape_interval = cfg.get("usage_scrape_interval", 1800)
     usage_task = asyncio.create_task(_scrape_usage_loop(usage_scraper, manager, usage_scrape_interval))
+    # Telegram notifier (env-based, no UI)
+    telegram_notifier = TelegramNotifier()
+    if telegram_notifier.enabled:
+        log.info(f"Telegram notifications enabled (interval={telegram_notifier.interval}s, chat={telegram_notifier.chat_id})")
+        telegram_task = asyncio.create_task(
+            _telegram_notify_loop(telegram_notifier, manager, telegram_notifier.interval)
+        )
+    else:
+        log.info("Telegram notifications not configured (set LLAMAHERD_TELEGRAM_TOKEN + LLAMAHERD_TELEGRAM_CHAT_ID to enable)")
     # Fallback provider (NVIDIA Build, etc.)
     fallback_provider = FallbackProvider(cfg.get("fallback") or {})
     fb_metadata_task: Optional[asyncio.Task] = None
@@ -2589,6 +2731,20 @@ async def _scrape_usage_loop(scraper: UsageScraper, mgr: KeyManager, interval: i
                 })
         except Exception as e:
             log.error(f"Usage scrape loop error: {e}")
+
+
+async def _telegram_notify_loop(notifier: TelegramNotifier, mgr: KeyManager, interval: int):
+    """Periodically send usage notifications to Telegram."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            ok = await notifier.send_usage_notification(mgr)
+            if ok:
+                log.info("Telegram notification sent")
+            else:
+                log.warning("Telegram notification failed")
+        except Exception as e:
+            log.error(f"Telegram notify loop error: {e}")
 
 
 async def _sweep_stale_inflight(interval: int = 300, max_age_seconds: int = 600):
@@ -4643,6 +4799,21 @@ async def admin_scrape_usage():
         result = await loop.run_in_executor(None, usage_scraper.scrape_all, manager.keys)
         return {"keys": manager.status(), "scrape_results": result}
     return {"error": "usage_scraper or manager not initialized"}
+
+
+@app.post("/admin/telegram-test", dependencies=[Depends(_verify_admin)])
+async def admin_telegram_test():
+    """Send a test Telegram notification with current key usage data."""
+    if not telegram_notifier:
+        return {"error": "Telegram notifier not initialized"}
+    if not telegram_notifier.enabled:
+        return {"error": "Telegram not configured. Set LLAMAHERD_TELEGRAM_TOKEN and LLAMAHERD_TELEGRAM_CHAT_ID env vars."}
+    if not manager:
+        return {"error": "Manager not initialized"}
+    ok = await telegram_notifier.send_usage_notification(manager)
+    return {"sent": ok, "chat_id": telegram_notifier.chat_id,
+            "topic_id": telegram_notifier.topic_id or None,
+            "interval": telegram_notifier.interval}
 
 
 @app.post("/admin/test-model", dependencies=[Depends(_verify_admin)])

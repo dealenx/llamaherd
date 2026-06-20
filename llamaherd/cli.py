@@ -377,6 +377,55 @@ def cmd_banner(args):
     print(f"\n{__tagline__}")
 
 
+def cmd_telegram_test(args):
+    """Send a test Telegram notification using env vars or query running proxy."""
+    import asyncio
+    import os
+
+    # If env vars are set, send directly without needing a running proxy
+    bot_token = os.environ.get("LLAMAHERD_TELEGRAM_BOT_TOKEN") or os.environ.get("LLAMAHERD_TELEGRAM_TOKEN")
+    chat_id = os.environ.get("LLAMAHERD_TELEGRAM_CHAT_ID")
+
+    if bot_token and chat_id:
+        # Direct mode — send a test message
+        import httpx
+
+        async def _send():
+            payload = {
+                "chat_id": chat_id,
+                "text": "☁️ Ollama Cloud Monitor\n\n✅ Test notification from LlamaHerd CLI\n\nIf you see this, Telegram notifications are configured correctly!",
+                "parse_mode": "HTML",
+            }
+            topic_id = os.environ.get("LLAMAHERD_TELEGRAM_TOPIC_ID")
+            if topic_id:
+                payload["message_thread_id"] = int(topic_id)
+            async with httpx.AsyncClient(timeout=30.0) as cx:
+                r = await cx.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json=payload)
+            if r.status_code == 200:
+                print(json.dumps({"status": "ok", "chat_id": chat_id, "topic_id": topic_id or None}))
+            else:
+                print(json.dumps({"status": "error", "code": r.status_code, "detail": r.text[:300]}))
+                sys.exit(1)
+
+        asyncio.run(_send())
+        return
+
+    # Fallback — query running proxy's admin API
+    base = _base_url(args)
+    headers = _headers(args)
+    try:
+        r = httpx.post(f"{base}/admin/telegram-test", headers=headers, timeout=30.0)
+        if r.status_code == 200:
+            print(json.dumps(r.json(), indent=2))
+        else:
+            print(json.dumps({"error": r.text[:300], "status": r.status_code}))
+            sys.exit(1)
+    except Exception as e:
+        print(json.dumps({"error": str(e),
+                          "hint": "Set LLAMAHERD_TELEGRAM_TOKEN and LLAMAHERD_TELEGRAM_CHAT_ID env vars, or start the proxy first"}))
+        sys.exit(1)
+
+
 # ---- Build the parser ----
 
 def build_parser():
@@ -473,6 +522,10 @@ def build_parser():
     # --- banner ---
     banner = sub.add_parser("banner", help="Print the LlamaHerd ASCII banner")
     banner.set_defaults(func=cmd_banner)
+
+    # --- telegram-test ---
+    tg = sub.add_parser("telegram-test", help="Send a test Telegram notification")
+    tg.set_defaults(func=cmd_telegram_test)
 
     # --- serve (run the proxy) ---
     serve = sub.add_parser("serve", help="Start the proxy server")
