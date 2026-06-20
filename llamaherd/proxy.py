@@ -4839,10 +4839,11 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 100; display: flex; align-items: center; justify-content: center; }
-.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 24px; min-width: 400px; max-width: 600px; max-height: 80vh; overflow-y: auto; }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 24px; min-width: 400px; max-width: 600px; max-height: 80vh; overflow-y: auto; pointer-events: auto; }
 .modal h3 { margin-bottom: 16px; }
 .modal label { display: block; font-size: 12px; color: var(--dim); margin: 8px 0 2px; }
-.modal input, .modal select, .modal textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font-size: 13px; font-family: monospace; }
+.modal input, .modal select, .modal textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font-size: 13px; font-family: monospace; position: relative; z-index: 1; }
+.modal input:focus, .modal select:focus, .modal textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .modal textarea { min-height: 60px; }
 .modal .modal-actions { margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end; }
 .models-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; }
@@ -5166,7 +5167,13 @@ function pctBarWithElapsed(pct, elapsedPct, defaultColor) {
 function pctBar(pct, color) { if (pct == null) return ''; return `<div class="pct-bar-wrap"><div class="pct-bar" style="width:${Math.min(pct,100)}%;background:${color}"></div></div>`; }
 
 async function loadJSON(url) { const sep = url.includes('?')?'&':'?'; const r = await fetch(API+url+sep+'token='+encodeURIComponent(ADMIN_TOKEN)); return r.json(); }
-async function postJSON(url, body, method) { return fetch(API+url+'?token='+encodeURIComponent(ADMIN_TOKEN), { method: method||'POST', headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):undefined }).then(r=>r.json()); }
+async function postJSON(url, body, method) {
+  const sep = url.includes('?') ? '&' : '?';
+  const r = await fetch(API+url+sep+'token='+encodeURIComponent(ADMIN_TOKEN), { method: method||'POST', headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):undefined });
+  const text = await r.text();
+  if (!text) return {};
+  try { return JSON.parse(text); } catch (e) { throw new Error('Server returned non-JSON response (status '+r.status+'): '+text.slice(0,200)); }
+}
 
 // --- Date Range ---
 function getDateRange() {
@@ -5729,7 +5736,7 @@ async function loadSubsPanel() {
       <div class="km-header">
         <span class="km-label ${statusCls}">${k.label}</span>
         <div style="display:flex;gap:4px">
-          <button class="btn btn-sm" onclick="editKey(${i})">Edit</button>
+          <button class="btn btn-sm" onclick="editKey(${i},'${escHtml(k.label).replace(/'/g,"\\'")}',${k.max_concurrent},${k.cycle_day})">Edit</button>
           <button class="btn btn-sm" onclick="editCookies(${i})">🍪 Cookies</button>
           <button class="btn btn-sm btn-danger" onclick="deleteKey(${i},'${k.label}')">Remove</button>
         </div>
@@ -5746,20 +5753,29 @@ async function loadSubsPanel() {
 }
 
 // --- Modals ---
-function showModal(html) { document.getElementById('modal-root').innerHTML = `<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`; }
+function showModal(html) { document.getElementById('modal-root').innerHTML = `<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal" onclick="event.stopPropagation()">${html}</div></div>`; }
 function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
 
-function editKey(idx) {
+function editKey(idx, label, mc, cd) {
+  label = label || '';
+  mc = mc || 15;
+  cd = cd || 1;
   showModal(`<h3>Edit Subscription</h3>
-    <label>Label</label><input id="m-label" placeholder="Subscription label">
-    <label>Max Concurrent</label><input id="m-concurrent" type="number" value="15" min="1" max="50">
-    <label>Cycle Day (billing reset, 1-28)</label><input id="m-cycle" type="number" value="1" min="1" max="28">
+    <label>Label</label><input id="m-label" placeholder="Subscription label" value="${escHtml(label)}">
+    <label>Max Concurrent</label><input id="m-concurrent" type="number" value="${mc}" min="1" max="50">
+    <label>Cycle Day (billing reset, 1-28)</label><input id="m-cycle" type="number" value="${cd}" min="1" max="28">
     <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="saveKey(${idx})">Save</button></div>`);
+  // Focus the first input so the user can type immediately
+  setTimeout(() => { const inp = document.getElementById('m-label'); if (inp) inp.focus(); }, 50);
 }
 async function saveKey(idx) {
   const label=document.getElementById('m-label').value, mc=parseInt(document.getElementById('m-concurrent').value), cd=parseInt(document.getElementById('m-cycle').value);
-  await postJSON(`/admin/keys/${idx}?label=${encodeURIComponent(label)}&max_concurrent=${mc}&cycle_day=${cd}`, null, 'PUT');
-  closeModal(); loadSubsPanel();
+  try {
+    await postJSON(`/admin/keys/${idx}?label=${encodeURIComponent(label)}&max_concurrent=${mc}&cycle_day=${cd}`, null, 'PUT');
+    closeModal(); loadSubsPanel();
+  } catch (e) {
+    alert('Failed to save: ' + e.message);
+  }
 }
 
 function editCookies(idx) {
