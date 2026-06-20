@@ -53,9 +53,27 @@ for _env_candidate in (
         load_dotenv(_env_candidate, override=False)
         break
 
-CONFIG_PATH = Path(os.environ.get("LLAMAHERD_CONFIG", str(Path(__file__).parent / "config.yaml")))
+# Config path resolution order:
+#   1. LLAMAHERD_CONFIG env var (explicit — recommended for Docker/K8s/Dokploy)
+#   2. CWD/config.yaml (running from project root)
+#   3. Package dir/config.yaml (installed alongside the module — dev mode)
+#   4. /app/config.yaml (standard Docker WORKDIR)
+_cfg_env = os.environ.get("LLAMAHERD_CONFIG")
+CONFIG_PATH = Path(
+    _cfg_env
+    or (Path.cwd() / "config.yaml")
+    if (Path.cwd() / "config.yaml").is_file()
+    else (_cfg_env or str(Path(__file__).parent / "config.yaml"))
+)
+if not CONFIG_PATH.is_file() and Path("/app/config.yaml").is_file():
+    CONFIG_PATH = Path("/app/config.yaml")
 
 def load_config() -> dict:
+    if not CONFIG_PATH.is_file():
+        raise FileNotFoundError(
+            f"Config file not found at {CONFIG_PATH}. Set LLAMAHERD_CONFIG env var "
+            "to the path of your config.yaml, or place config.yaml in the working directory."
+        )
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f)
 
