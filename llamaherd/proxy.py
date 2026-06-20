@@ -4487,6 +4487,13 @@ async def admin_test_model(request: Request):
     if not client_registry:
         raise HTTPException(status_code=503, detail="client_registry not ready")
 
+    # Check if model exists in registry
+    if registry and registry.models:
+        model_exists = any(m == model or m.startswith(model + ":") for m in registry.models.keys())
+        if not model_exists:
+            return {"status": 404, "elapsed_ms": 0, "model": model, "prompt": prompt,
+                    "error": f"Model '{model}' not found in registry. It may not be available on any configured key."}
+
     # Pick the first client token for internal attribution
     clients_list = client_registry.clients
     if not clients_list:
@@ -4495,7 +4502,7 @@ async def admin_test_model(request: Request):
 
     start = time.time()
     try:
-        async with httpx.AsyncClient(timeout=60.0) as cx:
+        async with httpx.AsyncClient(timeout=120.0) as cx:
             r = await cx.post(
                 f"http://{request.headers.get('host', '127.0.0.1:8399')}/v1/chat/completions",
                 headers={"Authorization": f"Bearer {client_token}", "Content-Type": "application/json"},
@@ -4513,7 +4520,11 @@ async def admin_test_model(request: Request):
     except httpx.TimeoutException:
         elapsed_ms = int((time.time() - start) * 1000)
         return {"status": 504, "elapsed_ms": elapsed_ms, "model": model, "prompt": prompt,
-                "error": "Request timed out (60s)"}
+                "error": "Request timed out (120s). The model may be unavailable, overloaded, or loading."}
+    except httpx.ConnectError as e:
+        elapsed_ms = int((time.time() - start) * 1000)
+        return {"status": 502, "elapsed_ms": elapsed_ms, "model": model, "prompt": prompt,
+                "error": f"Connection error: {e}"}
     except Exception as e:
         elapsed_ms = int((time.time() - start) * 1000)
         return {"status": 500, "elapsed_ms": elapsed_ms, "model": model, "prompt": prompt,
@@ -4848,12 +4859,19 @@ tr:hover td { background: rgba(88,166,255,0.04); }
             font-size: 11px; cursor: pointer; transition: opacity .2s; }
 .btn-test:hover { opacity: 0.85; }
 .btn-test:disabled { opacity: 0.5; cursor: wait; }
+.btn-test .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #fff;
+                     border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite;
+                     vertical-align: middle; margin-right: 4px; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .test-result { margin-top: 8px; font-size: 11px; padding: 8px; border-radius: 4px; background: var(--bg);
                border: 1px solid var(--border); max-height: 200px; overflow-y: auto; word-break: break-word; }
 .test-result.ok { border-color: var(--green); }
 .test-result.err { border-color: var(--red); }
+.test-result.loading { border-color: var(--accent); }
 .test-result .tr-meta { color: var(--dim); margin-bottom: 4px; }
 .test-result .tr-content { font-family: monospace; white-space: pre-wrap; }
+.test-result .tr-loading { display: flex; align-items: center; gap: 8px; color: var(--dim); }
+.test-result .tr-loading .spinner { border-color: var(--accent); border-top-color: transparent; }
 .search-input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; font-size: 13px; width: 200px; }
 .key-mgmt { margin-top: 12px; }
 .key-mgmt-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 10px; }
@@ -5446,33 +5464,58 @@ async function testModel(modelId, btn) {
   if (!resultDiv) return;
   btn.disabled = true;
   const originalText = btn.textContent;
-  btn.textContent = 'Testing...';
+  // Show loading state immediately
   resultDiv.style.display = 'block';
-  resultDiv.className = 'test-result';
-  resultDiv.innerHTML = '<span class="tr-meta">Sending test prompt "2+2"...</span>';
+  resultDiv.className = 'test-result loading';
+  resultDiv.innerHTML = '<div class="tr-loading"><span class="spinner"></span>Sending test prompt "2+2" to ' + escHtml(modelId) + '...</div>';
+  btn.innerHTML = '<span class="spinner"></span>Testing...';
+  // Track elapsed time for UX
+  const startTime = Date.now();
+  const timerInterval = setInterval(() => {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const ld = resultDiv.querySelector('.tr-loading');
+    if (ld) ld.innerHTML = '<span class="spinner"></span>Sending test prompt "2+2" to ' + escHtml(modelId) + '... (' + elapsed + 's)';
+  }, 200);
   try {
     const r = await postJSON('/admin/test-model', { model: modelId, prompt: '2+2' });
+    clearInterval(timerInterval);
     const cls = r.status === 200 ? 'ok' : 'err';
     resultDiv.className = 'test-result ' + cls;
     let content = '';
+    let metaParts = ['Status ' + r.status, r.elapsed_ms + 'ms', escHtml(modelId)];
     if (r.error) {
-      content = `Error: ${r.error}`;
+      content = r.error;
+      if (r.status === 504) {
+        content = 'Request timed out after 60 seconds. The model may be unavailable or overloaded.';
+      } else if (r.status === 500 && r.error.includes('Connection')) {
+        content = 'Could not connect to upstream. Check that Ollama API keys are configured.';
+      }
     } else if (r.response && r.response.choices && r.response.choices[0]) {
       content = r.response.choices[0].message.content || '(empty response)';
       const usage = r.response.usage;
       if (usage) {
-        content += `\n\ntokens: ${usage.total_tokens} (in:${usage.prompt_tokens} out:${usage.completion_tokens})`;
+        content += '\n\ntokens: ' + usage.total_tokens + ' (in:' + usage.prompt_tokens + ' out:' + usage.completion_tokens + ')';
       }
     } else if (r.response && r.response.error) {
-      content = `Upstream error: ${r.response.error}`;
+      content = 'Upstream error: ' + (typeof r.response.error === 'string' ? r.response.error : JSON.stringify(r.response.error));
+    } else if (r.status === 500) {
+      content = 'Internal server error. The model may not be available on any configured key. Check that upstream Ollama Cloud keys are valid.';
     } else {
       content = JSON.stringify(r.response, null, 2).slice(0, 500);
     }
-    resultDiv.innerHTML = `<div class="tr-meta">Status ${r.status} · ${r.elapsed_ms}ms · ${escHtml(modelId)}</div><div class="tr-content">${escHtml(content)}</div>`;
+    resultDiv.innerHTML = '<div class="tr-meta">' + metaParts.join(' · ') + '</div><div class="tr-content">' + escHtml(content) + '</div>';
   } catch (e) {
+    clearInterval(timerInterval);
     resultDiv.className = 'test-result err';
-    resultDiv.innerHTML = `<div class="tr-meta">Request failed</div><div class="tr-content">${escHtml(e.message)}</div>`;
+    let errMsg = e.message;
+    if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
+      errMsg = 'Network error — the proxy may be down or unreachable.';
+    } else if (e.message.includes('JSON')) {
+      errMsg = 'Server returned an invalid response. The proxy may have crashed or the model is not available.';
+    }
+    resultDiv.innerHTML = '<div class="tr-meta">Request failed</div><div class="tr-content">' + escHtml(errMsg) + '</div>';
   } finally {
+    clearInterval(timerInterval);
     btn.disabled = false;
     btn.textContent = originalText;
   }
