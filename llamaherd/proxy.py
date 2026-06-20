@@ -740,6 +740,132 @@ class StickySessionManager:
         return active
 
 
+# ---------------------------------------------------------------------------
+# Upstream Key Registry — persists Ollama Cloud keys + cookies to DB
+# ---------------------------------------------------------------------------
+
+class KeyRegistry:
+    """Stores upstream Ollama Cloud keys and their cookies in the database.
+
+    On first run (empty table), seeds from config.yaml's `keys` list.
+    After that, keys added/removed/edited via the admin API persist to DB
+    and survive restarts — no need to edit config.yaml manually.
+
+    Cookies (for usage scraping) are stored alongside each key so they
+    survive restarts too.
+    """
+
+    def __init__(self, db_path: str, seed_keys: list[dict] = None,
+                 auth_token: Optional[str] = None, auth_user: Optional[str] = None):
+        self._db_path = db_path
+        self._conn = db_connect(db_path, auth_token=auth_token, auth_user=auth_user)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS upstream_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token TEXT NOT NULL UNIQUE,
+                label TEXT NOT NULL,
+                max_concurrent INTEGER DEFAULT 15,
+                cycle_day INTEGER DEFAULT 1,
+                secure_session TEXT DEFAULT '',
+                aid TEXT DEFAULT '',
+                cf_clearance TEXT DEFAULT '',
+                stripe_mid TEXT DEFAULT '',
+                created REAL NOT NULL
+            )
+        """)
+        self._conn.commit()
+
+        # Seed from config only if table is empty
+        if seed_keys and self._count() == 0:
+            for kc in seed_keys:
+                cookies = kc.get("cookies", {})
+                self._insert(
+                    token=kc["token"],
+                    label=kc.get("label", f"Sub {self._count() + 1}"),
+                    max_concurrent=kc.get("max_concurrent", 15),
+                    cycle_day=kc.get("cycle_day", 1),
+                    secure_session=cookies.get("secure_session", ""),
+                    aid=cookies.get("aid", ""),
+                    cf_clearance=cookies.get("cf_clearance", ""),
+                    stripe_mid=cookies.get("stripe_mid", ""),
+                )
+            log.info(f"Seeded {len(seed_keys)} upstream keys from config to DB")
+
+    def _count(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM upstream_keys").fetchone()[0]
+
+    def _insert(self, token: str, label: str, max_concurrent: int = 15,
+                cycle_day: int = 1, secure_session: str = "", aid: str = "",
+                cf_clearance: str = "", stripe_mid: str = "") -> dict:
+        now = time.time()
+        self._conn.execute(
+            "INSERT OR REPLACE INTO upstream_keys (token, label, max_concurrent, cycle_day, secure_session, aid, cf_clearance, stripe_mid, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (token, label, max_concurrent, cycle_day, secure_session, aid, cf_clearance, stripe_mid, now),
+        )
+        self._conn.commit()
+        return {"token": token, "label": label, "max_concurrent": max_concurrent,
+                "cycle_day": cycle_day, "cookies": {"secure_session": secure_session, "aid": aid,
+                "cf_clearance": cf_clearance, "stripe_mid": stripe_mid}}
+
+    def all(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT token, label, max_concurrent, cycle_day, secure_session, aid, cf_clearance, stripe_mid FROM upstream_keys ORDER BY id"
+        ).fetchall()
+        return [{"token": r[0], "label": r[1], "max_concurrent": r[2], "cycle_day": r[3],
+                 "cookies": {"secure_session": r[4] or "", "aid": r[5] or "",
+                             "cf_clearance": r[6] or "", "stripe_mid": r[7] or ""}}
+                for r in rows]
+
+    def add(self, token: str, label: str, max_concurrent: int = 15, cycle_day: int = 1,
+            cookies: dict = None) -> dict:
+        cookies = cookies or {}
+        return self._insert(token, label, max_concurrent, cycle_day,
+                            secure_session=cookies.get("secure_session", ""),
+                            aid=cookies.get("aid", ""),
+                            cf_clearance=cookies.get("cf_clearance", ""),
+                            stripe_mid=cookies.get("stripe_mid", ""))
+
+    def update(self, token: str, label: str = None, max_concurrent: int = None,
+               cycle_day: int = None) -> Optional[dict]:
+        sets, params = [], []
+        if label is not None: sets.append("label = ?"); params.append(label)
+        if max_concurrent is not None: sets.append("max_concurrent = ?"); params.append(max_concurrent)
+        if cycle_day is not None: sets.append("cycle_day = ?"); params.append(cycle_day)
+        if not sets: return None
+        params.append(token)
+        self._conn.execute(f"UPDATE upstream_keys SET {', '.join(sets)} WHERE token = ?", params)
+        self._conn.commit()
+        return self.get_by_token(token)
+
+    def update_cookies(self, token: str, cookies: dict) -> Optional[dict]:
+        sets, params = [], []
+        field_map = {"secure_session": "secure_session", "aid": "aid",
+                     "cf_clearance": "cf_clearance", "stripe_mid": "stripe_mid"}
+        for k, v in cookies.items():
+            if k in field_map:
+                sets.append(f"{field_map[k]} = ?"); params.append(v)
+        if not sets: return None
+        params.append(token)
+        self._conn.execute(f"UPDATE upstream_keys SET {', '.join(sets)} WHERE token = ?", params)
+        self._conn.commit()
+        return self.get_by_token(token)
+
+    def remove(self, token: str) -> bool:
+        cur = self._conn.execute("DELETE FROM upstream_keys WHERE token = ?", [token])
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def get_by_token(self, token: str) -> Optional[dict]:
+        r = self._conn.execute(
+            "SELECT token, label, max_concurrent, cycle_day, secure_session, aid, cf_clearance, stripe_mid FROM upstream_keys WHERE token = ?",
+            [token]
+        ).fetchone()
+        if not r: return None
+        return {"token": r[0], "label": r[1], "max_concurrent": r[2], "cycle_day": r[3],
+                "cookies": {"secure_session": r[4] or "", "aid": r[5] or "",
+                             "cf_clearance": r[6] or "", "stripe_mid": r[7] or ""}}
+
+
 class KeyManager:
     def __init__(self, keys_config: list[dict]):
         self.keys: list[KeyState] = []
@@ -2053,6 +2179,7 @@ async def _check_rate_limit(request: Request, client: dict) -> Optional[JSONResp
 # ---------------------------------------------------------------------------
 
 manager: Optional[KeyManager] = None
+key_registry: Optional[KeyRegistry] = None
 registry: Optional[ModelRegistry] = None
 usage_db: Optional[UsageDB] = None
 client_registry: Optional[ClientRegistry] = None
@@ -2249,7 +2376,7 @@ def _verify_admin(request: Request) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, registry, usage_db, client_registry, usage_scraper, fallback_provider, sticky
+    global manager, key_registry, registry, usage_db, client_registry, usage_scraper, fallback_provider, sticky
     global upstream_url, retry_on_429, max_retries, queue_timeout, request_timeout
     global admin_token, NATIVE_BRIDGE_MODELS, reject_unknown_models
 
@@ -2267,9 +2394,17 @@ async def lifespan(app: FastAPI):
         log.warning("admin_token not set in config — admin endpoints will be inaccessible")
     else:
         log.info(f"Admin authentication enabled (token: {admin_token[:8]}...)")
-    manager = KeyManager(cfg["keys"])
+    manager = KeyManager(cfg.get("keys", []))
     db_auth_token = cfg.get("db_auth_token") or os.environ.get("LLAMAHERD_DB_AUTH_TOKEN")
     db_auth_user = cfg.get("db_auth_user") or os.environ.get("LLAMAHERD_DB_AUTH_USER")
+    # KeyRegistry: persist upstream keys + cookies to DB (survives restarts)
+    key_registry = KeyRegistry(str(DB_PATH), seed_keys=cfg.get("keys"),
+                               auth_token=db_auth_token, auth_user=db_auth_user)
+    # Replace in-memory keys with DB-persisted keys
+    db_keys = key_registry.all()
+    if db_keys:
+        manager = KeyManager(db_keys)
+        log.info(f"Loaded {len(db_keys)} upstream keys from DB")
     client_registry = ClientRegistry(str(DB_PATH), seed_clients=cfg.get("clients"),
                                      auth_token=db_auth_token, auth_user=db_auth_user)
     sticky = StickySessionManager(ttl_seconds=cfg.get("sticky_ttl_seconds", 3600))
@@ -2302,7 +2437,7 @@ async def lifespan(app: FastAPI):
     sub_poll_interval = cfg.get("sub_poll_interval", 21600)
     sub_task = asyncio.create_task(_poll_subscriptions_loop(manager, sub_poll_interval))
     # Usage scraper (cookie-based ollama.com/settings)
-    usage_scraper = UsageScraper(cfg["keys"])
+    usage_scraper = UsageScraper(db_keys if db_keys else cfg["keys"])
     # Scrape usage on startup (in thread pool to not block)
     loop = asyncio.get_event_loop()
     try:
@@ -4563,7 +4698,7 @@ async def admin_list_keys():
 @app.put("/admin/keys/{key_index}", dependencies=[Depends(_verify_admin)])
 async def admin_update_key(key_index: int, label: str = None, max_concurrent: int = None,
                            cycle_day: int = None):
-    """Update a key's mutable fields (label, max_concurrent, cycle_day). Requires restart to persist."""
+    """Update a key's mutable fields (label, max_concurrent, cycle_day). Persists to DB."""
     if not manager or key_index >= len(manager.keys):
         raise HTTPException(status_code=404, detail="key not found")
     k = manager.keys[key_index]
@@ -4573,29 +4708,34 @@ async def admin_update_key(key_index: int, label: str = None, max_concurrent: in
         k.max_concurrent = max_concurrent
     if cycle_day is not None:
         k.cycle_day = cycle_day
+    # Persist to DB
+    if key_registry:
+        key_registry.update(k.token, label=label, max_concurrent=max_concurrent, cycle_day=cycle_day)
     return {"updated": key_index, "label": k.label, "max_concurrent": k.max_concurrent, "cycle_day": k.cycle_day}
 
 
 @app.put("/admin/keys/{key_index}/cookies", dependencies=[Depends(_verify_admin)])
 async def admin_update_key_cookies(key_index: int, request: Request):
-    """Update cookies for a specific key. Cookies are used for usage scraping from ollama.com/settings."""
+    """Update cookies for a specific key. Persists to DB and updates scraper."""
     if not manager or key_index >= len(manager.keys):
         raise HTTPException(status_code=404, detail="key not found")
     body = await request.json()
     k = manager.keys[key_index]
-    # Update cookies in usage_scraper (keyed by label)
     cookies = {}
     for field in ["secure_session", "aid", "cf_clearance", "stripe_mid"]:
         if field in body:
             cookies[field] = body[field]
     if usage_scraper and hasattr(usage_scraper, 'cookie_map') and cookies:
         usage_scraper.cookie_map[k.label] = cookies
+    # Persist to DB
+    if key_registry and cookies:
+        key_registry.update_cookies(k.token, cookies)
     return {"updated": key_index, "label": k.label, "cookies_set": list(cookies.keys())}
 
 
 @app.post("/admin/keys", dependencies=[Depends(_verify_admin)])
 async def admin_add_key(request: Request):
-    """Add a new upstream key. Requires config.yaml update and restart to persist."""
+    """Add a new upstream key. Persists to DB."""
     if not manager:
         raise HTTPException(status_code=500, detail="manager not initialized")
     body = await request.json()
@@ -4607,21 +4747,29 @@ async def admin_add_key(request: Request):
     cycle_day = body.get("cycle_day", 1)
     new_key = KeyState(token=token, max_concurrent=max_concurrent, cycle_day=cycle_day, label=label)
     manager.keys.append(new_key)
-    # Also update usage_scraper if cookies provided
     cookies = body.get("cookies", {})
     if usage_scraper and cookies:
         usage_scraper.cookie_map[label] = cookies
+    # Persist to DB
+    if key_registry:
+        key_registry.add(token, label, max_concurrent, cycle_day, cookies)
     return {"added": label, "key_index": len(manager.keys) - 1,
-            "note": "Add this key to config.yaml and restart for persistence"}
+            "note": "Key saved to DB and will persist across restarts"}
 
 
 @app.delete("/admin/keys/{key_index}", dependencies=[Depends(_verify_admin)])
 async def admin_delete_key(key_index: int):
-    """Remove an upstream key. Requires config.yaml update and restart to persist."""
+    """Remove an upstream key. Persists to DB."""
     if not manager or key_index >= len(manager.keys):
         raise HTTPException(status_code=404, detail="key not found")
     removed = manager.keys.pop(key_index)
-    return {"removed": removed.label, "note": "Remove this key from config.yaml and restart for persistence"}
+    # Remove from usage_scraper
+    if usage_scraper and hasattr(usage_scraper, 'cookie_map') and removed.label in usage_scraper.cookie_map:
+        del usage_scraper.cookie_map[removed.label]
+    # Persist to DB
+    if key_registry:
+        key_registry.remove(removed.token)
+    return {"removed": removed.label, "note": "Key removed from DB and will not reappear on restart"}
 
 
 # ---------------------------------------------------------------------------
