@@ -173,9 +173,9 @@ class _LibSQLHTTPCursor:
         if p is None:
             return {"type": "null"}
         if isinstance(p, bool):
-            return {"type": "integer", "value": 1 if p else 0}
+            return {"type": "integer", "value": "1" if p else "0"}
         if isinstance(p, int):
-            return {"type": "integer", "value": p}
+            return {"type": "integer", "value": str(p)}
         if isinstance(p, float):
             return {"type": "float", "value": p}
         if isinstance(p, bytes):
@@ -4469,6 +4469,57 @@ async def admin_scrape_usage():
     return {"error": "usage_scraper or manager not initialized"}
 
 
+@app.post("/admin/test-model", dependencies=[Depends(_verify_admin)])
+async def admin_test_model(request: Request):
+    """Send a test prompt to a model via the proxy's own /v1/chat/completions.
+
+    Uses the first registered client key for attribution. Returns the model
+    response, latency, and status so the dashboard can display it inline.
+    Body: {"model": "glm-5", "prompt": "2+2"}
+    """
+    body = await request.json()
+    model = body.get("model")
+    prompt = body.get("prompt", "2+2")
+    if not model:
+        raise HTTPException(status_code=400, detail="model is required")
+    if not manager or not manager.keys:
+        raise HTTPException(status_code=503, detail="no upstream keys configured")
+    if not client_registry:
+        raise HTTPException(status_code=503, detail="client_registry not ready")
+
+    # Pick the first client token for internal attribution
+    clients_list = client_registry.clients
+    if not clients_list:
+        raise HTTPException(status_code=503, detail="no client keys registered")
+    client_token = clients_list[0]["token"]
+
+    start = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as cx:
+            r = await cx.post(
+                f"http://{request.headers.get('host', '127.0.0.1:8399')}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {client_token}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},
+            )
+        elapsed_ms = int((time.time() - start) * 1000)
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"raw": r.text[:500]}
+        return {
+            "status": r.status_code,
+            "elapsed_ms": elapsed_ms,
+            "model": model,
+            "prompt": prompt,
+            "response": data,
+        }
+    except httpx.TimeoutException:
+        elapsed_ms = int((time.time() - start) * 1000)
+        return {"status": 504, "elapsed_ms": elapsed_ms, "model": model, "prompt": prompt,
+                "error": "Request timed out (60s)"}
+    except Exception as e:
+        elapsed_ms = int((time.time() - start) * 1000)
+        return {"status": 500, "elapsed_ms": elapsed_ms, "model": model, "prompt": prompt,
+                "error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Admin — Subscription (Upstream Key) Management
 # ---------------------------------------------------------------------------
@@ -4792,6 +4843,17 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .model-chip .mc-keys { color: var(--green); }
 .model-chip .mc-usage { margin-top: 4px; }
 .model-chip .mc-usage .bar { height: 4px; }
+.model-chip .mc-actions { margin-top: 8px; display: flex; gap: 6px; }
+.btn-test { background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 4px 10px;
+            font-size: 11px; cursor: pointer; transition: opacity .2s; }
+.btn-test:hover { opacity: 0.85; }
+.btn-test:disabled { opacity: 0.5; cursor: wait; }
+.test-result { margin-top: 8px; font-size: 11px; padding: 8px; border-radius: 4px; background: var(--bg);
+               border: 1px solid var(--border); max-height: 200px; overflow-y: auto; word-break: break-word; }
+.test-result.ok { border-color: var(--green); }
+.test-result.err { border-color: var(--red); }
+.test-result .tr-meta { color: var(--dim); margin-bottom: 4px; }
+.test-result .tr-content { font-family: monospace; white-space: pre-wrap; }
 .search-input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; font-size: 13px; width: 200px; }
 .key-mgmt { margin-top: 12px; }
 .key-mgmt-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 10px; }
@@ -5378,6 +5440,44 @@ function renderKeyStatus(keys) {
   }).join('');
 }
 
+// --- Test Model (inline "2+2" prompt) ---
+async function testModel(modelId, btn) {
+  const resultDiv = document.getElementById('test-' + CSS.escape(modelId));
+  if (!resultDiv) return;
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Testing...';
+  resultDiv.style.display = 'block';
+  resultDiv.className = 'test-result';
+  resultDiv.innerHTML = '<span class="tr-meta">Sending test prompt "2+2"...</span>';
+  try {
+    const r = await postJSON('/admin/test-model', { model: modelId, prompt: '2+2' });
+    const cls = r.status === 200 ? 'ok' : 'err';
+    resultDiv.className = 'test-result ' + cls;
+    let content = '';
+    if (r.error) {
+      content = `Error: ${r.error}`;
+    } else if (r.response && r.response.choices && r.response.choices[0]) {
+      content = r.response.choices[0].message.content || '(empty response)';
+      const usage = r.response.usage;
+      if (usage) {
+        content += `\n\ntokens: ${usage.total_tokens} (in:${usage.prompt_tokens} out:${usage.completion_tokens})`;
+      }
+    } else if (r.response && r.response.error) {
+      content = `Upstream error: ${r.response.error}`;
+    } else {
+      content = JSON.stringify(r.response, null, 2).slice(0, 500);
+    }
+    resultDiv.innerHTML = `<div class="tr-meta">Status ${r.status} · ${r.elapsed_ms}ms · ${escHtml(modelId)}</div><div class="tr-content">${escHtml(content)}</div>`;
+  } catch (e) {
+    resultDiv.className = 'test-result err';
+    resultDiv.innerHTML = `<div class="tr-meta">Request failed</div><div class="tr-content">${escHtml(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
 // --- Call Feed ---
 function addCallToFeed(c) { const cf=document.getElementById('filter-client').value,mf=document.getElementById('filter-model').value; let ok=true; if(cf&&c.client_id!==cf)ok=false; if(mf&&c.model!==mf)ok=false; if(ok){feedCalls.unshift(c); const lim=parseInt(document.getElementById('feed-limit').value); if(feedCalls.length>lim)feedCalls.length=lim; renderFeed(feedCalls);} }
 function renderFeed(calls) { document.getElementById('feed-count').textContent=calls.length; document.querySelector('#feed-tbl tbody').innerHTML=calls.map(c=>{const sc=c.status===200?'status-ok':c.status>=400?'status-err':'status-warn'; const pb=c.provider?providerBadge(c.provider):''; return `<tr><td>${fmtTs(c.ts)}</td><td>${c.client_id}</td><td>${c.model}${pb}</td><td>${(c.upstream_key||'').slice(0,8)}</td><td>${fmt(c.tokens_in)}</td><td>${fmt(c.tokens_out)}</td><td>${c.latency_ms}ms</td><td class="${sc}">${c.status}</td></tr>`;}).join(''); }
@@ -5413,7 +5513,8 @@ function renderModelsGrid() {
     const metaBits = [ctxStr, keyStr, m.family||'', params, updated].filter(Boolean).join(' · ');
     const usageLine = u ? `<div class="mc-usage">${fmt(u.requests)} calls · ${fmt(u.tokens_total)} tokens · ${Math.round(u.avg_latency_ms||0)}ms</div>` : '<div class="mc-usage" style="color:var(--dim)">No usage (7d)</div>';
     const provBadge = providerBadge((m.providers||[]).join(','));
-    return `<div class="model-chip"><div class="mc-name">${m.id}${provBadge}</div><div class="mc-meta">${metaBits}</div><div class="mc-meta">${caps}</div>${usageLine}</div>`;
+    const testBtn = `<div class="mc-actions"><button class="btn-test" onclick="testModel('${escHtml(m.id)}', this)">Test “2+2”</button></div><div class="test-result" id="test-${escHtml(m.id)}" style="display:none"></div>`;
+    return `<div class="model-chip"><div class="mc-name">${m.id}${provBadge}</div><div class="mc-meta">${metaBits}</div><div class="mc-meta">${caps}</div>${usageLine}${testBtn}</div>`;
   }).join('');
 }
 document.getElementById('model-search').addEventListener('input', renderModelsGrid);
