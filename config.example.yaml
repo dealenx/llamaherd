@@ -65,6 +65,41 @@ max_retries: 2                # Max retries per request
 # --- Usage tracking ---
 usage_db: ~/llamaherd/usage.db   # SQLite database path
 
+# --- Remote database (optional, for containerised deployments) ---
+# LlamaHerd uses SQLite by default. To persist data across container
+# redeployments (e.g. Dokploy, Kubernetes), point usage_db at a libSQL-
+# compatible URL (Turso, self-hosted sqld, etc.).
+#
+# Two auth modes are supported:
+#
+# 1. Turso Cloud (Bearer token):
+#    usage_db: "libsql://your-db.turso.io"
+#    db_auth_token: "your-turso-token"
+#    pip install 'llamaherd[libsql]'   # optional but faster (native client)
+#
+# 2. Self-hosted sqld with Basic auth (user:pass):
+#    usage_db: "http://host:port"
+#    db_auth_user: "libsql"            # username
+#    db_auth_token: "your-password"    # or set LLAMAHERD_DB_AUTH_TOKEN
+#    # Works without any extra packages — uses built-in HTTP client.
+#    # You can also put both in the token: db_auth_token: "libsql:password"
+#
+# Environment variable equivalents (useful for Dokploy / Docker / K8s):
+#   LLAMAHERD_USAGE_DB       — overrides usage_db
+#   LLAMAHERD_DB             — overrides proxy.db path/URL (client registry)
+#   LLAMAHERD_DB_AUTH_TOKEN  — overrides db_auth_token
+#   LLAMAHERD_DB_AUTH_USER   — overrides db_auth_user
+#
+# If LLAMAHERD_USAGE_DB is unset but LLAMAHERD_DB is set, both databases
+# will point at the same libSQL instance (single-DB mode). This is fine
+# for small deployments — the `clients` and `usage` tables don't collide.
+#
+# The client-key registry (proxy.db) can be moved off the local filesystem
+# by setting the LLAMAHERD_DB environment variable to a libSQL URL, e.g.
+#     LLAMAHERD_DB=http://host:port
+# When the URL is remote, LlamaHerd automatically uses the libSQL HTTP
+# protocol instead of the stdlib sqlite3 module.
+
 # --- Subscription polling ---
 # How often to poll /api/me for subscription status (seconds)
 sub_poll_interval: 21600      # 6 hours

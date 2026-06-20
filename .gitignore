@@ -6,6 +6,8 @@ usage.db
 proxy.db
 **/usage.db
 **/proxy.db
+openrouter_pricing.yaml
+**/openrouter_pricing.yaml
 __pycache__/
 *.pyc
 *.pyo
@@ -29,3 +31,5 @@ Thumbs.db
 venv/
 .env
 nvidia_model_cache.json
+llamaherd.log
+uv.lock

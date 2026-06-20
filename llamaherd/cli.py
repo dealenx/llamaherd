@@ -2,11 +2,26 @@
 
 import argparse
 import json
+import os
 import sys
+from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
 
 from . import __tagline__, __version__
+
+# Load .env from project root (if present) so CLI commands can use the same
+# env vars as the proxy (DB connection, admin token, host/port, etc.)
+for _env_candidate in (
+    os.environ.get("LLAMAHERD_ENV"),
+    str(Path.cwd() / ".env"),
+    str(Path(__file__).parent.parent / ".env"),
+    str(Path(__file__).parent / ".env"),
+):
+    if _env_candidate and Path(_env_candidate).is_file():
+        load_dotenv(_env_candidate, override=False)
+        break
 
 BANNER = r"""
     __    __                      __  __              __

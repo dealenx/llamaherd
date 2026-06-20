@@ -32,6 +32,7 @@ from typing import Any, Optional
 
 import httpx
 import yaml
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from uvicorn import Config, Server
@@ -39,6 +40,18 @@ from uvicorn import Config, Server
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
+# Load .env from project root (if present) before reading any env vars.
+# Search order: LLAMAHERD_ENV (explicit), CWD/.env, repo root/.env, package dir/.env
+for _env_candidate in (
+    os.environ.get("LLAMAHERD_ENV"),
+    str(Path.cwd() / ".env"),
+    str(Path(__file__).parent.parent / ".env"),
+    str(Path(__file__).parent / ".env"),
+):
+    if _env_candidate and Path(_env_candidate).is_file():
+        load_dotenv(_env_candidate, override=False)
+        break
 
 CONFIG_PATH = Path(os.environ.get("LLAMAHERD_CONFIG", str(Path(__file__).parent / "config.yaml")))
 
@@ -58,6 +71,298 @@ logging.basicConfig(
 log = logging.getLogger("llamaherd")
 
 # ---------------------------------------------------------------------------
+# Database connection — SQLite (file) or libSQL (http(s):// URL) dispatcher
+# ---------------------------------------------------------------------------
+# LlamaHerd keeps usage data in SQLite by default. For containerised
+# deployments where the local filesystem is ephemeral, you can point
+# usage_db / LLAMAHERD_DB at a libSQL-compatible URL (Turso, self-hosted
+# sqld, etc.) and install the optional `libsql` package:
+#
+#     pip install 'llamaherd[libsql]'
+#
+# If the URL looks like a remote endpoint (http://, https://, libsql://),
+# we use libsql.connect(); otherwise we fall back to the stdlib sqlite3
+# module. The connection object returned exposes the same
+# execute()/commit()/fetchall() surface either way.
+#
+# Some self-hosted sqld deployments use Basic auth (user:pass) instead of
+# the standard Turso Bearer token. If `db_auth_user` is set (or the token
+# contains a colon like "user:pass"), we fall back to a built-in HTTP
+# client that speaks the libSQL Hrana-over-HTTP protocol directly with
+# the correct Basic auth header. This avoids the native `libsql` package
+# (which has no Windows wheels) and works on any platform with httpx.
+
+_LIBSQL_AVAILABLE = False
+try:
+    import libsql as _libsql  # type: ignore
+    _LIBSQL_AVAILABLE = True
+except ImportError:
+    _libsql = None  # type: ignore
+
+
+def _is_libsql_url(dsn: str) -> bool:
+    """True if dsn points at a remote libSQL endpoint."""
+    if not dsn:
+        return False
+    return dsn.startswith(("http://", "https://", "libsql://", "wss://"))
+
+
+def _looks_like_basic_auth(token: str) -> bool:
+    """True if token looks like 'user:password' for Basic auth."""
+    if not token:
+        return False
+    # Bearer tokens (Turso) are typically JWTs or hex strings without a colon
+    # Basic auth credentials are 'user:pass' — single colon, not a URL scheme
+    if ":" not in token:
+        return False
+    # Exclude http(s):// which would contain colons but be a URL
+    if "://" in token:
+        return False
+    return True
+
+
+class _LibSQLHTTPCursor:
+    """Minimal DB-API 2.0 cursor over the libSQL /v2/pipeline HTTP API."""
+
+    def __init__(self, conn: "_LibSQLHTTPConnection"):
+        self._conn = conn
+        self._rows: list[tuple] = []
+        self._cols: list[str] = []
+        self._pos = 0
+        self.rowcount = -1
+        self.lastrowid = None
+        self.description: Optional[list] = None
+        self.arraysize = 1
+
+    def _convert_value(self, v: dict):
+        if v is None:
+            return None
+        t = v.get("type")
+        val = v.get("value")
+        if t == "null":
+            return None
+        if t == "integer":
+            return int(val) if val is not None else None
+        if t == "float":
+            return float(val) if val is not None else None
+        if t == "text":
+            return val
+        if t == "blob":
+            return val.encode() if isinstance(val, str) else val
+        return val
+
+    def _build_arg(self, p):
+        if p is None:
+            return {"type": "null"}
+        if isinstance(p, bool):
+            return {"type": "integer", "value": 1 if p else 0}
+        if isinstance(p, int):
+            return {"type": "integer", "value": p}
+        if isinstance(p, float):
+            return {"type": "float", "value": p}
+        if isinstance(p, bytes):
+            return {"type": "blob", "base64": True, "value": p.hex()}
+        return {"type": "text", "value": str(p)}
+
+    def _run_pipeline(self, stmt: dict):
+        body = {"requests": [{"type": "execute", "stmt": stmt}, {"type": "close"}]}
+        resp = self._conn._client.post(
+            self._conn._pipeline_url,
+            headers=self._conn._headers,
+            json=body,
+            timeout=self._conn._timeout,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"libSQL HTTP error {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        results = data.get("results", [])
+        if not results:
+            raise RuntimeError("libSQL pipeline returned no results")
+        first = results[0]
+        if first.get("type") == "error":
+            err = first.get("error", {})
+            raise RuntimeError(f"libSQL error: {err.get('message', err)}")
+        return first.get("response", {}).get("result", {})
+
+    def execute(self, sql: str, params=None):
+        stmt: dict = {"sql": sql}
+        if params is not None:
+            if isinstance(params, (list, tuple)):
+                stmt["args"] = [self._build_arg(p) for p in params]
+            elif isinstance(params, dict):
+                stmt["named_args"] = [
+                    {"name": k, "value": self._build_arg(v)} for k, v in params.items()
+                ]
+        result = self._run_pipeline(stmt)
+        self._cols = [c.get("name", "") for c in result.get("cols", [])]
+        self._rows = [
+            tuple(self._convert_value(v) for v in row)
+            for row in result.get("rows", [])
+        ]
+        self._pos = 0
+        self.rowcount = result.get("affected_row_count", -1)
+        self.lastrowid = result.get("last_insert_rowid")
+        if self._cols:
+            self.description = [(c, None, None, None, None, None, None) for c in self._cols]
+        else:
+            self.description = None
+        return self
+
+    def executemany(self, sql: str, seq_of_params):
+        for params in seq_of_params:
+            self.execute(sql, params)
+
+    def executescript(self, sql: str):
+        # /v2/pipeline supports batching — send each statement separately for simplicity
+        for stmt in [s.strip() for s in sql.split(";") if s.strip()]:
+            self.execute(stmt)
+
+    def fetchone(self):
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchall(self):
+        rows = self._rows[self._pos:]
+        self._pos = len(self._rows)
+        return rows
+
+    def fetchmany(self, size=None):
+        if size is None:
+            size = self.arraysize
+        end = min(self._pos + size, len(self._rows))
+        rows = self._rows[self._pos:end]
+        self._pos = end
+        return rows
+
+    def close(self):
+        self._rows = []
+        self._pos = 0
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+class _LibSQLHTTPConnection:
+    """Minimal DB-API 2.0 connection over the libSQL /v2/pipeline HTTP API.
+
+    Used when the native `libsql` package is unavailable (no Windows wheels)
+    or when the server uses non-standard Basic auth instead of Bearer tokens.
+    Implements the same execute()/commit()/cursor() surface as sqlite3.Connection
+    so LlamaHerd's UsageDB / ClientRegistry work unchanged.
+    """
+
+    def __init__(self, url: str, auth_token: Optional[str] = None,
+                 basic_user: Optional[str] = None, timeout: float = 30.0):
+        self._pipeline_url = url.rstrip("/") + "/v2/pipeline"
+        self._timeout = timeout
+        import base64
+        if basic_user and auth_token:
+            creds = base64.b64encode(f"{basic_user}:{auth_token}".encode()).decode()
+            self._headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+        elif auth_token:
+            self._headers = {"Authorization": f"Bearer {auth_token}", "Content-Type": "application/json"}
+        else:
+            self._headers = {"Content-Type": "application/json"}
+        self._client = httpx.Client(timeout=timeout)
+
+    def execute(self, sql: str, params=None):
+        cur = self.cursor()
+        return cur.execute(sql, params)
+
+    def executemany(self, sql: str, seq_of_params):
+        cur = self.cursor()
+        return cur.executemany(sql, seq_of_params)
+
+    def executescript(self, sql: str):
+        cur = self.cursor()
+        return cur.executescript(sql)
+
+    def cursor(self):
+        return _LibSQLHTTPCursor(self)
+
+    def commit(self):
+        pass  # pipeline is stateless; each request is its own transaction
+
+    def rollback(self):
+        log.warning("libSQL HTTP connection does not support rollback")
+
+    def close(self):
+        self._client.close()
+
+
+def db_connect(dsn: str, auth_token: Optional[str] = None,
+               auth_user: Optional[str] = None):
+    """Open a DB connection. Dispatches between sqlite3, libsql, and HTTP fallback.
+
+    - File path / :memory: → stdlib sqlite3.connect()
+    - http(s):// / libsql:// with Bearer token → libsql.connect(dsn, auth_token=...)
+      (requires `pip install 'llamaherd[libsql]'`)
+    - http(s):// / libsql:// with Basic auth (auth_user set or token contains ':')
+      → built-in _LibSQLHTTPConnection (works on any platform with httpx)
+    """
+    if _is_libsql_url(dsn):
+        # If auth_user is explicitly set, or the token looks like "user:pass",
+        # use the built-in HTTP client with Basic auth. This handles self-hosted
+        # sqld deployments that reject Bearer tokens.
+        use_basic = bool(auth_user) or _looks_like_basic_auth(auth_token or "")
+        if use_basic:
+            user = auth_user
+            password = auth_token
+            if not user and auth_token and ":" in auth_token:
+                user, password = auth_token.split(":", 1)
+            host_display = dsn.split("@")[-1] if "@" in dsn else dsn
+            log.info(f"Connecting to libSQL (HTTP/Basic) at {host_display} as user '{user}'")
+            return _LibSQLHTTPConnection(dsn, auth_token=password, basic_user=user)
+        # Standard Turso-style Bearer auth — prefer native libsql package if available
+        if _LIBSQL_AVAILABLE:
+            host_display = dsn.split("@")[-1] if "@" in dsn else dsn
+            log.info(f"Connecting to libSQL (native) at {host_display}")
+            return _libsql.connect(dsn, auth_token=auth_token or "")
+        # Fall back to HTTP client with Bearer auth
+        host_display = dsn.split("@")[-1] if "@" in dsn else dsn
+        log.info(f"Connecting to libSQL (HTTP/Bearer) at {host_display}")
+        return _LibSQLHTTPConnection(dsn, auth_token=auth_token)
+    # Local SQLite file
+    path = Path(dsn).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(str(path))
+
+
+def _safe_alter_add_column(conn, table: str, columns: list[tuple[str, str]],
+                           default: Optional[str] = None) -> None:
+    """Add columns to a table if they don't already exist.
+
+    Works with both stdlib sqlite3 (raises sqlite3.OperationalError) and the
+    libSQL HTTP client (raises RuntimeError with 'duplicate column' message).
+    Inspects PRAGMA table_info to avoid the error entirely when possible.
+    """
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {r[1] for r in rows} if rows else set()
+    except Exception:
+        existing = set()
+    for col, typ in columns:
+        if col in existing:
+            continue
+        default_clause = f" DEFAULT {default}" if default is not None else ""
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}{default_clause}")
+        except (sqlite3.OperationalError, RuntimeError) as e:
+            if "duplicate" in str(e).lower() or "already exists" in str(e).lower():
+                continue
+            raise
+
+
+# ---------------------------------------------------------------------------
 # Client Identity Registry (DB-backed, dynamic)
 # ---------------------------------------------------------------------------
 
@@ -68,10 +373,10 @@ class ClientRegistry:
     inserted on first run (if the DB is empty).
     """
 
-    def __init__(self, db_path: str, seed_clients=None):
-        self._db_path = Path(db_path).expanduser()
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path))
+    def __init__(self, db_path: str, seed_clients=None, auth_token: Optional[str] = None,
+                 auth_user: Optional[str] = None):
+        self._db_path = db_path
+        self._conn = db_connect(db_path, auth_token=auth_token, auth_user=auth_user)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS clients (
                 id TEXT PRIMARY KEY,
@@ -86,11 +391,12 @@ class ClientRegistry:
         """)
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_clients_token ON clients(token)")
         # Safe migration: add rate limit columns if they don't exist (existing DBs)
-        for col, typ in [("daily_token_limit", "INTEGER"), ("daily_request_limit", "INTEGER"), ("rpm_limit", "INTEGER")]:
-            try:
-                self._conn.execute(f"ALTER TABLE clients ADD COLUMN {col} {typ} DEFAULT NULL")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+        # Works with both sqlite3 (raises OperationalError) and libSQL HTTP (raises RuntimeError)
+        _safe_alter_add_column(self._conn, "clients", [
+            ("daily_token_limit", "INTEGER"),
+            ("daily_request_limit", "INTEGER"),
+            ("rpm_limit", "INTEGER"),
+        ], default="NULL")
         self._conn.commit()
 
         # In-memory cache — initialize BEFORE any _insert/_reload calls
@@ -1244,10 +1550,10 @@ class FallbackProvider:
 # ---------------------------------------------------------------------------
 
 class UsageDB:
-    def __init__(self, db_path: str):
-        self.db_path = Path(db_path).expanduser()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path))
+    def __init__(self, db_path: str, auth_token: Optional[str] = None,
+                 auth_user: Optional[str] = None):
+        self.db_path = db_path
+        self._conn = db_connect(db_path, auth_token=auth_token, auth_user=auth_user)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS usage (
                 ts REAL NOT NULL,
@@ -1263,16 +1569,12 @@ class UsageDB:
             )
             """)
         # Backward-compatible migration for existing DBs
-        for col, default in [("session_id", "''")]:
-            try:
-                self._conn.execute(f"ALTER TABLE usage ADD COLUMN {col} TEXT DEFAULT {default}")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+        _safe_alter_add_column(self._conn, "usage", [("session_id", "TEXT")], default="''")
         # Drop obsolete quota columns if present
         for col in ["session_usage_pct", "weekly_usage_pct"]:
             try:
                 self._conn.execute(f"ALTER TABLE usage DROP COLUMN {col}")
-            except sqlite3.OperationalError:
+            except (sqlite3.OperationalError, RuntimeError):
                 pass
         for idx_cols in [
             "client_id, day",
@@ -1284,7 +1586,7 @@ class UsageDB:
             idx_name = f"idx_usage_{'_'.join(idx_cols.replace(' ', '').split(','))}"
             try:
                 self._conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON usage ({idx_cols})")
-            except sqlite3.OperationalError:
+            except (sqlite3.OperationalError, RuntimeError):
                 pass
         self._conn.commit()
 
@@ -1746,7 +2048,8 @@ request_timeout: int = 120
 admin_token: str = ""
 reject_unknown_models: bool = False  # reject models unknown to both Ollama and fallback model_map
 
-DB_PATH = Path(__file__).parent / "proxy.db"
+_DB_DSN = os.environ.get("LLAMAHERD_DB", str(Path(__file__).parent / "proxy.db"))
+DB_PATH = Path(_DB_DSN) if not _is_libsql_url(_DB_DSN) else _DB_DSN
 
 # ---------------------------------------------------------------------------
 # SSE Event Broadcaster — pushes live updates to dashboard
@@ -1939,7 +2242,10 @@ async def lifespan(app: FastAPI):
     else:
         log.info("Admin authentication enabled")
     manager = KeyManager(cfg["keys"])
-    client_registry = ClientRegistry(str(DB_PATH), seed_clients=cfg.get("clients"))
+    db_auth_token = cfg.get("db_auth_token") or os.environ.get("LLAMAHERD_DB_AUTH_TOKEN")
+    db_auth_user = cfg.get("db_auth_user") or os.environ.get("LLAMAHERD_DB_AUTH_USER")
+    client_registry = ClientRegistry(str(DB_PATH), seed_clients=cfg.get("clients"),
+                                     auth_token=db_auth_token, auth_user=db_auth_user)
     sticky = StickySessionManager(ttl_seconds=cfg.get("sticky_ttl_seconds", 3600))
     upstream_url = cfg.get("upstream", "https://ollama.com/v1")
     retry_on_429 = cfg.get("retry_on_429", True)
@@ -1953,7 +2259,14 @@ async def lifespan(app: FastAPI):
     if NATIVE_BRIDGE_MODELS:
         log.info(f"Native bridge enabled for models: {NATIVE_BRIDGE_MODELS}")
 
-    usage_db = UsageDB(cfg.get("usage_db", "~/ollama-cloud-proxy/usage.db"))
+    # usage_db: env var LLAMAHERD_USAGE_DB takes precedence over config, then
+    # falls back to LLAMAHERD_DB (shared with proxy.db) if only one DB is used,
+    # then to config's usage_db, then to the default local path.
+    usage_dsn = (os.environ.get("LLAMAHERD_USAGE_DB")
+                 or cfg.get("usage_db")
+                 or os.environ.get("LLAMAHERD_DB")
+                 or "~/ollama-cloud-proxy/usage.db")
+    usage_db = UsageDB(usage_dsn, auth_token=db_auth_token, auth_user=db_auth_user)
     registry = ModelRegistry(manager, upstream_url)
     await registry.start(cfg.get("health_check_interval", 300))
     await registry.refresh()
