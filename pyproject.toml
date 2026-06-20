@@ -29,6 +29,7 @@ dependencies = [
     "pyyaml>=6.0",
     "cloudscraper>=1.2",
     "beautifulsoup4>=4.12",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +37,12 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "ruff>=0.1",
+]
+# Optional: remote libSQL database (Turso, self-hosted, etc.)
+# Enables http(s):// URLs in usage_db / LLAMAHERD_DB for persistent storage in containers.
+# If not installed, LlamaHerd falls back to the built-in sqlite3 module.
+libsql = [
+    "libsql>=0.1.0",
 ]
 
 [project.urls]
