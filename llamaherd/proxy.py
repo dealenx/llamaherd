@@ -5459,8 +5459,12 @@ function renderKeyStatus(keys) {
 }
 
 // --- Test Model (inline "2+2" prompt) ---
+function _testDivId(modelId) {
+  // Generate a safe DOM element ID from a model name (may contain dots, colons, etc.)
+  return 'test-' + modelId.replace(/[^a-zA-Z0-9_-]/g, '-');
+}
 async function testModel(modelId, btn) {
-  const resultDiv = document.getElementById('test-' + CSS.escape(modelId));
+  const resultDiv = document.getElementById(_testDivId(modelId));
   if (!resultDiv) return;
   btn.disabled = true;
   const originalText = btn.textContent;
@@ -5486,7 +5490,11 @@ async function testModel(modelId, btn) {
     if (r.error) {
       content = r.error;
       if (r.status === 504) {
-        content = 'Request timed out after 60 seconds. The model may be unavailable or overloaded.';
+        content = 'Request timed out after 120 seconds. The model may be unavailable or overloaded.';
+      } else if (r.status === 404) {
+        content = r.error;
+      } else if (r.status === 502) {
+        content = r.error;
       } else if (r.status === 500 && r.error.includes('Connection')) {
         content = 'Could not connect to upstream. Check that Ollama API keys are configured.';
       }
@@ -5509,7 +5517,7 @@ async function testModel(modelId, btn) {
     resultDiv.className = 'test-result err';
     let errMsg = e.message;
     if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
-      errMsg = 'Network error — the proxy may be down or unreachable.';
+      errMsg = 'Network error — the proxy may be down or the request timed out (browser fetch limit).';
     } else if (e.message.includes('JSON')) {
       errMsg = 'Server returned an invalid response. The proxy may have crashed or the model is not available.';
     }
@@ -5556,7 +5564,7 @@ function renderModelsGrid() {
     const metaBits = [ctxStr, keyStr, m.family||'', params, updated].filter(Boolean).join(' · ');
     const usageLine = u ? `<div class="mc-usage">${fmt(u.requests)} calls · ${fmt(u.tokens_total)} tokens · ${Math.round(u.avg_latency_ms||0)}ms</div>` : '<div class="mc-usage" style="color:var(--dim)">No usage (7d)</div>';
     const provBadge = providerBadge((m.providers||[]).join(','));
-    const testBtn = `<div class="mc-actions"><button class="btn-test" onclick="testModel('${escHtml(m.id)}', this)">Test “2+2”</button></div><div class="test-result" id="test-${escHtml(m.id)}" style="display:none"></div>`;
+    const testBtn = `<div class="mc-actions"><button class="btn-test" onclick="testModel('${escHtml(m.id)}', this)">Test “2+2”</button></div><div class="test-result" id="${_testDivId(m.id)}" style="display:none"></div>`;
     return `<div class="model-chip"><div class="mc-name">${m.id}${provBadge}</div><div class="mc-meta">${metaBits}</div><div class="mc-meta">${caps}</div>${usageLine}${testBtn}</div>`;
   }).join('');
 }
