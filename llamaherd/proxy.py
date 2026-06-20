@@ -1017,14 +1017,6 @@ class TelegramNotifier:
             lines.append(f"  Requests: {k.total_requests}")
             lines.append(f"  429s: {k.total_429s}")
 
-            # Top models (from session_models, sorted by requests)
-            s_models = k.session_models or {}
-            top = sorted(s_models.items(), key=lambda x: x[1].get("requests", 0), reverse=True)[:3]
-            if top:
-                lines.append("  Top models:")
-                for mid, md in top:
-                    lines.append(f"    {mid}: {md.get('requests', 0)} req")
-
         # Summary: total slots
         total_in_flight = sum(k.in_flight for k in keys)
         total_max = sum(k.max_concurrent for k in keys)
@@ -5485,9 +5477,10 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 </div>
 
 <div class="tab-panel" id="panel-subs">
-  <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center">
+  <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
     <button class="btn" id="btn-add-key">+ Add Subscription</button>
-    <span style="font-size:11px;color:var(--dim)">Changes take effect immediately but require config.yaml update + restart to persist</span>
+    <button class="btn" id="btn-telegram-test">📤 Send Telegram Test</button>
+    <span id="telegram-test-result" style="font-size:11px;color:var(--dim)"></span>
   </div>
   <div id="subs-list"></div>
   <h3 style="margin-top:24px;border-top:1px solid var(--border);padding-top:16px">Client Keys</h3>
@@ -6309,6 +6302,36 @@ async function addKey() {
   closeModal(); loadSubsPanel();
   alert(r.note||'Key added');
 }
+
+// --- Telegram test button ---
+document.getElementById('btn-telegram-test').addEventListener('click', async function() {
+  const btn = this;
+  const result = document.getElementById('telegram-test-result');
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = '📤 Sending...';
+  result.style.color = 'var(--dim)';
+  result.textContent = 'Sending notification to Telegram...';
+  try {
+    const r = await postJSON('/admin/telegram-test');
+    if (r.sent) {
+      result.style.color = 'var(--green)';
+      result.textContent = `✅ Sent to chat ${r.chat_id}${r.topic_id ? ' topic '+r.topic_id : ''}`;
+    } else if (r.error) {
+      result.style.color = 'var(--red)';
+      result.textContent = `❌ ${r.error}`;
+    } else {
+      result.style.color = 'var(--red)';
+      result.textContent = '❌ Unknown error';
+    }
+  } catch (e) {
+    result.style.color = 'var(--red)';
+    result.textContent = '❌ ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+});
 
 // --- Add Client ---
 document.getElementById('btn-add-client').addEventListener('click', () => {
