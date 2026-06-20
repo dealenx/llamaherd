@@ -3,49 +3,33 @@
 #
 # Then start: llamaherd --config config.yaml
 # Or:       python -m llamaherd.proxy
+#
+# NOTE: Upstream Ollama Cloud keys and client API keys are now stored in the
+# database (libSQL/SQLite) and managed via the dashboard or admin API. They
+# persist across restarts automatically. The `keys` and `clients` sections
+# below are only used as SEEDS on first run (when the DB is empty).
+# After that, add/remove keys via the Subscriptions tab in the dashboard.
 
-# --- Upstream Ollama Cloud subscriptions ---
-# Each key is an Ollama Cloud API key from https://ollama.com/settings/keys
-# Stagger cycle_day across keys so there's always a fresh subscription available.
-keys:
-  - token: "sk-ollama-your-first-key-here"
-    max_concurrent: 15          # Tested ~15-20 before hard 429s
-    cycle_day: 1                # Billing reset day (1-28)
-    label: "Subscription 1"
-    # Optional: cookies for usage scraping from ollama.com/settings
-    # Extract from browser DevTools → Application → Cookies → ollama.com
-    # Required for session/weekly usage tracking
-    cookies:
-      secure_session: ""        # __Secure-session (REQUIRED, per-account)
-      aid: ""                   # aid account ID (shared across accounts)
-      cf_clearance: ""          # Cloudflare bypass (optional but recommended)
-      stripe_mid: ""            # __stripe_mid (optional)
+# --- Upstream Ollama Cloud subscriptions (SEED ONLY — first run) ---
+# Leave empty to start with no keys and add them via the dashboard.
+# keys:
+#   - token: "your-ollama-api-key"
+#     max_concurrent: 15
+#     cycle_day: 1
+#     label: "Subscription 1"
+#     cookies:
+#       secure_session: ""        # __Secure-session (for usage scraping)
+#       aid: ""
+#       cf_clearance: ""
+#       stripe_mid: ""
 
-  - token: "sk-ollama-your-second-key-here"
-    max_concurrent: 15
-    cycle_day: 15
-    label: "Subscription 2"
-    cookies:
-      secure_session: ""
-      aid: ""
-      cf_clearance: ""
-      stripe_mid: ""
-
-# --- Client API keys (one per consumer, for usage attribution) ---
+# --- Client API keys (SEED ONLY — first run) ---
 # These are NOT real Ollama keys — they're internal tokens for tracking which
 # service is making requests. Also manageable via /admin/clients API.
-clients:
-  - id: my-gateway
-    label: "My Gateway Service"
-    token: ocp-gateway-token-here
-    # Optional rate limits (null or omit = unlimited)
-    # daily_token_limit: 100000     # Max tokens (in+out) per day
-    # daily_request_limit: 500      # Max requests per day
-    # rpm_limit: 30                 # Max requests per minute
-
-  - id: my-cli
-    label: "My CLI Tool"
-    token: ocp-cli-token-here
+# clients:
+#   - id: my-gateway
+#     label: "My Gateway Service"
+#     token: ocp-gateway-token-here
 
 # --- Proxy settings ---
 host: 127.0.0.1              # Bind address (0.0.0.0 for all interfaces)

@@ -1,9 +1,9 @@
 # OpenRouter equivalent pricing for LlamaHerd models
 # All prices in USD per 1M tokens
 # Source: OpenRouter API (https://openrouter.ai/api/v1/models) + supplementary sources
-# Auto-synced: 2026-06-13T22:52:30.782440+00:00
+# Auto-synced: 2026-06-20T19:40:19.085398+00:00
 #
-# Strips :cloud suffix automatically â€” "glm-5.1:cloud" uses "glm-5.1" prices.
+# Strips :cloud suffix automatically — "glm-5.1:cloud" uses "glm-5.1" prices.
 
 models:
   glm-5.1:
@@ -12,8 +12,8 @@ models:
     output_per_1m: 3.08
   kimi-k2.6:
     openrouter_id: moonshotai/kimi-k2.6
-    input_per_1m: 0.68
-    output_per_1m: 3.41
+    input_per_1m: 0.66
+    output_per_1m: 3.5
   deepseek-v4-flash:
     openrouter_id: deepseek/deepseek-v4-flash
     input_per_1m: 0.09
@@ -32,8 +32,8 @@ models:
     output_per_1m: 1.0
   qwen3.5:397b:
     openrouter_id: qwen/qwen3.5-397b-a17b
-    input_per_1m: 0.39
-    output_per_1m: 2.34
+    input_per_1m: 0.385
+    output_per_1m: 2.45
   gemma3:12b:
     openrouter_id: google/gemma-3-12b-it
     input_per_1m: 0.05
@@ -180,5 +180,9 @@ models:
     output_per_1m: 1.2
   kimi-k2.7-code:
     openrouter_id: moonshotai/kimi-k2.7-code
-    input_per_1m: 0.75
-    output_per_1m: 3.5
+    input_per_1m: 0.612
+    output_per_1m: 3.069
+  glm-5.2:
+    openrouter_id: z-ai/glm-5.2
+    input_per_1m: 1.2
+    output_per_1m: 4.1

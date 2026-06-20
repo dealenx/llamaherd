@@ -56,26 +56,67 @@ for _env_candidate in (
 # Config path resolution order:
 #   1. LLAMAHERD_CONFIG env var (explicit — recommended for Docker/K8s/Dokploy)
 #   2. CWD/config.yaml (running from project root)
-#   3. Package dir/config.yaml (installed alongside the module — dev mode)
-#   4. /app/config.yaml (standard Docker WORKDIR)
+#   3. /app/config.yaml (standard Docker WORKDIR)
+#   4. Package dir/config.yaml (installed alongside the module — dev mode)
+# Config is OPTIONAL — if no config.yaml is found, LlamaHerd uses sensible
+# defaults and loads keys/clients from the database.
 _cfg_env = os.environ.get("LLAMAHERD_CONFIG")
-CONFIG_PATH = Path(
-    _cfg_env
-    or (Path.cwd() / "config.yaml")
-    if (Path.cwd() / "config.yaml").is_file()
-    else (_cfg_env or str(Path(__file__).parent / "config.yaml"))
-)
-if not CONFIG_PATH.is_file() and Path("/app/config.yaml").is_file():
-    CONFIG_PATH = Path("/app/config.yaml")
+_candidates = [
+    _cfg_env,
+    str(Path.cwd() / "config.yaml"),
+    "/app/config.yaml",
+    str(Path(__file__).parent / "config.yaml"),
+]
+CONFIG_PATH = None
+for _c in _candidates:
+    if _c and Path(_c).is_file():
+        CONFIG_PATH = Path(_c)
+        break
+# If LLAMAHERD_CONFIG is set explicitly but file doesn't exist, keep it so
+# load_config() can warn the user with a clear message.
+if CONFIG_PATH is None and _cfg_env:
+    CONFIG_PATH = Path(_cfg_env)
+
+# Fallback directory for openrouter_pricing.yaml cache
+CONFIG_DIR = CONFIG_PATH.parent if CONFIG_PATH else Path.cwd()
+
+DEFAULT_CONFIG = {
+    "host": os.environ.get("LLAMAHERD_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("LLAMAHERD_PORT", "8399")),
+    "upstream": "https://ollama.com/v1",
+    "admin_token": os.environ.get("LLAMAHERD_ADMIN_TOKEN", ""),
+    "keys": [],
+    "clients": [],
+    "health_check_interval": 300,
+    "request_timeout": 120,
+    "queue_timeout": 60,
+    "retry_on_429": True,
+    "max_retries": 2,
+    "sub_poll_interval": 21600,
+    "usage_scrape_interval": 1800,
+    "sticky_ttl_seconds": 3600,
+    "reject_unknown_models": False,
+    "native_bridge_models": [],
+}
 
 def load_config() -> dict:
-    if not CONFIG_PATH.is_file():
-        raise FileNotFoundError(
-            f"Config file not found at {CONFIG_PATH}. Set LLAMAHERD_CONFIG env var "
-            "to the path of your config.yaml, or place config.yaml in the working directory."
-        )
+    """Load config from config.yaml. If file is missing, return defaults.
+
+    Config.yaml is now OPTIONAL — all keys/clients are stored in the database
+    and persist across restarts. The config file is only needed for:
+    - Overriding defaults (host, port, upstream URL, admin_token)
+    - Seeding keys/clients on first run (when DB is empty)
+    - Fallback provider configuration
+    """
+    if CONFIG_PATH is None or not CONFIG_PATH.is_file():
+        log.info("No config.yaml found — using defaults. Keys and clients will be loaded from DB.")
+        return dict(DEFAULT_CONFIG)
     with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
+    # Merge with defaults so missing keys don't cause crashes
+    result = dict(DEFAULT_CONFIG)
+    result.update(cfg)
+    return result
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -4048,7 +4089,7 @@ def _load_openrouter_pricing() -> dict:
     global _OPENROUTER_PRICING
     if _OPENROUTER_PRICING is not None:
         return _OPENROUTER_PRICING
-    pricing_path = CONFIG_PATH.parent / "openrouter_pricing.yaml"
+    pricing_path = CONFIG_DIR / "openrouter_pricing.yaml"
     if pricing_path.exists():
         with open(pricing_path) as f:
             data = yaml.safe_load(f)
@@ -4075,7 +4116,7 @@ def _rebuild_pricing_aliases():
 
 def _save_pricing_yaml(pricing: dict):
     """Write pricing data back to YAML file, preserving header comments."""
-    pricing_path = CONFIG_PATH.parent / "openrouter_pricing.yaml"
+    pricing_path = CONFIG_DIR / "openrouter_pricing.yaml"
     header = [
         "# OpenRouter equivalent pricing for LlamaHerd models",
         "# All prices in USD per 1M tokens",
