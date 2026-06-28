@@ -4398,6 +4398,15 @@ h1 { font-size: 22px; margin-bottom: 4px; }
 .section { margin-bottom: 28px; }
 .section h2 { font-size: 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
 .section h3 { font-size: 14px; margin: 12px 0 6px; color: var(--accent); }
+.next-available-banner { background: rgba(34, 197, 94, 0.08); border: 1px solid var(--green);
+  border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; display: flex; align-items: center;
+  gap: 12px; font-size: 13px; }
+.next-available-banner.all-locked { background: rgba(239, 68, 68, 0.08); border-color: var(--red); }
+.next-available-banner .na-label { font-weight: 600; color: var(--green); white-space: nowrap; }
+.next-available-banner.all-locked .na-label { color: var(--red); }
+.next-available-banner .na-body { flex: 1; }
+.next-available-banner .na-cd { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
+.next-available-banner .na-local { color: var(--dim); font-size: 11px; margin-left: 6px; }
 .badge { font-size: 11px; background: var(--border); padding: 2px 8px; border-radius: 10px; color: var(--dim); }
 .badge.live { background: #1a3a1a; color: var(--green); }
 .badge.new { background: #1a3a1a; color: var(--green); }
@@ -4412,12 +4421,25 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .bars { display: flex; gap: 2px; align-items: center; }
 .key-status { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
 .key-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-           padding: 14px; min-width: 260px; flex: 1; }
+  padding: 12px; min-width: 260px; flex: 1 1 260px; }
+.key-card.exhausted-soon { border-color: var(--red); box-shadow: 0 0 0 1px var(--red) inset; }
+.key-card.next-available { border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset; }
+.key-card .next-badge { background: var(--green); color: #000; padding: 1px 6px; border-radius: 8px;
+  font-size: 10px; margin-left: 6px; font-weight: 600; }
 .key-card .key-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .key-card .key-label { font-weight: 600; font-size: 14px; }
 .key-card .key-plan { font-size: 11px; background: var(--border); padding: 2px 8px; border-radius: 10px; }
 .key-card .key-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
 .key-card .key-row .kdim { color: var(--dim); }
+.key-card .reset-line { font-size: 11px; padding: 3px 0; color: var(--dim); display: flex;
+  justify-content: space-between; gap: 8px; font-variant-numeric: tabular-nums; }
+.key-card .reset-line .reset-cd { color: var(--text); font-weight: 600; }
+.key-card .reset-line .reset-cd.soon { color: var(--red); }
+.key-card .reset-line .reset-cd.now { color: var(--green); }
+.key-card .reset-line .reset-local { color: var(--dim); font-size: 10px;
+  margin-left: 4px; }
+.key-card .reset-section { margin-top: 6px; padding-top: 6px;
+  border-top: 1px dashed var(--border); }
 .pct-bar-wrap { width: 100%; height: 6px; background: var(--border); border-radius: 3px; margin-top: 4px; overflow: hidden; position: relative; }
 .pct-bar { height: 100%; border-radius: 3px; transition: width .3s, background .3s; }
 .pct-elapsed { position: absolute; top: 0; bottom: 0; width: 2px; border-left: 2px dashed rgba(255,255,255,0.8); background: none; transition: left .3s; z-index: 1; }
@@ -4617,6 +4639,7 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 </div>
 
 <div class="tab-panel active" id="panel-overview">
+  <div id="next-available-banner" class="next-available-banner" style="display:none"></div>
   <div id="key-status" class="key-status"></div>
   <div id="totals" class="grid"></div>
 
@@ -5028,6 +5051,63 @@ function updateStickyBadge(d) {
 }
 
 // --- Key Status ---
+// --- Reset countdown helpers ---
+// Countdown formatter: takes ms-until-reset, returns "in 4h 23m" / "in 2d 6h" / "now".
+// Compact: drops leading zero-units ("4m" not "0h 4m", "2d" not "2d 0h").
+function fmtCountdown(ms) {
+  if (ms <= 0) return 'now';
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (d > 0) return h > 0 ? `${d}d ${h}h` : `${d}d`;
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  if (m > 0) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+// "soon" threshold: under 30 minutes -> red countdown text.
+function cdClass(ms) {
+  if (ms <= 0) return 'now';
+  if (ms < 30 * 60 * 1000) return 'soon';
+  return '';
+}
+// Format an ISO timestamp as the local clock time on that date: "Mon 14:30 (your tz)".
+// Uses Intl.DateTimeFormat so DST/timezone follow the viewer's browser.
+function fmtLocalTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  const day = d.toLocaleDateString(undefined, { weekday: 'short' });
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+  let tz = '';
+  try {
+    const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(d);
+    const tzPart = parts.find(p => p.type === 'timeZoneName');
+    tz = tzPart ? tzPart.value : '';
+  } catch (e) { /* Intl missing */ }
+  return `${day} ${time}${tz ? ' ' + tz : ''}`;
+}
+
+// Single global ticker. Every 1s, walk the DOM for any element with
+// [data-cd-until] and update its text. Much cheaper than per-element timers.
+let _cdTickInterval = null;
+function startCountdownTicker() {
+  if (_cdTickInterval) return;
+  _cdTickInterval = setInterval(() => {
+    const now = Date.now();
+    document.querySelectorAll('[data-cd-until]').forEach(el => {
+      const until = parseInt(el.dataset.cdUntil, 10);
+      const ms = until - now;
+      const txt = fmtCountdown(ms);
+      if (el.textContent !== txt) el.textContent = txt;
+      const cls = cdClass(ms);
+      el.classList.remove('soon', 'now');
+      if (cls) el.classList.add(cls);
+    });
+  }, 1000);
+}
+
 function renderKeyStatus(keys) {
   document.getElementById('key-status').innerHTML = (keys||[]).map(k => {
     const slotPct=Math.round((k.in_flight/k.max_concurrent)*100), periodPct=Math.round((1-k.period_remaining_pct/100)*100);
@@ -5035,11 +5115,24 @@ function renderKeyStatus(keys) {
     const sEl=(k.session_elapsed_pct!=null&&k.session_elapsed_pct>=0)?k.session_elapsed_pct:-1;
     const wEl=(k.weekly_elapsed_pct!=null&&k.weekly_elapsed_pct>=0)?k.weekly_elapsed_pct:-1;
     const cls=k.exhausted?'status-err':k.suspended?'status-warn':'status-ok';
+
+    // Reset countdown lines. Only render when the server actually scraped
+    // a reset time (otherwise leave blank — keys without cookies still show).
+    const sResetIso = k.session_resets_at || null;
+    const wResetIso = k.weekly_resets_at || null;
+    const sResetMs = sResetIso ? new Date(sResetIso).getTime() : null;
+    const wResetMs = wResetIso ? new Date(wResetIso).getTime() : null;
+    const resetBlock = (sResetMs || wResetMs) ? `
+      <div class="reset-section">
+        ${sResetMs ? `<div class="reset-line"><span class="kdim">Session resets</span><span><span class="reset-cd" data-cd-until="${sResetMs}">${escHtml(fmtCountdown(sResetMs - Date.now()))}</span><span class="reset-local">${escHtml(fmtLocalTime(sResetIso))}</span></span></div>` : ''}
+        ${wResetMs ? `<div class="reset-line"><span class="kdim">Weekly resets</span><span><span class="reset-cd" data-cd-until="${wResetMs}">${escHtml(fmtCountdown(wResetMs - Date.now()))}</span><span class="reset-local">${escHtml(fmtLocalTime(wResetIso))}</span></span></div>` : ''}
+      </div>` : '';
+
     const sModels = k.session_models || {};
     const topModels = Object.entries(sModels).sort((a,b)=>(b[1].requests||0)-(a[1].requests||0)).slice(0,3);
     const modelBreakdown = topModels.length ? '<div class="key-row" style="margin-top:6px"><span class="kdim">Top models</span></div>' +
       topModels.map(([mid, md]) => `<div class="key-row" style="font-size:11px"><span class="kdim" style="font-family:monospace">${escHtml(mid)}</span><span>${md.requests||0} req</span></div>`).join('') : '';
-    return `<div class="key-card">
+    return `<div class="key-card ${cls}" data-key-idx="${escHtml(k.token_prefix||k.label)}">
       <div class="key-header"><span class="key-label ${cls}">${k.label}</span><span class="key-plan">${k.plan||'?'}</span></div>
       <div class="key-row"><span class="kdim">Slots</span><span>${k.in_flight}/${k.max_concurrent}</span></div>${pctBar(slotPct,'var(--accent)')}
       <div class="key-row"><span class="kdim">Session</span><span>${sPct<0?'?':sPct.toFixed(1)}%${sEl>=0?' ('+sEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(sPct,sEl,'var(--yellow)')}
@@ -5047,9 +5140,68 @@ function renderKeyStatus(keys) {
       <div class="key-row"><span class="kdim">Billing</span><span>${k.period_remaining_pct?.toFixed(0)}% left</span></div>${pctBar(periodPct,'var(--green)')}
       <div class="key-row"><span class="kdim">Requests</span><span>${k.total_requests}</span></div>
       <div class="key-row"><span class="kdim">429s</span><span>${k.total_429s}</span></div>
+      ${resetBlock}
       ${modelBreakdown}
     </div>`;
   }).join('');
+  startCountdownTicker();
+  renderNextAvailableBanner(keys||[]);
+}
+
+// "Next available sub" banner. Finds the key with the lowest
+// session/weekly usage pct that will reset SOONEST. Used when all subs
+// are exhausted — answers "when is anything usable again?".
+function renderNextAvailableBanner(keys) {
+  const banner = document.getElementById('next-available-banner');
+  if (!banner || !keys.length) return;
+
+  const now = Date.now();
+  // For each key, compute the "earliest time it could become available":
+  //   - If not exhausted/suspended, available NOW (cost 0).
+  //   - If exhausted, the earlier of session_resets_at / weekly_resets_at.
+  const candidates = keys.map(k => {
+    const blocked = !!(k.exhausted || k.suspended || k.session_usage_pct >= 100 || k.weekly_usage_pct >= 100);
+    let availableAt;
+    let reason;
+    if (!blocked) {
+      availableAt = now;
+      reason = 'available now';
+    } else {
+      const sMs = k.session_resets_at ? new Date(k.session_resets_at).getTime() : Infinity;
+      const wMs = k.weekly_resets_at ? new Date(k.weekly_resets_at).getTime() : Infinity;
+      availableAt = Math.min(sMs, wMs);
+      reason = isFinite(sMs) && sMs <= wMs ? 'session reset' : 'weekly reset';
+    }
+    return { key: k, availableAt, reason, blocked };
+  });
+
+  // Pick the soonest available. Tiebreaker: lowest usage pct.
+  candidates.sort((a, b) => {
+    if (a.availableAt !== b.availableAt) return a.availableAt - b.availableAt;
+    const aMax = Math.max(a.key.session_usage_pct || 0, a.key.weekly_usage_pct || 0);
+    const bMax = Math.max(b.key.session_usage_pct || 0, b.key.weekly_usage_pct || 0);
+    return aMax - bMax;
+  });
+  const winner = candidates[0];
+  const allLocked = winner.availableAt > now;
+
+  // Hide banner if everyone is healthy AND at least one is now-available.
+  if (!allLocked) {
+    banner.style.display = 'none';
+    return;
+  }
+
+  const ms = winner.availableAt - now;
+  const localTime = fmtLocalTime(new Date(winner.availableAt).toISOString());
+  const numLocked = candidates.filter(c => c.blocked).length;
+  banner.className = 'next-available-banner all-locked';
+  banner.style.display = 'flex';
+  banner.innerHTML = `
+    <span class="na-label">🔒 All ${numLocked}/${keys.length} subs locked</span>
+    <span class="na-body">Next available: <strong>${escHtml(winner.key.label)}</strong> (${escHtml(winner.reason)})
+      — <span class="na-cd" data-cd-until="${winner.availableAt}">${escHtml(fmtCountdown(ms))}</span>
+      <span class="na-local">at ${escHtml(localTime)}</span>
+    </span>`;
 }
 
 // --- Call Feed ---
