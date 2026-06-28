@@ -4220,6 +4220,11 @@ async def admin_delete_key(key_index: int):
     if not manager or key_index >= len(manager.keys):
         raise HTTPException(status_code=404, detail="key not found")
     removed = manager.keys.pop(key_index)
+    # Also clear cookies from the usage scraper so the deleted key stops
+    # being scraped. Without this, an orphan entry sits in cookie_map
+    # indefinitely and pollutes /admin/status output.
+    if usage_scraper and hasattr(usage_scraper, 'cookie_map') and removed.label in usage_scraper.cookie_map:
+        del usage_scraper.cookie_map[removed.label]
     return {"removed": removed.label, "note": "Remove this key from config.yaml and restart for persistence"}
 
 
