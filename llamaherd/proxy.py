@@ -1953,7 +1953,15 @@ async def lifespan(app: FastAPI):
     if NATIVE_BRIDGE_MODELS:
         log.info(f"Native bridge enabled for models: {NATIVE_BRIDGE_MODELS}")
 
-    usage_db = UsageDB(cfg.get("usage_db", "~/ollama-cloud-proxy/usage.db"))
+    # usage_db resolution: LLAMAHERD_USAGE_DB env > config > LLAMAHERD_DB env
+    # (shared DB) > default. The shared-DB fallback lets deployments use a
+    # single SQLite/libSQL file for both client registry and usage tracking
+    # when remote-DB support is added later.
+    usage_dsn = (os.environ.get("LLAMAHERD_USAGE_DB")
+                 or cfg.get("usage_db")
+                 or os.environ.get("LLAMAHERD_DB")
+                 or "~/ollama-cloud-proxy/usage.db")
+    usage_db = UsageDB(usage_dsn)
     registry = ModelRegistry(manager, upstream_url)
     await registry.start(cfg.get("health_check_interval", 300))
     await registry.refresh()
