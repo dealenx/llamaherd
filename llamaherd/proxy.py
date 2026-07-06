@@ -1545,11 +1545,17 @@ class ModelRegistry:
                                     continue
                                 all_models.setdefault(model_id, []).append(key.token)
                                 current = metadata.setdefault(model_id, {})
+                                created = m.get("created")
+                                modified_at = None
+                                if isinstance(created, (int, float)):
+                                    modified_at = datetime.fromtimestamp(created, tz=timezone.utc).isoformat()
+                                elif isinstance(created, str):
+                                    modified_at = created
                                 current.update({
                                     "id": model_id,
                                     "name": model_id,
                                     "model": model_id,
-                                    "modified_at": m.get("created"),
+                                    "modified_at": modified_at,
                                 })
                         else:
                             log.warning(f"Model list failed for {key.label}: {resp.status_code} (native) / {oai_resp.status_code} (openai)")
