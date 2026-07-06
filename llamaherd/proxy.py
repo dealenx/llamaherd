@@ -3213,20 +3213,21 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
         try:
             async with httpx.AsyncClient(timeout=request_timeout) as client_http:
                 targets = [upstream_url] + upstream_failover
-                resp = None
+                cm = None
                 for up_url in targets:
+                    cm = client_http.stream("POST", f"{up_url}{path}",
+                                            content=body, headers=headers)
                     try:
-                        resp = await client_http.stream("POST", f"{up_url}{path}",
-                                                        content=body, headers=headers)
+                        resp = await cm.__aenter__()
                         break  # got a response — stop trying failover URLs
                     except (httpx.ConnectError, httpx.TimeoutException) as e:
                         log.warning(f"Upstream {up_url} unreachable for {model} (stream): {e}")
+                        await cm.__aexit__(None, None, None)
+                        cm = None
                         if up_url == targets[-1]:
                             raise
                         continue
-                if resp is None:
-                    raise httpx.ConnectError("all upstreams unreachable")
-                async with resp:
+                try:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
                         final_status = 429
@@ -3264,6 +3265,9 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
                                             _update_in_flight_tokens(request_id, None, tokens_out)
                             except (json.JSONDecodeError, IndexError, KeyError):
                                 pass
+                finally:
+                    if cm is not None:
+                        await cm.__aexit__(None, None, None)
         except Exception as e:
             final_status = -1
             error_type = type(e).__name__
