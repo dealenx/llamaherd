@@ -34,7 +34,7 @@
 # --- Proxy settings ---
 host: 127.0.0.1              # Bind address (0.0.0.0 for all interfaces)
 port: 8399                    # Bind port
-upstream: https://ollama.com/v1  # Ollama Cloud upstream URL
+upstream: https://ollama.com/v1  # Ollama Cloud upstream URL (env: LLAMAHERD_UPSTREAM)
 admin_token: "change-me-to-a-secure-random-string"  # Dashboard/API auth
 
 # --- Health check & model refresh ---

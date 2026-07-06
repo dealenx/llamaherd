@@ -531,6 +531,7 @@ def build_parser():
     serve = sub.add_parser("serve", help="Start the proxy server")
     serve.add_argument("--log-level", choices=["debug", "info", "warning", "error"], default="info")
     serve.add_argument("--admin-token", default=None, help="Override admin token from config")
+    serve.add_argument("--upstream", default=None, help="Override upstream Ollama/OpenAI-compatible URL from config")
 
     return parser
 
@@ -551,6 +552,8 @@ def main():
             os.environ["LLAMAHERD_HOST"] = args.host
         if args.port:
             os.environ["LLAMAHERD_PORT"] = str(args.port)
+        if args.upstream:
+            os.environ["LLAMAHERD_UPSTREAM"] = args.upstream
         proxy_main()
     elif hasattr(args, "func"):
         args.func(args)

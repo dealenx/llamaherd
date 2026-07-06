@@ -83,7 +83,7 @@ CONFIG_DIR = CONFIG_PATH.parent if CONFIG_PATH else Path.cwd()
 DEFAULT_CONFIG = {
     "host": os.environ.get("LLAMAHERD_HOST", "127.0.0.1"),
     "port": int(os.environ.get("LLAMAHERD_PORT", "8399")),
-    "upstream": "https://ollama.com/v1",
+    "upstream": os.environ.get("LLAMAHERD_UPSTREAM", "https://ollama.com/v1"),
     "admin_token": os.environ.get("LLAMAHERD_ADMIN_TOKEN", ""),
     "keys": [],
     "clients": [],
@@ -2584,6 +2584,8 @@ async def lifespan(app: FastAPI):
         cfg["host"] = os.environ["LLAMAHERD_HOST"]
     if os.environ.get("LLAMAHERD_PORT"):
         cfg["port"] = int(os.environ["LLAMAHERD_PORT"])
+    if os.environ.get("LLAMAHERD_UPSTREAM"):
+        cfg["upstream"] = os.environ["LLAMAHERD_UPSTREAM"]
     admin_token = cfg.get("admin_token", "")
     if not admin_token:
         log.warning("admin_token not set in config — admin endpoints will be inaccessible")
@@ -6667,6 +6669,8 @@ def main():
         cfg["host"] = os.environ["LLAMAHERD_HOST"]
     if os.environ.get("LLAMAHERD_PORT"):
         cfg["port"] = int(os.environ["LLAMAHERD_PORT"])
+    if os.environ.get("LLAMAHERD_UPSTREAM"):
+        cfg["upstream"] = os.environ["LLAMAHERD_UPSTREAM"]
 
     host = cfg.get("host", "127.0.0.1")
     port = cfg.get("port", 8399)
