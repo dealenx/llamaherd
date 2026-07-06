@@ -4901,6 +4901,12 @@ async def admin_test_model(request: Request):
     Uses the first registered client key for attribution. Returns the model
     response, latency, and status so the dashboard can display it inline.
     Body: {"model": "glm-5", "prompt": "2+2"}
+
+    Streams tokens back to the browser as SSE (Server-Sent Events) so the
+    dashboard can display them in real time. Each SSE event is a JSON object:
+      {"type":"token","content":"..."}    — a content delta
+      {"type":"done","status":200,"elapsed_ms":123,"usage":{...}}
+      {"type":"error","status":502,"error":"..."}
     """
     body = await request.json()
     model = body.get("model")
@@ -4925,35 +4931,54 @@ async def admin_test_model(request: Request):
         raise HTTPException(status_code=503, detail="no client keys registered")
     client_token = clients_list[0]["token"]
 
-    start = time.time()
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as cx:
-            r = await cx.post(
-                f"http://{request.headers.get('host', '127.0.0.1:8399')}/v1/chat/completions",
-                headers={"Authorization": f"Bearer {client_token}", "Content-Type": "application/json"},
-                json={"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},
-            )
-        elapsed_ms = int((time.time() - start) * 1000)
-        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"raw": r.text[:500]}
-        return {
-            "status": r.status_code,
-            "elapsed_ms": elapsed_ms,
-            "model": model,
-            "prompt": prompt,
-            "response": data,
-        }
-    except httpx.TimeoutException:
-        elapsed_ms = int((time.time() - start) * 1000)
-        return {"status": 504, "elapsed_ms": elapsed_ms, "model": model, "prompt": prompt,
-                "error": "Request timed out (120s). The model may be unavailable, overloaded, or loading."}
-    except httpx.ConnectError as e:
-        elapsed_ms = int((time.time() - start) * 1000)
-        return {"status": 502, "elapsed_ms": elapsed_ms, "model": model, "prompt": prompt,
-                "error": f"Connection error: {e}"}
-    except Exception as e:
-        elapsed_ms = int((time.time() - start) * 1000)
-        return {"status": 500, "elapsed_ms": elapsed_ms, "model": model, "prompt": prompt,
-                "error": str(e)}
+    async def stream_test():
+        start = time.time()
+        usage_data = None
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as cx:
+                async with cx.stream(
+                    "POST",
+                    f"http://{request.headers.get('host', '127.0.0.1:8399')}/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {client_token}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "user", "content": prompt}], "stream": True},
+                ) as r:
+                    if r.status_code >= 400:
+                        text = await r.aread()
+                        elapsed_ms = int((time.time() - start) * 1000)
+                        yield f"data: {json.dumps({'type': 'error', 'status': r.status_code, 'elapsed_ms': elapsed_ms, 'error': text.decode('utf-8', errors='replace')[:500]})}\n\n"
+                        return
+                    async for line in r.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            continue
+                        try:
+                            chunk = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = chunk.get("choices") or []
+                        if choices:
+                            delta = choices[0].get("delta") or {}
+                            content = delta.get("content")
+                            if content:
+                                yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                        chunk_usage = chunk.get("usage")
+                        if chunk_usage and chunk_usage.get("total_tokens", 0) > 0:
+                            usage_data = chunk_usage
+                    elapsed_ms = int((time.time() - start) * 1000)
+                    yield f"data: {json.dumps({'type': 'done', 'status': 200, 'elapsed_ms': elapsed_ms, 'usage': usage_data})}\n\n"
+        except httpx.TimeoutException:
+            elapsed_ms = int((time.time() - start) * 1000)
+            yield f"data: {json.dumps({'type': 'error', 'status': 504, 'elapsed_ms': elapsed_ms, 'error': 'Request timed out (120s). The model may be unavailable, overloaded, or loading.'})}\n\n"
+        except httpx.ConnectError as e:
+            elapsed_ms = int((time.time() - start) * 1000)
+            yield f"data: {json.dumps({'type': 'error', 'status': 502, 'elapsed_ms': elapsed_ms, 'error': f'Connection error: {e}'})}\n\n"
+        except Exception as e:
+            elapsed_ms = int((time.time() - start) * 1000)
+            yield f"data: {json.dumps({'type': 'error', 'status': 500, 'elapsed_ms': elapsed_ms, 'error': str(e)})}\n\n"
+
+    return StreamingResponse(stream_test(), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------------------
@@ -5927,37 +5952,67 @@ async function testModel(modelId, btn) {
     if (ld) ld.innerHTML = '<span class="spinner"></span>Sending test prompt "2+2" to ' + escHtml(modelId) + '... (' + elapsed + 's)';
   }, 200);
   try {
-    const r = await postJSON('/admin/test-model', { model: modelId, prompt: '2+2' });
+    const resp = await fetch('/admin/test-model?token=' + encodeURIComponent(ADMIN_TOKEN), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelId, prompt: '2+2' }),
+    });
     clearInterval(timerInterval);
-    const cls = r.status === 200 ? 'ok' : 'err';
-    resultDiv.className = 'test-result ' + cls;
-    let content = '';
-    let metaParts = ['Status ' + r.status, r.elapsed_ms + 'ms', escHtml(modelId)];
-    if (r.error) {
-      content = r.error;
-      if (r.status === 504) {
-        content = 'Request timed out after 120 seconds. The model may be unavailable or overloaded.';
-      } else if (r.status === 404) {
-        content = r.error;
-      } else if (r.status === 502) {
-        content = r.error;
-      } else if (r.status === 500 && r.error.includes('Connection')) {
-        content = 'Could not connect to upstream. Check that Ollama API keys are configured.';
-      }
-    } else if (r.response && r.response.choices && r.response.choices[0]) {
-      content = r.response.choices[0].message.content || '(empty response)';
-      const usage = r.response.usage;
-      if (usage) {
-        content += '\n\ntokens: ' + usage.total_tokens + ' (in:' + usage.prompt_tokens + ' out:' + usage.completion_tokens + ')';
-      }
-    } else if (r.response && r.response.error) {
-      content = 'Upstream error: ' + (typeof r.response.error === 'string' ? r.response.error : JSON.stringify(r.response.error));
-    } else if (r.status === 500) {
-      content = 'Internal server error. The model may not be available on any configured key. Check that upstream Ollama Cloud keys are valid.';
-    } else {
-      content = JSON.stringify(r.response, null, 2).slice(0, 500);
+    const contentType = resp.headers.get('content-type') || '';
+    // Non-streaming fallback (e.g. 404 model-not-found returns JSON)
+    if (!contentType.includes('text/event-stream')) {
+      const r = await resp.json();
+      const cls = r.status === 200 ? 'ok' : 'err';
+      resultDiv.className = 'test-result ' + cls;
+      let content = r.error || JSON.stringify(r.response, null, 2).slice(0, 500);
+      const metaParts = ['Status ' + r.status, r.elapsed_ms + 'ms', escHtml(modelId)];
+      resultDiv.innerHTML = '<div class="tr-meta">' + metaParts.join(' · ') + '</div><div class="tr-content">' + escHtml(content) + '</div>';
+      return;
     }
-    resultDiv.innerHTML = '<div class="tr-meta">' + metaParts.join(' · ') + '</div><div class="tr-content">' + escHtml(content) + '</div>';
+    // Streaming: read SSE tokens in real time
+    resultDiv.className = 'test-result ok';
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let content = '';
+    let metaParts = [escHtml(modelId)];
+    let finalStatus = 200;
+    let finalError = null;
+    resultDiv.innerHTML = '<div class="tr-meta">Streaming…</div><div class="tr-content"></div>';
+    const contentEl = resultDiv.querySelector('.tr-content');
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload) continue;
+        try {
+          const ev = JSON.parse(payload);
+          if (ev.type === 'token') {
+            content += ev.content;
+            contentEl.textContent = content;
+          } else if (ev.type === 'done') {
+            finalStatus = ev.status;
+            const elapsed = ev.elapsed_ms + 'ms';
+            const tokInfo = ev.usage ? ' · tokens: ' + ev.usage.total_tokens + ' (in:' + ev.usage.prompt_tokens + ' out:' + ev.usage.completion_tokens + ')' : '';
+            metaParts = ['Status ' + ev.status, elapsed, escHtml(modelId) + tokInfo];
+          } else if (ev.type === 'error') {
+            finalStatus = ev.status;
+            finalError = ev.error;
+          }
+        } catch (e) { /* ignore malformed */ }
+      }
+    }
+    if (finalError) {
+      resultDiv.className = 'test-result err';
+      resultDiv.innerHTML = '<div class="tr-meta">' + metaParts.join(' · ') + '</div><div class="tr-content">' + escHtml(finalError) + '</div>';
+    } else {
+      resultDiv.innerHTML = '<div class="tr-meta">' + metaParts.join(' · ') + '</div><div class="tr-content">' + escHtml(content || '(empty response)') + '</div>';
+    }
   } catch (e) {
     clearInterval(timerInterval);
     resultDiv.className = 'test-result err';
