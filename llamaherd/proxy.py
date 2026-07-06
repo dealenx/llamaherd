@@ -84,6 +84,7 @@ DEFAULT_CONFIG = {
     "host": os.environ.get("LLAMAHERD_HOST", "127.0.0.1"),
     "port": int(os.environ.get("LLAMAHERD_PORT", "8399")),
     "upstream": os.environ.get("LLAMAHERD_UPSTREAM", "https://ollama.com/v1"),
+    "upstream_failover": [],
     "admin_token": os.environ.get("LLAMAHERD_ADMIN_TOKEN", ""),
     "keys": [],
     "clients": [],
@@ -1506,6 +1507,7 @@ class ModelRegistry:
         metadata: dict[str, dict] = dict(self.model_metadata)
         native_base = self._native_base()
         async with httpx.AsyncClient(timeout=30) as client:
+            openai_base = self.upstream.rstrip("/")
             for key in self.manager.keys:
                 try:
                     resp = await client.get(
@@ -1530,7 +1532,27 @@ class ModelRegistry:
                                 "details": m.get("details") or current.get("details") or {},
                             })
                     else:
-                        log.warning(f"Model list failed for {key.label}: {resp.status_code}")
+                        # Fallback: try OpenAI-compatible /v1/models (e.g. mirrors without /api/tags)
+                        oai_resp = await client.get(
+                            f"{openai_base}/models",
+                            headers={"Authorization": f"Bearer {key.token}"},
+                        )
+                        if oai_resp.status_code == 200:
+                            data = oai_resp.json()
+                            for m in data.get("data", []):
+                                model_id = m.get("id") or ""
+                                if not model_id:
+                                    continue
+                                all_models.setdefault(model_id, []).append(key.token)
+                                current = metadata.setdefault(model_id, {})
+                                current.update({
+                                    "id": model_id,
+                                    "name": model_id,
+                                    "model": model_id,
+                                    "modified_at": m.get("created"),
+                                })
+                        else:
+                            log.warning(f"Model list failed for {key.label}: {resp.status_code} (native) / {oai_resp.status_code} (openai)")
                 except Exception as e:
                     log.warning(f"Model list error for {key.label}: {e}")
 
@@ -2381,6 +2403,7 @@ usage_scraper: Optional[UsageScraper] = None
 telegram_notifier: Optional[TelegramNotifier] = None
 fallback_provider: Optional[FallbackProvider] = None
 upstream_url: str = ""
+upstream_failover: list[str] = []
 retry_on_429: bool = True
 max_retries: int = 2
 queue_timeout: int = 60
@@ -2572,7 +2595,7 @@ def _verify_admin(request: Request) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global manager, key_registry, registry, usage_db, client_registry, usage_scraper, telegram_notifier, fallback_provider, sticky
-    global upstream_url, retry_on_429, max_retries, queue_timeout, request_timeout
+    global upstream_url, upstream_failover, retry_on_429, max_retries, queue_timeout, request_timeout
     global admin_token, NATIVE_BRIDGE_MODELS, reject_unknown_models
 
     cfg = load_config()
@@ -2606,6 +2629,7 @@ async def lifespan(app: FastAPI):
                                      auth_token=db_auth_token, auth_user=db_auth_user)
     sticky = StickySessionManager(ttl_seconds=cfg.get("sticky_ttl_seconds", 3600))
     upstream_url = cfg.get("upstream", "https://ollama.com/v1")
+    upstream_failover = cfg.get("upstream_failover", []) or []
     retry_on_429 = cfg.get("retry_on_429", True)
     max_retries = cfg.get("max_retries", 2)
     queue_timeout = cfg.get("queue_timeout", 60)
@@ -3072,11 +3096,23 @@ async def _proxy_request(request: Request, path: str) -> Response:
                 return await _proxy_stream(client_id, key, path, headers, body, model, start, request_id, session_id=session_id)
 
             async with httpx.AsyncClient(timeout=request_timeout) as client_http:
-                resp = await client_http.post(
-                    f"{upstream_url}{path}",
-                    content=body,
-                    headers=headers,
-                )
+                targets = [upstream_url] + upstream_failover
+                resp = None
+                for up_url in targets:
+                    try:
+                        resp = await client_http.post(
+                            f"{up_url}{path}",
+                            content=body,
+                            headers=headers,
+                        )
+                        break  # got a response — stop trying failover URLs
+                    except (httpx.ConnectError, httpx.TimeoutException) as e:
+                        log.warning(f"Upstream {up_url} unreachable for {model}: {e}")
+                        if up_url == targets[-1]:
+                            raise  # last target — re-raise so outer except handles it
+                        continue
+                if resp is None:
+                    raise httpx.ConnectError("all upstreams unreachable")
 
             elapsed_ms = int((time.time() - start) * 1000)
 
@@ -3170,8 +3206,21 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
         final_status = 200
         try:
             async with httpx.AsyncClient(timeout=request_timeout) as client_http:
-                async with client_http.stream("POST", f"{upstream_url}{path}",
-                                              content=body, headers=headers) as resp:
+                targets = [upstream_url] + upstream_failover
+                resp = None
+                for up_url in targets:
+                    try:
+                        resp = await client_http.stream("POST", f"{up_url}{path}",
+                                                        content=body, headers=headers)
+                        break  # got a response — stop trying failover URLs
+                    except (httpx.ConnectError, httpx.TimeoutException) as e:
+                        log.warning(f"Upstream {up_url} unreachable for {model} (stream): {e}")
+                        if up_url == targets[-1]:
+                            raise
+                        continue
+                if resp is None:
+                    raise httpx.ConnectError("all upstreams unreachable")
+                async with resp:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
                         final_status = 429
