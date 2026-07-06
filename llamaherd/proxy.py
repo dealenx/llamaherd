@@ -2573,13 +2573,13 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
             if end_data is not None:
                 asyncio.ensure_future(broadcaster.broadcast("request_end", end_data))
             if manager:
-                asyncio.ensure_future(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url}))
+                asyncio.ensure_future(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url, "upstream_failover": upstream_failover}))
         else:
             loop.run_until_complete(broadcaster.broadcast("call", call_data))
             if end_data is not None:
                 loop.run_until_complete(broadcaster.broadcast("request_end", end_data))
             if manager:
-                loop.run_until_complete(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url}))
+                loop.run_until_complete(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url, "upstream_failover": upstream_failover}))
     except RuntimeError:
         pass  # No event loop — skip broadcast
 
@@ -4275,6 +4275,7 @@ async def admin_status():
         "models": len(registry.models) if registry else 0,
         "last_refresh": registry.last_refresh if registry else 0,
         "upstream": upstream_url,
+        "upstream_failover": upstream_failover,
         "clients": client_registry.clients if client_registry else [],
         "sticky_sessions": sticky.get_status() if sticky else {},
         "sticky_ttl_seconds": sticky.ttl if sticky else None,
@@ -5119,6 +5120,7 @@ async def admin_events(request: Request, token: str = None):
                 "models": len(registry.models) if registry else 0,
                 "last_refresh": registry.last_refresh if registry else 0,
                 "upstream": upstream_url,
+                "upstream_failover": upstream_failover,
                 "clients": client_registry.clients if client_registry else [],
             }
             yield f"event: status\ndata: {json.dumps(status_data)}\n\n"
@@ -5244,6 +5246,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Ar
 h1 { font-size: 22px; margin-bottom: 4px; }
 .brandline { color: #f2d6a2; font-size: 13px; margin-bottom: 10px; }
 .subtitle { color: var(--dim); font-size: 13px; margin-bottom: 20px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.upstream-failover { color: var(--dim); font-size: 11px; opacity: 0.8; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 24px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 .card .label { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
@@ -5439,6 +5442,7 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 <p class="brandline">One endpoint. Many llamas. Smarter routing.</p>
 <p class="subtitle">
   <span id="upstream-url"></span>
+  <span id="upstream-failover" class="upstream-failover" style="display:none"></span>
   <span class="sse-dot" id="sse-dot"></span>
   <span id="sse-label" style="font-size:11px">connecting...</span>
   <span class="date-range">
@@ -5676,12 +5680,23 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', funct
 // --- SSE ---
 let eventSource = null, reconnectDelay = 1000, feedCalls = [];
 
+function renderUpstreamFailover(list) {
+  const el = document.getElementById('upstream-failover');
+  if (!el) return;
+  if (list && list.length) {
+    el.textContent = '⤴ failover: ' + list.join(', ');
+    el.style.display = 'inline';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
 function connectSSE() {
   const url = `${window.location.protocol}//${window.location.host}${API}/admin/events?token=${encodeURIComponent(ADMIN_TOKEN)}`;
   eventSource = new EventSource(url);
   eventSource.onopen = () => { reconnectDelay=1000; document.getElementById('sse-dot').className='sse-dot ok'; document.getElementById('sse-label').textContent='live'; };
   eventSource.onerror = () => { document.getElementById('sse-dot').className='sse-dot off'; document.getElementById('sse-label').textContent='reconnecting...'; eventSource.close(); setTimeout(connectSSE,reconnectDelay); reconnectDelay=Math.min(reconnectDelay*2,30000); };
-  eventSource.addEventListener('status', e => { const d=JSON.parse(e.data); renderKeyStatus(d.keys||[]); document.getElementById('upstream-url').textContent=d.upstream||''; updateStickyBadge(d); });
+  eventSource.addEventListener('status', e => { const d=JSON.parse(e.data); renderKeyStatus(d.keys||[]); document.getElementById('upstream-url').textContent=d.upstream||''; renderUpstreamFailover(d.upstream_failover||[]); updateStickyBadge(d); });
   eventSource.addEventListener('models', e => updateModelInfo(JSON.parse(e.data)));
   eventSource.onmessage = e => {
     try {
@@ -5689,7 +5704,7 @@ function connectSSE() {
       if(m.type==='call') { if(callInCurrentRange(m.data)) schedulePeriodRefresh(); }
       else if(m.type==='request_start') { addInFlight(m.data); }
       else if(m.type==='request_end') { addCallToFeed(m.data); removeInFlight(m.data); }
-      else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; updateStickyBadge(d); }
+      else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; renderUpstreamFailover(d.upstream_failover||[]); updateStickyBadge(d); }
       else if(m.type==='models') updateModelInfo(m.data||{});
       else if(m.type==='fallback_priority') { const sel=document.getElementById('fb-priority'); if(m.data && m.data.priority) sel.value = m.data.priority; }
       else if(m.type==='fallback_map_update') { loadFallbackStatus(); if (catalogLoaded) loadCatalog(true); }
