@@ -1537,6 +1537,11 @@ class UsageDB:
 
             # Strip :cloud suffix for lookup
             lookup_key = model_raw.replace(":cloud", "").replace(":cloud-", "-")
+            # Resolve model aliases (e.g. glm-5.2-256k → glm-5.2) so cost
+            # attribution inherits the upstream model's pricing.
+            if model_alias_manager and model_alias_manager.is_alias(lookup_key):
+                upstream, _ = model_alias_manager.resolve(lookup_key)
+                lookup_key = upstream
             p = pricing.get(lookup_key) or pricing.get(model_raw)
 
             if p:
