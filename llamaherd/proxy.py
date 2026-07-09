@@ -1045,37 +1045,130 @@ class KeyManager:
                 except Exception as e:
                     log.warning(f"Sub poll error for {key.label}: {e}")
 
+    # Routing thresholds for weekly-aware selection. Tuned for the common case
+    # where one or more subs are already over weekly pace and a fresher sub
+    # should absorb traffic until its own capacity is full.
+    WEEKLY_HARD_LIMIT = 99.0          # near-hard weekly cap — last resort only
+    WEEKLY_NEAR_BEST_PP = 20.0        # prefer keys within this many pp of the best weekly
+    WEEKLY_LOW_ABSOLUTE = 40.0        # always treat absolute weekly under this as preferred
+    WEEKLY_PACE_FACTOR = 1.15         # under-pace if weekly <= elapsed * factor
+    STICKY_REBIND_WEEKLY_MARGIN = 5.0 # do not re-pin sticky onto a much worse weekly key
+
+    @staticmethod
+    def _weekly_pct(k: "KeyState") -> float:
+        """Normalized weekly usage; unknown (-1) sorts last as 999."""
+        return k.weekly_usage_pct if k.weekly_usage_pct >= 0 else 999.0
+
+    @staticmethod
+    def _session_pct(k: "KeyState") -> float:
+        return k.session_usage_pct if k.session_usage_pct >= 0 else 999.0
+
+    def _is_preferred_weekly(self, k: "KeyState", min_weekly: float) -> bool:
+        """Whether *k* belongs in the preferred (fresh-weekly) pool.
+
+        Prefer keys that are under weekly pace, close to the best available
+        weekly usage, or still have large absolute weekly headroom. This keeps
+        traffic on a fresh Sub N while older subs are already over weekly.
+        """
+        w = self._weekly_pct(k)
+        if w >= self.WEEKLY_HARD_LIMIT:
+            return False
+        if w <= min_weekly + self.WEEKLY_NEAR_BEST_PP:
+            return True
+        if w < self.WEEKLY_LOW_ABSOLUTE:
+            return True
+        elapsed = k._weekly_elapsed_pct()
+        if elapsed >= 0 and w <= max(elapsed * self.WEEKLY_PACE_FACTOR, elapsed + 5.0):
+            return True
+        return False
+
+    def _select_from_candidates(self, candidates: list["KeyState"]) -> "KeyState":
+        """Pick best key from available candidates.
+
+        Policy (Jul 2026 — balance under-weekly subs before burning over-weekly):
+        1. Soft-exclude keys at/near weekly hard limit unless nothing else.
+        2. Build a preferred pool of under-weekly / near-best-weekly keys.
+        3. Load-balance by in_flight *inside* that pool so multi-thread capacity
+           still spreads when multiple fresh keys exist.
+        4. Spill to over-weekly keys only when the preferred pool has no slots.
+        """
+        usable = [k for k in candidates if self._weekly_pct(k) < self.WEEKLY_HARD_LIMIT]
+        if not usable:
+            usable = list(candidates)
+
+        min_weekly = min(self._weekly_pct(k) for k in usable)
+        preferred = [k for k in usable if self._is_preferred_weekly(k, min_weekly)]
+        pool = preferred if preferred else usable
+
+        pool.sort(key=lambda k: (
+            k.in_flight,
+            self._weekly_pct(k),
+            self._session_pct(k),
+            k.cycle_freshness,
+            k.total_tokens,
+        ))
+        return pool[0]
+
+    def key_by_token(self, token: Optional[str]) -> Optional["KeyState"]:
+        if not token:
+            return None
+        for k in self.keys:
+            if k.token == token:
+                return k
+        return None
+
+    def should_rebind_sticky(self, prev_token: Optional[str], new_key: "KeyState") -> bool:
+        """Whether sticky mapping should move from *prev_token* to *new_key*.
+
+        Temporary spills (sticky sub at max concurrent / short 429 cooldown)
+        must NOT permanently re-pin the session onto an over-weekly sub.
+        Keep the original sticky when it still has weekly headroom and is only
+        temporarily unavailable; rebind only when the previous key is gone,
+        hard-exhausted, near weekly cap, or the new key is not worse on weekly.
+        """
+        if not prev_token:
+            return True
+        if new_key.token == prev_token:
+            return True  # refresh TTL on same key
+
+        prev = self.key_by_token(prev_token)
+        if prev is None:
+            return True
+        if prev.suspended:
+            return True
+        # Long exhaustion (402-style) or near weekly hard limit → rebind OK
+        if prev.exhausted and (prev.exhausted_until - time.time()) > 120:
+            return True
+        if self._weekly_pct(prev) >= self.WEEKLY_HARD_LIMIT:
+            return True
+        # Temporary alternate onto a worse-weekly key: keep original sticky
+        if self._weekly_pct(new_key) > self._weekly_pct(prev) + self.STICKY_REBIND_WEEKLY_MARGIN:
+            return False
+        return True
+
     async def acquire(self, prefer_key: Optional[str] = None, sticky_key: Optional[str] = None) -> Optional[KeyState]:
         async with self._lock:
             # Sticky key takes precedence for cache affinity (even if higher load)
             if sticky_key:
                 for k in self.keys:
-                    if k.token == sticky_key and k.available_slots > 0:
+                    if k.token == sticky_key and not k.suspended and k.available_slots > 0:
                         k.in_flight += 1
                         return k
-                # Sticky key exhausted or unavailable — will fall through to normal selection
-                # Caller should clear the sticky session on error paths
+                # Sticky key exhausted or unavailable — fall through to free select.
+                # Caller must use should_rebind_sticky() so temporary spills do not
+                # permanently re-pin onto an over-weekly sub.
 
             if prefer_key:
                 for k in self.keys:
-                    if k.token == prefer_key and k.available_slots > 0:
+                    if k.token == prefer_key and not k.suspended and k.available_slots > 0:
                         k.in_flight += 1
                         return k
 
-            candidates = [k for k in self.keys if k.available_slots > 0]
+            candidates = [k for k in self.keys if not k.suspended and k.available_slots > 0]
             if not candidates:
                 return None
 
-            # Least-connections with usage awareness:
-            # Spread concurrent load first (in_flight), then prefer less-used keys
-            candidates.sort(key=lambda k: (
-                k.in_flight,
-                k.weekly_usage_pct if k.weekly_usage_pct >= 0 else 999,
-                k.session_usage_pct if k.session_usage_pct >= 0 else 999,
-                k.cycle_freshness,
-                k.total_tokens,
-            ))
-            best = candidates[0]
+            best = self._select_from_candidates(candidates)
             best.in_flight += 1
             return best
 
@@ -1550,6 +1643,76 @@ class ModelRegistry:
             return matching[0]
         # Available on 0 or 2+ keys — let acquire() decide by load
         return None
+
+
+# ---------------------------------------------------------------------------
+# Model Alias Manager — presents Ollama Cloud models under alternate names
+# with overridden context_length.  Requests for an alias are transparently
+# rewritten to the upstream model before forwarding; usage is logged under
+# the alias name so the dashboard attributes tokens correctly.
+# ---------------------------------------------------------------------------
+
+class ModelAliasManager:
+    """Manage model aliases (e.g. glm-5.2-256k → glm-5.2 with ctx=262144).
+
+    Config format (in config.yaml)::
+
+        model_aliases:
+          - alias: glm-5.2-256k
+            upstream_model: glm-5.2
+            context_length: 262144
+          - alias: glm-5.2-128k
+            upstream_model: glm-5.2
+            context_length: 131072
+
+    Aliases are purely client-facing: the proxy rewrites ``req_json["model"]``
+    to ``upstream_model`` before forwarding to Ollama Cloud.  The alias name
+    is kept for usage tracking and displayed in /v1/models with the overridden
+    context_length.
+    """
+
+    def __init__(self, entries: list[dict] | None = None):
+        self._aliases: dict[str, dict] = {}
+        if entries:
+            for e in entries:
+                alias = (e.get("alias") or "").strip()
+                upstream = (e.get("upstream_model") or "").strip()
+                if not alias or not upstream:
+                    continue
+                self._aliases[alias] = {
+                    "upstream_model": upstream,
+                    "context_length": int(e["context_length"]) if e.get("context_length") else None,
+                }
+
+    def resolve(self, model: str) -> tuple[str, Optional[int]]:
+        """If *model* is an alias, return (upstream_model, context_length_override).
+
+        If not an alias, return (model, None) unchanged.
+        """
+        entry = self._aliases.get(model)
+        if entry:
+            return entry["upstream_model"], entry["context_length"]
+        return model, None
+
+    def is_alias(self, model: str) -> bool:
+        return model in self._aliases
+
+    @property
+    def aliases(self) -> dict[str, dict]:
+        """Read-only view of all alias entries."""
+        return dict(self._aliases)
+
+    def alias_entries(self) -> list[dict]:
+        """Return alias metadata for /v1/models and /api/tags."""
+        out = []
+        for alias, entry in sorted(self._aliases.items()):
+            out.append({
+                "alias": alias,
+                "upstream_model": entry["upstream_model"],
+                "context_length": entry["context_length"],
+            })
+        return out
+
 
 # ---------------------------------------------------------------------------
 # Fallback Provider — secondary upstream (e.g. NVIDIA Build) for unmapped or
@@ -2124,6 +2287,14 @@ class UsageDB:
                 upstream, _ = model_alias_manager.resolve(lookup_key)
                 lookup_key = upstream
             p = pricing.get(lookup_key) or pricing.get(model_raw)
+            # Fallback: strip -NNNk / -NNNm context suffixes from old alias
+            # names (e.g. glm-5.2-256k → glm-5.2) so historical usage rows
+            # still resolve to the base model's pricing after alias renames.
+            if not p:
+                import re as _re
+                m = _re.match(r'^(.+)-(\d+[kmb])$', lookup_key, _re.IGNORECASE)
+                if m:
+                    p = pricing.get(m.group(1))
 
             if p:
                 in_cost = tokens_in / 1_000_000 * p.get("input_per_1m", 0)
@@ -2326,6 +2497,7 @@ client_registry: Optional[ClientRegistry] = None
 usage_scraper: Optional[UsageScraper] = None
 telegram_notifier: Optional[TelegramNotifier] = None
 fallback_provider: Optional[FallbackProvider] = None
+model_alias_manager: Optional[ModelAliasManager] = None
 upstream_url: str = ""
 retry_on_429: bool = True
 max_retries: int = 2
@@ -2517,7 +2689,7 @@ def _verify_admin(request: Request) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, key_registry, registry, usage_db, client_registry, usage_scraper, telegram_notifier, fallback_provider, sticky
+    global manager, key_registry, registry, usage_db, client_registry, usage_scraper, telegram_notifier, fallback_provider, model_alias_manager, sticky
     global upstream_url, retry_on_429, max_retries, queue_timeout, request_timeout
     global admin_token, NATIVE_BRIDGE_MODELS, reject_unknown_models
 
@@ -2602,6 +2774,10 @@ async def lifespan(app: FastAPI):
         log.info("Telegram notifications not configured (set LLAMAHERD_TELEGRAM_TOKEN + LLAMAHERD_TELEGRAM_CHAT_ID to enable)")
     # Fallback provider (NVIDIA Build, etc.)
     fallback_provider = FallbackProvider(cfg.get("fallback") or {})
+    # Model aliases (client-facing alternate names with context_length overrides)
+    model_alias_manager = ModelAliasManager(cfg.get("model_aliases") or [])
+    if model_alias_manager.aliases:
+        log.info(f"Model aliases configured: {list(model_alias_manager.aliases.keys())}")
     fb_metadata_task: Optional[asyncio.Task] = None
     if fallback_provider.enabled:
         # Best-effort discovery — don't block startup if it's slow.
@@ -2885,6 +3061,19 @@ async def _proxy_request(request: Request, path: str) -> Response:
     is_stream = req_json.get("stream", False)
     model = req_json.get("model", "unknown")
 
+    # --- Model alias resolution ---
+    # If the requested model is an alias (e.g. "glm-5.2-256k"), rewrite the
+    # request body to use the upstream model name (e.g. "glm-5.2") before
+    # forwarding to Ollama Cloud.  The alias name is kept in the local
+    # `model` variable for usage tracking and logging.  `resolved_model`
+    # is what we use for registry/fallback lookups.
+    resolved_model = model
+    if model_alias_manager and model_alias_manager.is_alias(model):
+        resolved_model, _ctx_override = model_alias_manager.resolve(model)
+        req_json["model"] = resolved_model
+        body = json.dumps(req_json).encode()
+        log.info(f"Alias: {model} → {resolved_model} (client={client_id})")
+
     # Inject stream_options.include_usage = True for streaming requests
     # so upstream returns the real token count in the final chunk
     if is_stream and "stream_options" not in req_json:
@@ -2903,11 +3092,11 @@ async def _proxy_request(request: Request, path: str) -> Response:
     has_fallback = bool(fp and fp.enabled)
     # Strip :cloud suffix for registry lookup — Ollama Cloud may report
     # model names without :cloud, but clients request "model:cloud".
-    model_base = model.replace(":cloud", "").replace(":cloud-", "-")
-    ollama_has_model = bool(registry and (registry.models.get(model) or registry.models.get(model_base)))
-    fp_mapped = bool(has_fallback and fp.resolve_model(model))
-    fp_can_serve = bool(has_fallback and (fp.resolve_model(model) or fp.default_model))
-    priority = fp.priority_for(model) if has_fallback else "after"
+    model_base = resolved_model.replace(":cloud", "").replace(":cloud-", "-")
+    ollama_has_model = bool(registry and (registry.models.get(resolved_model) or registry.models.get(model_base)))
+    fp_mapped = bool(has_fallback and fp.resolve_model(resolved_model))
+    fp_can_serve = bool(has_fallback and (fp.resolve_model(resolved_model) or fp.default_model))
+    priority = fp.priority_for(resolved_model) if has_fallback else "after"
 
     # Reject unknown models: when reject_unknown_models is true, models
     # that aren't known to Ollama AND aren't in the fallback model_map
@@ -2923,15 +3112,15 @@ async def _proxy_request(request: Request, path: str) -> Response:
         now = time.time()
         if now - _LAST_DISCOVERY_REFRESH > 60.0:
             try:
-                log.info(f"Unknown model '{model}' requested — triggering immediate registry refresh + pricing sync")
+                log.info(f"Unknown model '{resolved_model}' requested — triggering immediate registry refresh + pricing sync")
                 _LAST_DISCOVERY_REFRESH = now
                 await registry.refresh()
                 await _sync_pricing_from_openrouter()
                 # Re-check after refresh
-                ollama_has_model = bool(registry.models.get(model) or registry.models.get(model_base))
-                fp_mapped = bool(fp and fp.enabled and fp.resolve_model(model))
+                ollama_has_model = bool(registry.models.get(resolved_model) or registry.models.get(model_base))
+                fp_mapped = bool(fp and fp.enabled and fp.resolve_model(resolved_model))
             except Exception as e:
-                log.warning(f"Immediate discovery refresh failed for '{model}': {e}")
+                log.warning(f"Immediate discovery refresh failed for '{resolved_model}': {e}")
 
     if reject_unknown_models and not ollama_has_model and not fp_mapped:
         _record_and_broadcast(client_id, "none", model, 0, 0, 0, 404,
@@ -2952,7 +3141,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
     if has_fallback and priority == "after" and not ollama_has_model and fp_can_serve:
         return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id, session_id=session_id)
 
-    prefer_key = registry.get_preferred_key(model) if registry else None
+    prefer_key = registry.get_preferred_key(resolved_model) if registry else None
     session_id = _extract_session_id(request, req_json)
     if not session_id:
         session_id = "lh_" + secrets.token_urlsafe(16)
@@ -2994,10 +3183,13 @@ async def _proxy_request(request: Request, path: str) -> Response:
             )
             start_emitted = True
 
-        # Pin this session to the chosen sub (new or refreshed TTL)
+        # Pin this session to the chosen sub (new or refreshed TTL).
+        # Do not rebind sticky onto a worse-weekly temporary alternate.
         if sticky and session_id:
-            await sticky.set_session(session_id, key.token)
-            sticky_key = key.token
+            if manager.should_rebind_sticky(sticky_key, key):
+                await sticky.set_session(session_id, key.token)
+                sticky_key = key.token
+            # else: keep previous sticky mapping; this request is a one-shot spill
 
         try:
             start = time.time()
@@ -3433,7 +3625,17 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
     model = req_json.get("model", "unknown")
     is_stream = req_json.get("stream", False)
 
-    prefer_key = registry.get_preferred_key(model) if registry else None
+    # --- Model alias resolution ---
+    # Same as /v1 path: rewrite req_json["model"] to the upstream model,
+    # keep the alias name for usage tracking.
+    resolved_model = model
+    if model_alias_manager and model_alias_manager.is_alias(model):
+        resolved_model, _ctx_override = model_alias_manager.resolve(model)
+        req_json["model"] = resolved_model
+        body = json.dumps(req_json).encode()
+        log.info(f"Alias: {model} → {resolved_model} (client={client_id})")
+
+    prefer_key = registry.get_preferred_key(resolved_model) if registry else None
     session_id = _extract_session_id(request, req_json)
     if not session_id:
         session_id = "lh_" + secrets.token_urlsafe(16)
@@ -3466,10 +3668,13 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             )
             start_emitted = True
 
-        # Pin this native session to the chosen sub (new or refreshed TTL)
+        # Pin this native session to the chosen sub (new or refreshed TTL).
+        # Do not rebind sticky onto a worse-weekly temporary alternate.
         if sticky and session_id:
-            await sticky.set_session(session_id, key.token)
-            sticky_key = key.token
+            if manager.should_rebind_sticky(sticky_key, key):
+                await sticky.set_session(session_id, key.token)
+                sticky_key = key.token
+            # else: keep previous sticky mapping; this request is a one-shot spill
 
         try:
             start = time.time()
@@ -3591,12 +3796,65 @@ async def list_models(request: Request):
                 "fallback_model": alias["nvidia_model"],
             })
             seen.add(alias["id"])
+    # Inject model aliases (client-facing alternate names with context_length overrides)
+    if model_alias_manager:
+        existing_ids = {m.get("id") for m in data}
+        for ae in model_alias_manager.alias_entries():
+            alias_name = ae["alias"]
+            upstream = ae["upstream_model"]
+            ctx = ae["context_length"]
+            # Skip self-aliases when the upstream model is already listed —
+            # patch the existing entry instead of duplicating.
+            if alias_name == upstream and alias_name in existing_ids:
+                for m in data:
+                    if m.get("id") == alias_name:
+                        if ctx:
+                            m["context_length"] = ctx
+                        m["aliased_model"] = upstream
+                        break
+                continue
+            # Copy metadata from the upstream model if it exists
+            upstream_meta = registry.model_metadata.get(upstream, {}) if registry else {}
+            entry: dict = {
+                "id": alias_name,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "ollama",
+                "provider": "ollama-cloud",
+                "aliased_model": upstream,
+            }
+            if ctx:
+                entry["context_length"] = ctx
+            # Copy other metadata from upstream (capabilities, family, etc.)
+            for key in ("capabilities", "family", "parameter_count", "quantization_level"):
+                if upstream_meta.get(key) is not None:
+                    entry[key] = upstream_meta[key]
+            data.append(entry)
     return {"object": "list", "data": data}
 
 
 @app.get("/v1/models/{model_id}")
 async def get_model(model_id: str, request: Request):
     _resolve_client(request)
+    # Check model aliases first
+    if model_alias_manager and model_alias_manager.is_alias(model_id):
+        upstream, ctx_override = model_alias_manager.resolve(model_id)
+        upstream_meta = registry.model_metadata.get(upstream, {}) if registry else {}
+        entry: dict = {
+            "id": model_id,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "ollama",
+            "provider": "ollama-cloud",
+            "aliased_model": upstream,
+        }
+        ctx = ctx_override or upstream_meta.get("context_length")
+        if ctx:
+            entry["context_length"] = ctx
+        for key in ("capabilities", "family", "parameter_count", "quantization_level"):
+            if upstream_meta.get(key) is not None:
+                entry[key] = upstream_meta[key]
+        return entry
     if registry and model_id in registry.models:
         entry = registry._model_entry(model_id)
         entry["provider"] = "ollama-cloud"
@@ -3664,6 +3922,35 @@ async def api_tags(request: Request):
             "size_vram": meta.get("size_vram", 0),
         }
         models.append(entry)
+    # Inject model aliases
+    if model_alias_manager:
+        existing_names = {m.get("name") for m in models}
+        for ae in model_alias_manager.alias_entries():
+            alias_name = ae["alias"]
+            upstream = ae["upstream_model"]
+            ctx = ae["context_length"]
+            # Skip self-aliases when the upstream model is already listed —
+            # patch the existing entry instead of duplicating.
+            if alias_name == upstream and alias_name in existing_names:
+                for m in models:
+                    if m.get("name") == alias_name:
+                        if ctx and isinstance(m.get("details"), dict):
+                            m["details"]["context_length"] = ctx
+                        break
+                continue
+            upstream_meta = registry.model_metadata.get(upstream, {})
+            details = dict(upstream_meta.get("details") or {})
+            if ctx:
+                details["context_length"] = ctx
+            models.append({
+                "name": alias_name,
+                "model": alias_name,
+                "modified_at": upstream_meta.get("modified_at") or "",
+                "size": upstream_meta.get("size") or 0,
+                "digest": upstream_meta.get("digest") or "",
+                "details": details,
+                "size_vram": upstream_meta.get("size_vram", 0),
+            })
     return {"models": models}
 
 
@@ -3689,7 +3976,18 @@ async def api_show(request: Request):
     model = req_json.get("name", req_json.get("model", "unknown"))
     session_id = _extract_session_id(request, req_json)
 
-    prefer_key = registry.get_preferred_key(model) if registry else None
+    # --- Model alias resolution ---
+    resolved_model = model
+    if model_alias_manager and model_alias_manager.is_alias(model):
+        resolved_model, _ctx_override = model_alias_manager.resolve(model)
+        # /api/show uses "name" field, not "model"
+        if "name" in req_json:
+            req_json["name"] = resolved_model
+        else:
+            req_json["model"] = resolved_model
+        body = json.dumps(req_json).encode()
+
+    prefer_key = registry.get_preferred_key(resolved_model) if registry else None
 
     last_error = None
     for attempt in range(max_retries + 1):
@@ -3741,6 +4039,50 @@ async def api_show(request: Request):
                 resp_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
                 resp_headers["X-LlamaHerd-Session"] = session_id
                 resp_headers["X-LlamaHerd-Key"] = key.label
+
+            # --- Alias context_length override ---
+            # When the requested model is an alias (e.g. glm-5.2-256k), the
+            # upstream /api/show response contains the PARENT model's
+            # context_length (e.g. 1M for glm-5.2).  Clients like Hermes
+            # use /api/show to discover the real context window, so we must
+            # patch the response to reflect the alias's configured
+            # context_length override (e.g. 262144).
+            if resp.status_code == 200 and model_alias_manager and model_alias_manager.is_alias(model):
+                _, ctx_override = model_alias_manager.resolve(model)
+                if ctx_override:
+                    try:
+                        show_json = json.loads(resp.content)
+                        info = show_json.get("model_info") or {}
+                        patched = False
+                        for k in list(info.keys()):
+                            if k.endswith(".context_length"):
+                                info[k] = ctx_override
+                                patched = True
+                        if not patched:
+                            # No context_length key found — inject one using
+                            # the family/architecture key if present.
+                            arch = info.get("general.architecture")
+                            if arch:
+                                info[f"{arch}.context_length"] = ctx_override
+                                patched = True
+                        if patched:
+                            show_json["model_info"] = info
+                            # Also patch details.context_length if present
+                            details = show_json.get("details") or {}
+                            details["context_length"] = ctx_override
+                            show_json["details"] = details
+                            resp_headers["content-type"] = "application/json"
+                            resp_headers.pop("content-length", None)
+                            resp_headers.pop("Content-Length", None)
+                            log.info(f"Alias /api/show: patched context_length to {ctx_override} for {model}")
+                            return Response(
+                                content=json.dumps(show_json).encode(),
+                                status_code=resp.status_code,
+                                headers=resp_headers,
+                            )
+                    except Exception as e:
+                        log.warning(f"Alias /api/show patch failed for {model}: {e}")
+
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
@@ -5030,6 +5372,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LlamaHerd — Ollama Cloud Router</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2220%22 fill=%22%230d1117%22/><text y=%22.9em%22 x=%2250%22 text-anchor=%22middle%22 font-size=%2275%22>🦙</text></svg>">
 <style>
 :root {
   --bg: #0d1117; --surface: #161b22; --border: #30363d;
@@ -5054,15 +5397,6 @@ h1 { font-size: 22px; margin-bottom: 4px; }
 .section { margin-bottom: 28px; }
 .section h2 { font-size: 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
 .section h3 { font-size: 14px; margin: 12px 0 6px; color: var(--accent); }
-.next-available-banner { background: rgba(34, 197, 94, 0.08); border: 1px solid var(--green);
-  border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; display: flex; align-items: center;
-  gap: 12px; font-size: 13px; }
-.next-available-banner.all-locked { background: rgba(239, 68, 68, 0.08); border-color: var(--red); }
-.next-available-banner .na-label { font-weight: 600; color: var(--green); white-space: nowrap; }
-.next-available-banner.all-locked .na-label { color: var(--red); }
-.next-available-banner .na-body { flex: 1; }
-.next-available-banner .na-cd { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
-.next-available-banner .na-local { color: var(--dim); font-size: 11px; margin-left: 6px; }
 .badge { font-size: 11px; background: var(--border); padding: 2px 8px; border-radius: 10px; color: var(--dim); }
 .badge.live { background: #1a3a1a; color: var(--green); }
 .badge.new { background: #1a3a1a; color: var(--green); }
@@ -5077,25 +5411,12 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .bars { display: flex; gap: 2px; align-items: center; }
 .key-status { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
 .key-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-  padding: 12px; min-width: 260px; flex: 1 1 260px; }
-.key-card.exhausted-soon { border-color: var(--red); box-shadow: 0 0 0 1px var(--red) inset; }
-.key-card.next-available { border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset; }
-.key-card .next-badge { background: var(--green); color: #000; padding: 1px 6px; border-radius: 8px;
-  font-size: 10px; margin-left: 6px; font-weight: 600; }
+           padding: 14px; min-width: 260px; flex: 1; }
 .key-card .key-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .key-card .key-label { font-weight: 600; font-size: 14px; }
 .key-card .key-plan { font-size: 11px; background: var(--border); padding: 2px 8px; border-radius: 10px; }
 .key-card .key-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
 .key-card .key-row .kdim { color: var(--dim); }
-.key-card .reset-line { font-size: 11px; padding: 3px 0; color: var(--dim); display: flex;
-  justify-content: space-between; gap: 8px; font-variant-numeric: tabular-nums; }
-.key-card .reset-line .reset-cd { color: var(--text); font-weight: 600; }
-.key-card .reset-line .reset-cd.soon { color: var(--red); }
-.key-card .reset-line .reset-cd.now { color: var(--green); }
-.key-card .reset-line .reset-local { color: var(--dim); font-size: 10px;
-  margin-left: 4px; }
-.key-card .reset-section { margin-top: 6px; padding-top: 6px;
-  border-top: 1px dashed var(--border); }
 .pct-bar-wrap { width: 100%; height: 6px; background: var(--border); border-radius: 3px; margin-top: 4px; overflow: hidden; position: relative; }
 .pct-bar { height: 100%; border-radius: 3px; transition: width .3s, background .3s; }
 .pct-elapsed { position: absolute; top: 0; bottom: 0; width: 2px; border-left: 2px dashed rgba(255,255,255,0.8); background: none; transition: left .3s; z-index: 1; }
@@ -5295,7 +5616,6 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 </div>
 
 <div class="tab-panel active" id="panel-overview">
-  <div id="next-available-banner" class="next-available-banner" style="display:none"></div>
   <div id="key-status" class="key-status"></div>
   <div id="totals" class="grid"></div>
 
@@ -5708,63 +6028,6 @@ function updateStickyBadge(d) {
 }
 
 // --- Key Status ---
-// --- Reset countdown helpers ---
-// Countdown formatter: takes ms-until-reset, returns "in 4h 23m" / "in 2d 6h" / "now".
-// Compact: drops leading zero-units ("4m" not "0h 4m", "2d" not "2d 0h").
-function fmtCountdown(ms) {
-  if (ms <= 0) return 'now';
-  const s = Math.floor(ms / 1000);
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (d > 0) return h > 0 ? `${d}d ${h}h` : `${d}d`;
-  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
-  if (m > 0) return `${m}m ${sec}s`;
-  return `${sec}s`;
-}
-// "soon" threshold: under 30 minutes -> red countdown text.
-function cdClass(ms) {
-  if (ms <= 0) return 'now';
-  if (ms < 30 * 60 * 1000) return 'soon';
-  return '';
-}
-// Format an ISO timestamp as the local clock time on that date: "Mon 14:30 (your tz)".
-// Uses Intl.DateTimeFormat so DST/timezone follow the viewer's browser.
-function fmtLocalTime(iso) {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (isNaN(d)) return '';
-  const day = d.toLocaleDateString(undefined, { weekday: 'short' });
-  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
-  let tz = '';
-  try {
-    const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(d);
-    const tzPart = parts.find(p => p.type === 'timeZoneName');
-    tz = tzPart ? tzPart.value : '';
-  } catch (e) { /* Intl missing */ }
-  return `${day} ${time}${tz ? ' ' + tz : ''}`;
-}
-
-// Single global ticker. Every 1s, walk the DOM for any element with
-// [data-cd-until] and update its text. Much cheaper than per-element timers.
-let _cdTickInterval = null;
-function startCountdownTicker() {
-  if (_cdTickInterval) return;
-  _cdTickInterval = setInterval(() => {
-    const now = Date.now();
-    document.querySelectorAll('[data-cd-until]').forEach(el => {
-      const until = parseInt(el.dataset.cdUntil, 10);
-      const ms = until - now;
-      const txt = fmtCountdown(ms);
-      if (el.textContent !== txt) el.textContent = txt;
-      const cls = cdClass(ms);
-      el.classList.remove('soon', 'now');
-      if (cls) el.classList.add(cls);
-    });
-  }, 1000);
-}
-
 function renderKeyStatus(keys) {
   document.getElementById('key-status').innerHTML = (keys||[]).map(k => {
     const slotPct=Math.round((k.in_flight/k.max_concurrent)*100), periodPct=Math.round((1-k.period_remaining_pct/100)*100);
@@ -5772,24 +6035,11 @@ function renderKeyStatus(keys) {
     const sEl=(k.session_elapsed_pct!=null&&k.session_elapsed_pct>=0)?k.session_elapsed_pct:-1;
     const wEl=(k.weekly_elapsed_pct!=null&&k.weekly_elapsed_pct>=0)?k.weekly_elapsed_pct:-1;
     const cls=k.exhausted?'status-err':k.suspended?'status-warn':'status-ok';
-
-    // Reset countdown lines. Only render when the server actually scraped
-    // a reset time (otherwise leave blank — keys without cookies still show).
-    const sResetIso = k.session_resets_at || null;
-    const wResetIso = k.weekly_resets_at || null;
-    const sResetMs = sResetIso ? new Date(sResetIso).getTime() : null;
-    const wResetMs = wResetIso ? new Date(wResetIso).getTime() : null;
-    const resetBlock = (sResetMs || wResetMs) ? `
-      <div class="reset-section">
-        ${sResetMs ? `<div class="reset-line"><span class="kdim">Session resets</span><span><span class="reset-cd" data-cd-until="${sResetMs}">${escHtml(fmtCountdown(sResetMs - Date.now()))}</span><span class="reset-local">${escHtml(fmtLocalTime(sResetIso))}</span></span></div>` : ''}
-        ${wResetMs ? `<div class="reset-line"><span class="kdim">Weekly resets</span><span><span class="reset-cd" data-cd-until="${wResetMs}">${escHtml(fmtCountdown(wResetMs - Date.now()))}</span><span class="reset-local">${escHtml(fmtLocalTime(wResetIso))}</span></span></div>` : ''}
-      </div>` : '';
-
     const sModels = k.session_models || {};
     const topModels = Object.entries(sModels).sort((a,b)=>(b[1].requests||0)-(a[1].requests||0)).slice(0,3);
     const modelBreakdown = topModels.length ? '<div class="key-row" style="margin-top:6px"><span class="kdim">Top models</span></div>' +
       topModels.map(([mid, md]) => `<div class="key-row" style="font-size:11px"><span class="kdim" style="font-family:monospace">${escHtml(mid)}</span><span>${md.requests||0} req</span></div>`).join('') : '';
-    return `<div class="key-card ${cls}" data-key-idx="${escHtml(k.token_prefix||k.label)}">
+    return `<div class="key-card">
       <div class="key-header"><span class="key-label ${cls}">${k.label}</span><span class="key-plan">${k.plan||'?'}</span></div>
       <div class="key-row"><span class="kdim">Slots</span><span>${k.in_flight}/${k.max_concurrent}</span></div>${pctBar(slotPct,'var(--accent)')}
       <div class="key-row"><span class="kdim">Session</span><span>${sPct<0?'?':sPct.toFixed(1)}%${sEl>=0?' ('+sEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(sPct,sEl,'var(--yellow)')}
@@ -5797,68 +6047,9 @@ function renderKeyStatus(keys) {
       <div class="key-row"><span class="kdim">Billing</span><span>${k.period_remaining_pct?.toFixed(0)}% left</span></div>${pctBar(periodPct,'var(--green)')}
       <div class="key-row"><span class="kdim">Requests</span><span>${k.total_requests}</span></div>
       <div class="key-row"><span class="kdim">429s</span><span>${k.total_429s}</span></div>
-      ${resetBlock}
       ${modelBreakdown}
     </div>`;
   }).join('');
-  startCountdownTicker();
-  renderNextAvailableBanner(keys||[]);
-}
-
-// "Next available sub" banner. Finds the key with the lowest
-// session/weekly usage pct that will reset SOONEST. Used when all subs
-// are exhausted — answers "when is anything usable again?".
-function renderNextAvailableBanner(keys) {
-  const banner = document.getElementById('next-available-banner');
-  if (!banner || !keys.length) return;
-
-  const now = Date.now();
-  // For each key, compute the "earliest time it could become available":
-  //   - If not exhausted/suspended, available NOW (cost 0).
-  //   - If exhausted, the earlier of session_resets_at / weekly_resets_at.
-  const candidates = keys.map(k => {
-    const blocked = !!(k.exhausted || k.suspended || k.session_usage_pct >= 100 || k.weekly_usage_pct >= 100);
-    let availableAt;
-    let reason;
-    if (!blocked) {
-      availableAt = now;
-      reason = 'available now';
-    } else {
-      const sMs = k.session_resets_at ? new Date(k.session_resets_at).getTime() : Infinity;
-      const wMs = k.weekly_resets_at ? new Date(k.weekly_resets_at).getTime() : Infinity;
-      availableAt = Math.min(sMs, wMs);
-      reason = isFinite(sMs) && sMs <= wMs ? 'session reset' : 'weekly reset';
-    }
-    return { key: k, availableAt, reason, blocked };
-  });
-
-  // Pick the soonest available. Tiebreaker: lowest usage pct.
-  candidates.sort((a, b) => {
-    if (a.availableAt !== b.availableAt) return a.availableAt - b.availableAt;
-    const aMax = Math.max(a.key.session_usage_pct || 0, a.key.weekly_usage_pct || 0);
-    const bMax = Math.max(b.key.session_usage_pct || 0, b.key.weekly_usage_pct || 0);
-    return aMax - bMax;
-  });
-  const winner = candidates[0];
-  const allLocked = winner.availableAt > now;
-
-  // Hide banner if everyone is healthy AND at least one is now-available.
-  if (!allLocked) {
-    banner.style.display = 'none';
-    return;
-  }
-
-  const ms = winner.availableAt - now;
-  const localTime = fmtLocalTime(new Date(winner.availableAt).toISOString());
-  const numLocked = candidates.filter(c => c.blocked).length;
-  banner.className = 'next-available-banner all-locked';
-  banner.style.display = 'flex';
-  banner.innerHTML = `
-    <span class="na-label">🔒 All ${numLocked}/${keys.length} subs locked</span>
-    <span class="na-body">Next available: <strong>${escHtml(winner.key.label)}</strong> (${escHtml(winner.reason)})
-      — <span class="na-cd" data-cd-until="${winner.availableAt}">${escHtml(fmtCountdown(ms))}</span>
-      <span class="na-local">at ${escHtml(localTime)}</span>
-    </span>`;
 }
 
 // --- Call Feed ---
