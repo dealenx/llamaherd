@@ -2817,6 +2817,8 @@ async def lifespan(app: FastAPI):
         fb_metadata_task.cancel()
     if registry:
         await registry.stop()
+    if telegram_notifier:
+        await telegram_notifier.close()
 
 
 async def _poll_subscriptions_loop(mgr: KeyManager, interval: int):
