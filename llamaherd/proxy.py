@@ -2514,6 +2514,8 @@ queue_timeout: int = 60
 request_timeout: int = 120
 admin_token: str = ""
 reject_unknown_models: bool = False  # reject models unknown to both Ollama and fallback model_map
+_admin_sessions: dict[str, float] = {}
+ADMIN_SESSION_TTL_SECONDS = 60
 
 _DB_DSN = os.environ.get("LLAMAHERD_DB", str(Path(__file__).parent / "proxy.db"))
 DB_PATH = Path(_DB_DSN) if not _is_libsql_url(_DB_DSN) else _DB_DSN
@@ -2683,18 +2685,24 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
 
 
 def _verify_admin(request: Request) -> None:
-    """FastAPI dependency: require admin_token via Bearer header or ?token= query param."""
+    """FastAPI dependency: require the admin token via a Bearer header."""
     global admin_token
     if not admin_token:
         raise HTTPException(status_code=500, detail="admin_token not configured")
-    # Check query param first (for browser/dashboard access)
-    if request.query_params.get("token") == admin_token:
-        return
-    # Check Authorization header
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer ") and secrets.compare_digest(auth[7:].strip(), admin_token):
         return
     raise HTTPException(status_code=401, detail="unauthorized")
+
+
+def _verify_admin_session(session_token: str) -> None:
+    now = time.time()
+    expired = [token for token, expires_at in _admin_sessions.items() if expires_at <= now]
+    for token in expired:
+        _admin_sessions.pop(token, None)
+    expires_at = _admin_sessions.get(session_token)
+    if not expires_at or expires_at <= now:
+        raise HTTPException(status_code=401, detail="invalid or expired admin session")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -5267,14 +5275,18 @@ async def admin_delete_key(key_id: str):
 # SSE — Live event stream for dashboard
 # ---------------------------------------------------------------------------
 
+@app.post("/admin/session", dependencies=[Depends(_verify_admin)])
+async def admin_create_session():
+    """Create a short-lived token for authenticating an SSE connection."""
+    session_token = secrets.token_urlsafe(32)
+    _admin_sessions[session_token] = time.time() + ADMIN_SESSION_TTL_SECONDS
+    return {"session_token": session_token, "expires_in": ADMIN_SESSION_TTL_SECONDS}
+
+
 @app.get("/admin/events")
-async def admin_events(request: Request, token: str = None):
-    """SSE endpoint for live dashboard updates. Authenticates via ?token= param."""
-    global admin_token
-    if not admin_token:
-        raise HTTPException(status_code=500, detail="admin_token not configured")
-    if not token or not secrets.compare_digest(token, admin_token):
-        raise HTTPException(status_code=401, detail="unauthorized")
+async def admin_events(request: Request, session_token: str = ""):
+    """SSE endpoint authenticated by a short-lived, limited-purpose token."""
+    _verify_admin_session(session_token)
 
     async def event_generator():
         q = broadcaster.subscribe()
@@ -5762,13 +5774,21 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 
 <script>
 const API = (function() { const p = window.location.pathname; return p.includes('/ocp') ? '/ocp' : ''; })();
-const ADMIN_TOKEN = (function() {
-  const p = new URLSearchParams(window.location.search);
-  const t = p.get('token');
-  if (t) { localStorage.setItem('ocp_admin_token', t); return t; }
+let ADMIN_TOKEN = (function() {
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  const t = fragment.get('token');
+  if (t) {
+    localStorage.setItem('ocp_admin_token', t);
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+    return t;
+  }
   return localStorage.getItem('ocp_admin_token') || '';
 })();
-if (!ADMIN_TOKEN) { document.body.innerHTML = '<div style="color:var(--red);text-align:center;padding:3em"><h2>Authentication Required</h2><p>Provide admin token: <code>/dashboard?token=YOUR_TOKEN</code></p></div>'; }
+if (!ADMIN_TOKEN) {
+  ADMIN_TOKEN = window.prompt('LlamaHerd admin token') || '';
+  if (ADMIN_TOKEN) localStorage.setItem('ocp_admin_token', ADMIN_TOKEN);
+  else document.body.innerHTML = '<div style="color:var(--red);text-align:center;padding:3em"><h2>Authentication Required</h2><p>Open <code>/dashboard#token=YOUR_TOKEN</code> or reload and enter the token.</p></div>';
+}
 
 function fmt(n) { if (n >= 1e6) return (n/1e6).toFixed(2)+'M'; if (n >= 1e3) return (n/1e3).toFixed(1)+'K'; return String(n); }
 function fmtTs(ts) { const d = new Date(ts*1000); return d.toLocaleDateString('en-CA')+' '+d.toLocaleTimeString('en-GB'); }
@@ -5784,8 +5804,9 @@ function pctBarWithElapsed(pct, elapsedPct, defaultColor) {
 }
 function pctBar(pct, color) { if (pct == null) return ''; return `<div class="pct-bar-wrap"><div class="pct-bar" style="width:${Math.min(pct,100)}%;background:${color}"></div></div>`; }
 
-async function loadJSON(url) { const sep = url.includes('?')?'&':'?'; const r = await fetch(API+url+sep+'token='+encodeURIComponent(ADMIN_TOKEN)); return r.json(); }
-async function postJSON(url, body, method) { return fetch(API+url+'?token='+encodeURIComponent(ADMIN_TOKEN), { method: method||'POST', headers:{'Content-Type':'application/json'}, body: body?JSON.stringify(body):undefined }).then(r=>r.json()); }
+const adminHeaders = () => ({'Authorization': 'Bearer ' + ADMIN_TOKEN, 'Content-Type': 'application/json'});
+async function loadJSON(url) { const r = await fetch(API+url, {headers: adminHeaders()}); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }
+async function postJSON(url, body, method) { const r = await fetch(API+url, {method:method||'POST', headers:adminHeaders(), body:body?JSON.stringify(body):undefined}); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }
 
 // --- Date Range ---
 function getDateRange() {
@@ -5818,9 +5839,14 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', funct
 // --- SSE ---
 let eventSource = null, reconnectDelay = 1000, feedCalls = [];
 
-function connectSSE() {
-  const url = `${window.location.protocol}//${window.location.host}${API}/admin/events?token=${encodeURIComponent(ADMIN_TOKEN)}`;
-  eventSource = new EventSource(url);
+async function connectSSE() {
+  try {
+    const session = await postJSON('/admin/session');
+    const url = `${window.location.protocol}//${window.location.host}${API}/admin/events?session_token=${encodeURIComponent(session.session_token)}`;
+    eventSource = new EventSource(url);
+  } catch (e) {
+    setTimeout(connectSSE, reconnectDelay); reconnectDelay=Math.min(reconnectDelay*2,30000); return;
+  }
   eventSource.onopen = () => { reconnectDelay=1000; document.getElementById('sse-dot').className='sse-dot ok'; document.getElementById('sse-label').textContent='live'; };
   eventSource.onerror = () => { document.getElementById('sse-dot').className='sse-dot off'; document.getElementById('sse-label').textContent='reconnecting...'; eventSource.close(); setTimeout(connectSSE,reconnectDelay); reconnectDelay=Math.min(reconnectDelay*2,30000); };
   eventSource.addEventListener('status', e => { const d=JSON.parse(e.data); renderKeyStatus(d.keys||[]); document.getElementById('upstream-url').textContent=d.upstream||''; updateStickyBadge(d); });
@@ -6776,7 +6802,7 @@ async def admin_quota_coefficients(days: int = 7):
     return usage_db.quota_coefficients(keys, days=days)
 
 
-@app.get("/dashboard", dependencies=[Depends(_verify_admin)])
+@app.get("/dashboard")
 async def dashboard():
     return HTMLResponse(DASHBOARD_HTML)
 

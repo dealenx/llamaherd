@@ -47,8 +47,8 @@ def test_admin_in_flight_endpoint_returns_active_requests():
     proxy._request_start("aaa1", "client-a", "model-1", "Sub 1", "ollama-cloud")
     proxy._request_start("bbb2", "client-b", "model-2", "fb:nvidia-build", "nvidia-build")
 
-    client = TestClient(proxy.app)
-    r = client.get("/admin/in-flight?token=test-token")
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
+    r = client.get("/admin/in-flight")
     assert r.status_code == 200
     body = r.json()
     assert body["count"] == 2
@@ -60,8 +60,8 @@ def test_admin_in_flight_endpoint_returns_active_requests():
 
 
 def test_admin_in_flight_requires_token():
-    client = TestClient(proxy.app)
-    r = client.get("/admin/in-flight")
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
+    r = client.get("/admin/in-flight", headers={"Authorization": ""})
     assert r.status_code == 401
 
 

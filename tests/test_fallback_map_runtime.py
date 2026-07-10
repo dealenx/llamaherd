@@ -72,9 +72,9 @@ def test_admin_add_fallback_map_endpoint(monkeypatch, tmp_path):
 
     monkeypatch.setattr(proxy.broadcaster, "broadcast", fake_broadcast)
 
-    client = TestClient(proxy.app)
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
     r = client.post(
-        "/admin/fallback-map?token=test-token",
+        "/admin/fallback-map",
         json={"ollama_name": "qwen3.5:397b", "nvidia_name": "qwen/qwen3.5-397b-a17b"},
     )
     assert r.status_code == 200
@@ -98,9 +98,9 @@ def test_admin_add_fallback_map_with_priority(monkeypatch, tmp_path):
     monkeypatch.setattr(proxy, "fallback_provider", fp)
     monkeypatch.setattr(proxy, "admin_token", "test-token")
 
-    client = TestClient(proxy.app)
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
     r = client.post(
-        "/admin/fallback-map?token=test-token",
+        "/admin/fallback-map",
         json={
             "ollama_name": "qwen3.5:397b",
             "nvidia_name": "qwen/qwen3.5-397b-a17b",
@@ -117,9 +117,9 @@ def test_admin_add_fallback_map_validation(monkeypatch, tmp_path):
     monkeypatch.setattr(proxy, "fallback_provider", fp)
     monkeypatch.setattr(proxy, "admin_token", "test-token")
 
-    client = TestClient(proxy.app)
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
     r = client.post(
-        "/admin/fallback-map?token=test-token",
+        "/admin/fallback-map",
         json={"ollama_name": "qwen3.5:397b"},
     )
     assert r.status_code == 400
@@ -138,15 +138,15 @@ def test_admin_delete_fallback_map(monkeypatch, tmp_path):
 
     monkeypatch.setattr(proxy.broadcaster, "broadcast", fake_broadcast)
 
-    client = TestClient(proxy.app)
-    r = client.delete("/admin/fallback-map?token=test-token&ollama_name=transient")
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
+    r = client.delete("/admin/fallback-map?ollama_name=transient")
     assert r.status_code == 200
     body = r.json()
     assert body["removed"] == "transient"
     assert all(a["id"] != "transient" for a in body["model_map"])
 
     # 404 when the alias is gone.
-    r = client.delete("/admin/fallback-map?token=test-token&ollama_name=transient")
+    r = client.delete("/admin/fallback-map?ollama_name=transient")
     assert r.status_code == 404
 
     # SSE event.
@@ -161,10 +161,14 @@ def test_admin_fallback_map_requires_token(monkeypatch, tmp_path):
     fp = _provider(tmp_path)
     monkeypatch.setattr(proxy, "fallback_provider", fp)
     monkeypatch.setattr(proxy, "admin_token", "test-token")
-    client = TestClient(proxy.app)
-    r = client.post("/admin/fallback-map", json={"ollama_name": "x", "nvidia_name": "y"})
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
+    r = client.post(
+        "/admin/fallback-map",
+        json={"ollama_name": "x", "nvidia_name": "y"},
+        headers={"Authorization": ""},
+    )
     assert r.status_code == 401
-    r = client.delete("/admin/fallback-map?ollama_name=x")
+    r = client.delete("/admin/fallback-map?ollama_name=x", headers={"Authorization": ""})
     assert r.status_code == 401
 
 
@@ -172,11 +176,11 @@ def test_admin_fallback_map_when_disabled(monkeypatch):
     """When the fallback isn't configured, mutation endpoints reject with 400."""
     monkeypatch.setattr(proxy, "fallback_provider", FallbackProvider({}))
     monkeypatch.setattr(proxy, "admin_token", "test-token")
-    client = TestClient(proxy.app)
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
     r = client.post(
-        "/admin/fallback-map?token=test-token",
+        "/admin/fallback-map",
         json={"ollama_name": "x", "nvidia_name": "y"},
     )
     assert r.status_code == 400
-    r = client.delete("/admin/fallback-map?token=test-token&ollama_name=x")
+    r = client.delete("/admin/fallback-map?ollama_name=x")
     assert r.status_code == 400

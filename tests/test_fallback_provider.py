@@ -110,14 +110,14 @@ def test_fallback_priority_endpoint(monkeypatch):
     monkeypatch.setattr(proxy, "admin_token", "test-token")
 
     # Bypass the lifespan (which loads config.yaml + starts background tasks).
-    client = TestClient(proxy.app)
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
 
-    r = client.get("/admin/fallback?token=test-token")
+    r = client.get("/admin/fallback")
     assert r.status_code == 200
     assert r.json()["priority"] == "after"
 
     r = client.post(
-        "/admin/fallback-priority?token=test-token",
+        "/admin/fallback-priority",
         json={"priority": "before"},
     )
     assert r.status_code == 200
@@ -126,12 +126,16 @@ def test_fallback_priority_endpoint(monkeypatch):
 
     # Invalid value rejected.
     r = client.post(
-        "/admin/fallback-priority?token=test-token",
+        "/admin/fallback-priority",
         json={"priority": "garbage"},
     )
     assert r.status_code == 400
     assert fp.priority == "before"  # unchanged
 
     # Unauthorized — no token.
-    r = client.post("/admin/fallback-priority", json={"priority": "after"})
+    r = client.post(
+        "/admin/fallback-priority",
+        json={"priority": "after"},
+        headers={"Authorization": ""},
+    )
     assert r.status_code == 401

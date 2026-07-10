@@ -89,8 +89,8 @@ def test_admin_in_flight_returns_token_counters_and_headers():
     )
     proxy._update_in_flight_tokens("rid4", tokens_in=12, tokens_out=34)
 
-    client = TestClient(proxy.app)
-    r = client.get("/admin/in-flight?token=test-token")
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
+    r = client.get("/admin/in-flight")
     assert r.status_code == 200
     rows = r.json()["in_flight"]
     [row] = [x for x in rows if x["request_id"] == "rid4"]

@@ -96,8 +96,8 @@ def test_admin_fallback_catalog_endpoint(monkeypatch, tmp_path):
     monkeypatch.setattr(proxy, "fallback_provider", fp)
     monkeypatch.setattr(proxy, "admin_token", "test-token")
 
-    client = TestClient(proxy.app)
-    r = client.get("/admin/fallback-catalog?token=test-token")
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
+    r = client.get("/admin/fallback-catalog")
     assert r.status_code == 200
     body = r.json()
     assert body["enabled"] is True
@@ -111,8 +111,8 @@ def test_admin_fallback_catalog_endpoint(monkeypatch, tmp_path):
 def test_admin_fallback_catalog_when_disabled(monkeypatch):
     monkeypatch.setattr(proxy, "fallback_provider", FallbackProvider({}))
     monkeypatch.setattr(proxy, "admin_token", "test-token")
-    client = TestClient(proxy.app)
-    r = client.get("/admin/fallback-catalog?token=test-token")
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
+    r = client.get("/admin/fallback-catalog")
     assert r.status_code == 200
     body = r.json()
     assert body["enabled"] is False
@@ -123,8 +123,8 @@ def test_admin_fallback_catalog_requires_token(monkeypatch, tmp_path):
     fp = _provider(tmp_path)
     monkeypatch.setattr(proxy, "fallback_provider", fp)
     monkeypatch.setattr(proxy, "admin_token", "test-token")
-    client = TestClient(proxy.app)
-    r = client.get("/admin/fallback-catalog")
+    client = TestClient(proxy.app, headers={"Authorization": "Bearer test-token"})
+    r = client.get("/admin/fallback-catalog", headers={"Authorization": ""})
     assert r.status_code == 401
 
 
