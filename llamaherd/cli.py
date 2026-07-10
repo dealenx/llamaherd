@@ -130,6 +130,8 @@ def cmd_clients_create(args):
     }
     if args.notes:
         body["notes"] = args.notes
+    if args.api_token:
+        body["token"] = args.api_token
     if args.daily_token_limit is not None:
         body["daily_token_limit"] = args.daily_token_limit
     if args.daily_request_limit is not None:
@@ -156,6 +158,8 @@ def cmd_clients_update(args):
         body["label"] = args.label
     if args.notes is not None:
         body["notes"] = args.notes
+    if args.api_token is not None:
+        body["token"] = args.api_token
     # For limits: --clear-limits sends null, otherwise use provided value
     if args.clear_limits:
         body["daily_token_limit"] = None
@@ -456,6 +460,7 @@ def build_parser():
     cc.add_argument("client_id", help="Unique client ID (alphanumeric, dashes ok)")
     cc.add_argument("--label", "-l", help="Human-readable label")
     cc.add_argument("--notes", help="Notes about this client")
+    cc.add_argument("--api-token", dest="api_token", help="Pin a specific API token (e.g. to match an existing config.yaml). If omitted, a random ocp-<id>-<hex> token is generated.")
     cc.add_argument("--daily-token-limit", type=int, default=None, help="Max tokens per day (null=unlimited)")
     cc.add_argument("--daily-request-limit", type=int, default=None, help="Max requests per day (null=unlimited)")
     cc.add_argument("--rpm-limit", type=int, default=None, help="Max requests per minute (null=unlimited)")
@@ -466,6 +471,7 @@ def build_parser():
     cu.add_argument("client_id", help="Client ID to update")
     cu.add_argument("--label", "-l", default=None, help="New label")
     cu.add_argument("--notes", default=None, help="New notes")
+    cu.add_argument("--api-token", dest="api_token", default=None, help="Replace the client's API token (use 'regenerate-token' for a random new one)")
     cu.add_argument("--daily-token-limit", type=int, default=None, help="Max tokens per day")
     cu.add_argument("--daily-request-limit", type=int, default=None, help="Max requests per day")
     cu.add_argument("--rpm-limit", type=int, default=None, help="Max requests per minute")
