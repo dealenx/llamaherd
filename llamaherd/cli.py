@@ -123,6 +123,15 @@ def _clients_table(clients):
         print(f"{c['id']:<20} {c.get('label', ''):<25} {tok_display:<35} {str(dtl or '∞'):>12} {str(drl or '∞'):>10} {str(rpm or '∞'):>5}")
 
 
+def _validate_api_token(token: str) -> str:
+    """Strip and validate an API token. Exit with error if empty/whitespace-only."""
+    token = token.strip()
+    if not token:
+        print("Error: --api-token cannot be empty or whitespace-only", file=sys.stderr)
+        sys.exit(1)
+    return token
+
+
 def cmd_clients_create(args):
     body = {
         "id": args.client_id,
@@ -131,11 +140,7 @@ def cmd_clients_create(args):
     if args.notes:
         body["notes"] = args.notes
     if args.api_token:
-        token = args.api_token.strip()
-        if not token:
-            print("Error: --api-token cannot be empty or whitespace-only", file=sys.stderr)
-            sys.exit(1)
-        body["token"] = token
+        body["token"] = _validate_api_token(args.api_token)
     if args.daily_token_limit is not None:
         body["daily_token_limit"] = args.daily_token_limit
     if args.daily_request_limit is not None:
@@ -163,11 +168,7 @@ def cmd_clients_update(args):
     if args.notes is not None:
         body["notes"] = args.notes
     if args.api_token is not None:
-        token = args.api_token.strip()
-        if not token:
-            print("Error: --api-token cannot be empty or whitespace-only", file=sys.stderr)
-            sys.exit(1)
-        body["token"] = token
+        body["token"] = _validate_api_token(args.api_token)
     # For limits: --clear-limits sends null, otherwise use provided value
     if args.clear_limits:
         body["daily_token_limit"] = None
