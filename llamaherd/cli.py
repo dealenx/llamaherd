@@ -131,7 +131,11 @@ def cmd_clients_create(args):
     if args.notes:
         body["notes"] = args.notes
     if args.api_token:
-        body["token"] = args.api_token
+        token = args.api_token.strip()
+        if not token:
+            print("Error: --api-token cannot be empty or whitespace-only", file=sys.stderr)
+            sys.exit(1)
+        body["token"] = token
     if args.daily_token_limit is not None:
         body["daily_token_limit"] = args.daily_token_limit
     if args.daily_request_limit is not None:
@@ -159,7 +163,11 @@ def cmd_clients_update(args):
     if args.notes is not None:
         body["notes"] = args.notes
     if args.api_token is not None:
-        body["token"] = args.api_token
+        token = args.api_token.strip()
+        if not token:
+            print("Error: --api-token cannot be empty or whitespace-only", file=sys.stderr)
+            sys.exit(1)
+        body["token"] = token
     # For limits: --clear-limits sends null, otherwise use provided value
     if args.clear_limits:
         body["daily_token_limit"] = None
