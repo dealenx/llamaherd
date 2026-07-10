@@ -2496,6 +2496,7 @@ usage_db: Optional[UsageDB] = None
 client_registry: Optional[ClientRegistry] = None
 usage_scraper: Optional[UsageScraper] = None
 telegram_notifier: Optional[TelegramNotifier] = None
+upstream_http_client: Optional[httpx.AsyncClient] = None
 fallback_provider: Optional[FallbackProvider] = None
 model_alias_manager: Optional[ModelAliasManager] = None
 upstream_url: str = ""
@@ -2689,7 +2690,7 @@ def _verify_admin(request: Request) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, key_registry, registry, usage_db, client_registry, usage_scraper, telegram_notifier, fallback_provider, model_alias_manager, sticky
+    global manager, key_registry, registry, usage_db, client_registry, usage_scraper, telegram_notifier, upstream_http_client, fallback_provider, model_alias_manager, sticky
     global upstream_url, retry_on_429, max_retries, queue_timeout, request_timeout
     global admin_token, NATIVE_BRIDGE_MODELS, reject_unknown_models
 
@@ -2726,6 +2727,7 @@ async def lifespan(app: FastAPI):
     max_retries = cfg.get("max_retries", 2)
     queue_timeout = cfg.get("queue_timeout", 60)
     request_timeout = cfg.get("request_timeout", 120)
+    upstream_http_client = httpx.AsyncClient(timeout=request_timeout)
     reject_unknown_models = cfg.get("reject_unknown_models", False)
 
     # Native bridge: models whose /v1 endpoint misreports truncation
@@ -2819,6 +2821,9 @@ async def lifespan(app: FastAPI):
         await registry.stop()
     if telegram_notifier:
         await telegram_notifier.close()
+    if upstream_http_client:
+        await upstream_http_client.aclose()
+        upstream_http_client = None
 
 
 async def _poll_subscriptions_loop(mgr: KeyManager, interval: int):
@@ -3213,12 +3218,11 @@ async def _proxy_request(request: Request, path: str) -> Response:
             if is_stream:
                 return await _proxy_stream(client_id, key, path, headers, body, model, start, request_id, session_id=session_id)
 
-            async with httpx.AsyncClient(timeout=request_timeout) as client_http:
-                resp = await client_http.post(
-                    f"{upstream_url}{path}",
-                    content=body,
-                    headers=headers,
-                )
+            resp = await upstream_http_client.post(
+                f"{upstream_url}{path}",
+                content=body,
+                headers=headers,
+            )
 
             elapsed_ms = int((time.time() - start) * 1000)
 
@@ -3311,9 +3315,8 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
         usage_captured = False
         final_status = 200
         try:
-            async with httpx.AsyncClient(timeout=request_timeout) as client_http:
-                async with client_http.stream("POST", f"{upstream_url}{path}",
-                                              content=body, headers=headers) as resp:
+            async with upstream_http_client.stream("POST", f"{upstream_url}{path}",
+                                                   content=body, headers=headers) as resp:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
                         final_status = 429
@@ -3428,8 +3431,7 @@ async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
             request_id, session_id=session_id,
         )
 
-    async with httpx.AsyncClient(timeout=request_timeout) as ch:
-        resp = await ch.post(url, content=new_body, headers=headers)
+    resp = await upstream_http_client.post(url, content=new_body, headers=headers)
     elapsed_ms = int((time.time() - start) * 1000)
     tokens_in = tokens_out = 0
     if resp.status_code == 200:
@@ -3463,8 +3465,7 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
         usage_captured = False
         status_code = 200
         try:
-            async with httpx.AsyncClient(timeout=request_timeout) as ch:
-                async with ch.stream("POST", url, content=body, headers=headers) as resp:
+            async with upstream_http_client.stream("POST", url, content=body, headers=headers) as resp:
                     status_code = resp.status_code
                     if resp.status_code >= 400:
                         err = await resp.aread()
@@ -3544,9 +3545,8 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
         final_status = 200
         api_upstream = _native_api_upstream()
         try:
-            async with httpx.AsyncClient(timeout=request_timeout) as client_http:
-                async with client_http.stream("POST", f"{api_upstream}{path}",
-                                              content=body, headers=headers) as resp:
+            async with upstream_http_client.stream("POST", f"{api_upstream}{path}",
+                                                   content=body, headers=headers) as resp:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
                         if sticky and session_id:
@@ -3696,12 +3696,11 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
                 return await _proxy_ndjson_stream(client_id, key, path, headers, body, model, start, request_id, session_id=session_id)
 
             # Non-streaming: regular JSON response
-            async with httpx.AsyncClient(timeout=request_timeout) as client_http:
-                resp = await client_http.post(
-                    f"{api_upstream}{path}",
-                    content=body,
-                    headers=headers,
-                )
+            resp = await upstream_http_client.post(
+                f"{api_upstream}{path}",
+                content=body,
+                headers=headers,
+            )
 
             elapsed_ms = int((time.time() - start) * 1000)
 
@@ -4020,12 +4019,11 @@ async def api_show(request: Request):
             }
             api_upstream = _native_api_upstream()
 
-            async with httpx.AsyncClient(timeout=request_timeout) as client_http:
-                resp = await client_http.post(
-                    f"{api_upstream}/show",
-                    content=body,
-                    headers=headers,
-                )
+            resp = await upstream_http_client.post(
+                f"{api_upstream}/show",
+                content=body,
+                headers=headers,
+            )
 
             if resp.status_code == 429:
                 await manager.mark_429(key)
@@ -4417,12 +4415,11 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
         bridge_reason = "stop"  # default
         final_status = 200
         try:
-            async with httpx.AsyncClient(timeout=request_timeout) as client_http:
-                async with client_http.stream("POST", f"{api_upstream}/chat",
-                                              content=body, headers={
-                                                  "Authorization": f"Bearer {key.token}",
-                                                  "Content-Type": "application/json",
-                                              }) as resp:
+            async with upstream_http_client.stream("POST", f"{api_upstream}/chat",
+                                                   content=body, headers={
+                                                       "Authorization": f"Bearer {key.token}",
+                                                       "Content-Type": "application/json",
+                                                   }) as resp:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
                         final_status = 429
