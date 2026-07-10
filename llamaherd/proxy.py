@@ -3057,6 +3057,9 @@ async def _proxy_request(request: Request, path: str) -> Response:
     request_id = _new_request_id()
     body = await request.body()
     req_json = json.loads(body) if body else {}
+    session_id = _extract_session_id(request, req_json)
+    if not session_id:
+        session_id = "lh_" + secrets.token_urlsafe(16)
 
     is_stream = req_json.get("stream", False)
     model = req_json.get("model", "unknown")
@@ -3142,9 +3145,6 @@ async def _proxy_request(request: Request, path: str) -> Response:
         return await _route_to_fallback(client_id, fp, path, body, req_json, model, is_stream, request_id, session_id=session_id)
 
     prefer_key = registry.get_preferred_key(resolved_model) if registry else None
-    session_id = _extract_session_id(request, req_json)
-    if not session_id:
-        session_id = "lh_" + secrets.token_urlsafe(16)
     sticky_key = await sticky.get_preferred_key(session_id) if sticky else None
     log.info(f"Sticky routing for {client_id} / {model}: session_id={session_id[:16]}... sticky_key={sticky_key[:8]+'...' if sticky_key else None}")
 
