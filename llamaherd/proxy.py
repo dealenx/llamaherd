@@ -5136,6 +5136,16 @@ async def admin_telegram_test():
 # Admin — Subscription (Upstream Key) Management
 # ---------------------------------------------------------------------------
 
+def _key_id(token: str) -> str:
+    """Return a stable, non-secret identifier for an upstream token."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def _find_key(key_id: str) -> Optional[KeyState]:
+    if not manager:
+        return None
+    return next((key for key in manager.keys if _key_id(key.token) == key_id), None)
+
 @app.get("/admin/keys", dependencies=[Depends(_verify_admin)])
 async def admin_list_keys():
     """List all upstream Ollama Cloud subscription keys (tokens masked)."""
@@ -5156,18 +5166,19 @@ async def admin_list_keys():
             "suspended": k.suspended,
             "account_email": k.account_email if k.account_email else None,
             "has_cookies": has_cookies,
+            "key_id": _key_id(k.token),
             "index": i,
         })
     return result
 
 
-@app.put("/admin/keys/{key_index}", dependencies=[Depends(_verify_admin)])
-async def admin_update_key(key_index: int, label: str = None, max_concurrent: int = None,
+@app.put("/admin/keys/{key_id}", dependencies=[Depends(_verify_admin)])
+async def admin_update_key(key_id: str, label: str = None, max_concurrent: int = None,
                            cycle_day: int = None):
     """Update a key's mutable fields (label, max_concurrent, cycle_day). Persists to DB."""
-    if not manager or key_index >= len(manager.keys):
+    k = _find_key(key_id)
+    if not k:
         raise HTTPException(status_code=404, detail="key not found")
-    k = manager.keys[key_index]
     if label is not None:
         k.label = label
     if max_concurrent is not None:
@@ -5177,16 +5188,16 @@ async def admin_update_key(key_index: int, label: str = None, max_concurrent: in
     # Persist to DB
     if key_registry:
         key_registry.update(k.token, label=label, max_concurrent=max_concurrent, cycle_day=cycle_day)
-    return {"updated": key_index, "label": k.label, "max_concurrent": k.max_concurrent, "cycle_day": k.cycle_day}
+    return {"updated": key_id, "key_id": key_id, "label": k.label, "max_concurrent": k.max_concurrent, "cycle_day": k.cycle_day}
 
 
-@app.put("/admin/keys/{key_index}/cookies", dependencies=[Depends(_verify_admin)])
-async def admin_update_key_cookies(key_index: int, request: Request):
+@app.put("/admin/keys/{key_id}/cookies", dependencies=[Depends(_verify_admin)])
+async def admin_update_key_cookies(key_id: str, request: Request):
     """Update cookies for a specific key. Persists to DB and updates scraper."""
-    if not manager or key_index >= len(manager.keys):
+    k = _find_key(key_id)
+    if not k:
         raise HTTPException(status_code=404, detail="key not found")
     body = await request.json()
-    k = manager.keys[key_index]
     cookies = {}
     for field in ["secure_session", "aid", "cf_clearance", "stripe_mid"]:
         if field in body:
@@ -5196,7 +5207,7 @@ async def admin_update_key_cookies(key_index: int, request: Request):
     # Persist to DB
     if key_registry and cookies:
         key_registry.update_cookies(k.token, cookies)
-    return {"updated": key_index, "label": k.label, "cookies_set": list(cookies.keys())}
+    return {"updated": key_id, "key_id": key_id, "label": k.label, "cookies_set": list(cookies.keys())}
 
 
 @app.post("/admin/keys", dependencies=[Depends(_verify_admin)])
@@ -5219,16 +5230,17 @@ async def admin_add_key(request: Request):
     # Persist to DB
     if key_registry:
         key_registry.add(token, label, max_concurrent, cycle_day, cookies)
-    return {"added": label, "key_index": len(manager.keys) - 1,
+    return {"added": label, "key_id": _key_id(token),
             "note": "Key saved to DB and will persist across restarts"}
 
 
-@app.delete("/admin/keys/{key_index}", dependencies=[Depends(_verify_admin)])
-async def admin_delete_key(key_index: int):
+@app.delete("/admin/keys/{key_id}", dependencies=[Depends(_verify_admin)])
+async def admin_delete_key(key_id: str):
     """Remove an upstream key. Persists to DB."""
-    if not manager or key_index >= len(manager.keys):
+    removed = _find_key(key_id)
+    if not manager or not removed:
         raise HTTPException(status_code=404, detail="key not found")
-    removed = manager.keys.pop(key_index)
+    manager.keys.remove(removed)
     # Also clear cookies from the usage scraper so the deleted key stops
     # being scraped. Without this, an orphan entry sits in cookie_map
     # indefinitely and pollutes /admin/status output.
@@ -5237,7 +5249,7 @@ async def admin_delete_key(key_index: int):
     # Persist deletion to DB so the key doesn't reappear on restart
     if key_registry:
         key_registry.remove(removed.token)
-    return {"removed": removed.label, "note": "Key removed from DB and will not reappear on restart"}
+    return {"removed": removed.label, "key_id": key_id, "note": "Key removed from DB and will not reappear on restart"}
 
 
 # ---------------------------------------------------------------------------
@@ -6257,9 +6269,9 @@ async function loadSubsPanel() {
       <div class="km-header">
         <span class="km-label ${statusCls}">${k.label}</span>
         <div style="display:flex;gap:4px">
-          <button class="btn btn-sm" onclick="editKey(${i})">Edit</button>
-          <button class="btn btn-sm" onclick="editCookies(${i})">🍪 Cookies</button>
-          <button class="btn btn-sm btn-danger" onclick="deleteKey(${i},'${k.label}')">Remove</button>
+          <button class="btn btn-sm" onclick="editKey('${k.key_id}')">Edit</button>
+          <button class="btn btn-sm" onclick="editCookies('${k.key_id}')">🍪 Cookies</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteKey('${k.key_id}','${k.label}')">Remove</button>
         </div>
       </div>
       <div class="km-row"><span>Token</span><span>${k.token_prefix}</span></div>
@@ -6277,41 +6289,41 @@ async function loadSubsPanel() {
 function showModal(html) { document.getElementById('modal-root').innerHTML = `<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`; }
 function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
 
-function editKey(idx) {
+function editKey(keyId) {
   showModal(`<h3>Edit Subscription</h3>
     <label>Label</label><input id="m-label" placeholder="Subscription label">
     <label>Max Concurrent</label><input id="m-concurrent" type="number" value="15" min="1" max="50">
     <label>Cycle Day (billing reset, 1-28)</label><input id="m-cycle" type="number" value="1" min="1" max="28">
-    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="saveKey(${idx})">Save</button></div>`);
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="saveKey('${keyId}')">Save</button></div>`);
 }
-async function saveKey(idx) {
+async function saveKey(keyId) {
   const label=document.getElementById('m-label').value, mc=parseInt(document.getElementById('m-concurrent').value), cd=parseInt(document.getElementById('m-cycle').value);
-  await postJSON(`/admin/keys/${idx}?label=${encodeURIComponent(label)}&max_concurrent=${mc}&cycle_day=${cd}`, null, 'PUT');
+  await postJSON(`/admin/keys/${keyId}?label=${encodeURIComponent(label)}&max_concurrent=${mc}&cycle_day=${cd}`, null, 'PUT');
   closeModal(); loadSubsPanel();
 }
 
-function editCookies(idx) {
-  showModal(`<h3>Edit Cookies for Key ${idx}</h3>
+function editCookies(keyId) {
+  showModal(`<h3>Edit Subscription Cookies</h3>
     <p style="font-size:11px;color:var(--dim);margin-bottom:12px">Extract from browser DevTools → Application → Cookies → ollama.com</p>
     <label>__Secure-session <span style="color:var(--red)">*</span></label><textarea id="m-ss" placeholder="Required — unique per account"></textarea>
     <label>aid</label><input id="m-aid" placeholder="Account ID (shared across accounts)">
     <label>cf_clearance</label><input id="m-cf" placeholder="Cloudflare bypass (optional)">
     <label>__stripe_mid</label><input id="m-stripe" placeholder="Stripe session (optional)">
-    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="saveCookies(${idx})">Save</button></div>`);
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="saveCookies('${keyId}')">Save</button></div>`);
 }
-async function saveCookies(idx) {
+async function saveCookies(keyId) {
   const body = {};
   const ss=document.getElementById('m-ss').value.trim(); if(ss) body.secure_session=ss;
   const aid=document.getElementById('m-aid').value.trim(); if(aid) body.aid=aid;
   const cf=document.getElementById('m-cf').value.trim(); if(cf) body.cf_clearance=cf;
   const stripe=document.getElementById('m-stripe').value.trim(); if(stripe) body.stripe_mid=stripe;
-  await postJSON(`/admin/keys/${idx}/cookies`, body, 'PUT');
+  await postJSON(`/admin/keys/${keyId}/cookies`, body, 'PUT');
   closeModal(); loadSubsPanel();
 }
 
-async function deleteKey(idx, label) {
+async function deleteKey(keyId, label) {
   if (!confirm(`Remove "${label}"? This takes effect immediately but you should also remove it from config.yaml.`)) return;
-  await postJSON(`/admin/keys/${idx}`, null, 'DELETE');
+  await postJSON(`/admin/keys/${keyId}`, null, 'DELETE');
   loadSubsPanel();
 }
 
