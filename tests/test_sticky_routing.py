@@ -58,7 +58,6 @@ async def fake_chat(request: Request):
     auth = request.headers.get("authorization", "")
     token = auth.replace("Bearer ", "")
     upstream_hits[token] = upstream_hits.get(token, 0) + 1
-    model = body.get("model", "unknown")
     is_stream = body.get("stream", False)
     if is_stream:
         async def generate():

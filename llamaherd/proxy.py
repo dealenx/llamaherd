@@ -14,6 +14,7 @@ OpenAI-compatible proxy that routes requests across multiple Ollama Cloud API ke
 """
 
 import asyncio
+from collections import deque
 import hashlib
 import json
 import logging
@@ -22,10 +23,9 @@ import secrets
 import sqlite3
 import time
 import uuid
-import queue
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, date, timedelta
+from datetime import datetime, timezone, timedelta
 import os
 from pathlib import Path
 from typing import Any, Optional
@@ -810,10 +810,17 @@ class KeyRegistry:
     def update(self, token: str, label: str = None, max_concurrent: int = None,
                cycle_day: int = None) -> Optional[dict]:
         sets, params = [], []
-        if label is not None: sets.append("label = ?"); params.append(label)
-        if max_concurrent is not None: sets.append("max_concurrent = ?"); params.append(max_concurrent)
-        if cycle_day is not None: sets.append("cycle_day = ?"); params.append(cycle_day)
-        if not sets: return None
+        if label is not None:
+            sets.append("label = ?")
+            params.append(label)
+        if max_concurrent is not None:
+            sets.append("max_concurrent = ?")
+            params.append(max_concurrent)
+        if cycle_day is not None:
+            sets.append("cycle_day = ?")
+            params.append(cycle_day)
+        if not sets:
+            return None
         params.append(token)
         self._conn.execute(f"UPDATE upstream_keys SET {', '.join(sets)} WHERE token = ?", params)
         self._conn.commit()
@@ -825,8 +832,10 @@ class KeyRegistry:
                      "cf_clearance": "cf_clearance", "stripe_mid": "stripe_mid"}
         for k, v in cookies.items():
             if k in field_map:
-                sets.append(f"{field_map[k]} = ?"); params.append(v)
-        if not sets: return None
+                sets.append(f"{field_map[k]} = ?")
+                params.append(v)
+        if not sets:
+            return None
         params.append(token)
         self._conn.execute(f"UPDATE upstream_keys SET {', '.join(sets)} WHERE token = ?", params)
         self._conn.commit()
@@ -842,7 +851,8 @@ class KeyRegistry:
             "SELECT token, label, max_concurrent, cycle_day, secure_session, aid, cf_clearance, stripe_mid FROM upstream_keys WHERE token = ?",
             [token]
         ).fetchone()
-        if not r: return None
+        if not r:
+            return None
         return {"token": r[0], "label": r[1], "max_concurrent": r[2], "cycle_day": r[3],
                 "cookies": {"secure_session": r[4] or "", "aid": r[5] or "",
                              "cf_clearance": r[6] or "", "stripe_mid": r[7] or ""}}
@@ -1191,7 +1201,6 @@ class KeyManager:
             key.mark_exhausted(86400)
 
     def status(self) -> list[dict]:
-        now = time.time()
         return [{
             "label": k.label,
             "token_prefix": k.token[:8] + "...",
@@ -2403,7 +2412,6 @@ class UsageDB:
 # Rate Limiting — per-client daily tokens, daily requests, RPM
 # ---------------------------------------------------------------------------
 
-from collections import deque
 _rpm_tracker: dict[str, deque] = {}  # client_id -> deque of request timestamps
 _rpm_lock = asyncio.Lock()
 
@@ -2767,6 +2775,7 @@ async def lifespan(app: FastAPI):
     usage_task = asyncio.create_task(_scrape_usage_loop(usage_scraper, manager, usage_scrape_interval))
     # Telegram notifier (env-based, no UI)
     telegram_notifier = TelegramNotifier()
+    telegram_task: Optional[asyncio.Task] = None
     if telegram_notifier.enabled:
         log.info(f"Telegram notifications enabled (interval={telegram_notifier.interval}s, chat={telegram_notifier.chat_id})")
         telegram_task = asyncio.create_task(
@@ -2813,6 +2822,8 @@ async def lifespan(app: FastAPI):
 
     sub_task.cancel()
     usage_task.cancel()
+    if telegram_task is not None:
+        telegram_task.cancel()
     sweep_task.cancel()
     pricing_sync_task.cancel()
     if fb_metadata_task is not None:
@@ -3037,8 +3048,6 @@ def _extract_session_id(request: Request, body_json: Optional[dict] = None) -> O
 
 def _session_cookie_for_response(session_id: str, ttl: int) -> str:
     """Build a Set-Cookie header for the sticky session."""
-    from datetime import datetime, timezone
-    expires = datetime.now(timezone.utc) + timedelta(seconds=ttl)
     cookie = (
         f"llamaherd-session={session_id}; "
         f"Max-Age={ttl}; "
@@ -3320,12 +3329,12 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
                     if resp.status_code == 429:
                         await manager.mark_429(key)
                         final_status = 429
-                        yield f'data: {{"error": "429 from upstream"}}\n\n'
+                        yield 'data: {"error": "429 from upstream"}\n\n'
                         return
                     if resp.status_code == 402:
                         await manager.mark_402(key)
                         final_status = 402
-                        yield f'data: {{"error": "402 from upstream"}}\n\n'
+                        yield 'data: {"error": "402 from upstream"}\n\n'
                         return
 
                     async for line in resp.aiter_lines():
@@ -3976,8 +3985,7 @@ async def api_generate(request: Request):
 @app.post("/api/show")
 async def api_show(request: Request):
     """Native Ollama /api/show — proxy to upstream with key rotation."""
-    client = _resolve_client(request)
-    client_id = client["id"]
+    _resolve_client(request)
     body = await request.body()
     req_json = json.loads(body) if body else {}
     model = req_json.get("name", req_json.get("model", "unknown"))
@@ -5198,9 +5206,9 @@ async def admin_update_key_cookies(key_id: str, request: Request):
         raise HTTPException(status_code=404, detail="key not found")
     body = await request.json()
     cookies = {}
-    for field in ["secure_session", "aid", "cf_clearance", "stripe_mid"]:
-        if field in body:
-            cookies[field] = body[field]
+    for cookie_field in ["secure_session", "aid", "cf_clearance", "stripe_mid"]:
+        if cookie_field in body:
+            cookies[cookie_field] = body[cookie_field]
     if usage_scraper and hasattr(usage_scraper, 'cookie_map') and cookies:
         usage_scraper.cookie_map[k.label] = cookies
     # Persist to DB
@@ -5344,12 +5352,12 @@ async def admin_update_client(client_id: str, request: Request):
     body = await request.json()
     # Use Ellipsis sentinel: if key not in body, don't update; if null, clear the limit
     kwargs = {}
-    for field in ("label", "notes", "token"):
-        if field in body:
-            kwargs[field] = body[field]
-    for field in ("daily_token_limit", "daily_request_limit", "rpm_limit"):
-        if field in body:
-            kwargs[field] = body[field]  # None clears the limit
+    for client_field in ("label", "notes", "token"):
+        if client_field in body:
+            kwargs[client_field] = body[client_field]
+    for limit_field in ("daily_token_limit", "daily_request_limit", "rpm_limit"):
+        if limit_field in body:
+            kwargs[limit_field] = body[limit_field]  # None clears the limit
     try:
         result = client_registry.update(client_id, **kwargs)
         if result is None:

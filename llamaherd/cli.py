@@ -556,7 +556,7 @@ def main():
 
     if args.command == "serve":
         # Import and start the proxy server
-        from .proxy import main as proxy_main, load_config
+        from .proxy import main as proxy_main
         import os
         if args.config:
             os.environ["LLAMAHERD_CONFIG"] = args.config

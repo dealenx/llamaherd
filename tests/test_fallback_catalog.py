@@ -1,8 +1,6 @@
 """Tests for the FallbackProvider model catalog + metadata cache."""
-import json
 import time
 
-import pytest
 from fastapi.testclient import TestClient
 
 from llamaherd.proxy import FallbackProvider

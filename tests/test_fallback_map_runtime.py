@@ -1,5 +1,4 @@
 """Tests for runtime fallback model_map mutations (POST/DELETE /admin/fallback-map)."""
-import asyncio
 
 import pytest
 from fastapi.testclient import TestClient
