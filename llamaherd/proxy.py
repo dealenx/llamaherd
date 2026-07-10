@@ -3056,7 +3056,10 @@ async def _proxy_request(request: Request, path: str) -> Response:
 
     request_id = _new_request_id()
     body = await request.body()
-    req_json = json.loads(body) if body else {}
+    try:
+        req_json = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON request body"})
     session_id = _extract_session_id(request, req_json)
     if not session_id:
         session_id = "lh_" + secrets.token_urlsafe(16)
@@ -3621,7 +3624,10 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
 
     request_id = _new_request_id()
     body = await request.body()
-    req_json = json.loads(body) if body else {}
+    try:
+        req_json = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON request body"})
     model = req_json.get("model", "unknown")
     is_stream = req_json.get("stream", False)
 
