@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+__pycache__
+*.py[cod]
+*.db
+*.egg-info
+.env
+config.yaml
+tests
+docs
+assets
+CODEX_TASK.md
