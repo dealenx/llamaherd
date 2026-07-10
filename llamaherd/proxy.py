@@ -24,6 +24,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 import os
@@ -2957,6 +2958,17 @@ async def _sweep_stale_inflight(interval: int = 300, max_age_seconds: int = 600)
 
 
 app = FastAPI(title="Ollama Cloud Proxy", lifespan=lifespan)
+_secure_cookie_context: ContextVar[bool] = ContextVar("secure_cookie", default=False)
+
+
+@app.middleware("http")
+async def session_cookie_security(request: Request, call_next):
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    token = _secure_cookie_context.set(request.url.scheme == "https" or forwarded_proto == "https")
+    try:
+        return await call_next(request)
+    finally:
+        _secure_cookie_context.reset(token)
 
 
 @app.get("/healthz")
@@ -3063,6 +3075,8 @@ def _session_cookie_for_response(session_id: str, ttl: int) -> str:
         f"HttpOnly; "
         f"SameSite=Lax"
     )
+    if _secure_cookie_context.get():
+        cookie += "; Secure"
     return cookie
 
 
