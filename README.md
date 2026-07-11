@@ -101,6 +101,9 @@ Then point your client at `http://127.0.0.1:8399/v1` with `Authorization: Bearer
 
 ## 🍪 Usage Tracking Cookies
 
+Usage scraping is optional. Install it with `pip install 'llamaherd[scraping]'`
+when installing from PyPI/source; the Docker image includes it by default.
+
 To see session and weekly usage percentages, you need browser cookies from each Ollama account:
 
 1. Log into ollama.com/settings in your browser

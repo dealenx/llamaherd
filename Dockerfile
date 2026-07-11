@@ -3,7 +3,7 @@ FROM python:3.11-slim AS builder
 WORKDIR /build
 COPY pyproject.toml README.md LICENSE ./
 COPY llamaherd/ llamaherd/
-RUN pip wheel --no-cache-dir --wheel-dir /wheels .
+RUN pip wheel --no-cache-dir --wheel-dir /wheels '.[scraping]'
 
 FROM python:3.11-slim AS runtime
 
