@@ -230,6 +230,7 @@ telegram_notifier: Optional[TelegramNotifier] = None
 upstream_http_client: Optional[httpx.AsyncClient] = None
 fallback_provider: Optional[FallbackProvider] = None
 model_alias_manager: Optional[ModelAliasManager] = None
+sticky: Optional[StickySessionManager] = None
 upstream_url: str = ""
 retry_on_429: bool = True
 max_retries: int = 2
