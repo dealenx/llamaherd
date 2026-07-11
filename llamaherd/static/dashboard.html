@@ -1,0 +1,1351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LlamaHerd — Ollama Cloud Router</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2220%22 fill=%22%230d1117%22/><text y=%22.9em%22 x=%2250%22 text-anchor=%22middle%22 font-size=%2275%22>🦙</text></svg>">
+<style>
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #c9d1d9; --dim: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --yellow: #d29922;
+  --purple: #bc8cff; --orange: #f0883e;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+       background: var(--bg); color: var(--text); padding: 20px; font-size: 14px; }
+h1 { font-size: 22px; margin-bottom: 4px; }
+.brandline { color: #f2d6a2; font-size: 13px; margin-bottom: 10px; }
+.subtitle { color: var(--dim); font-size: 13px; margin-bottom: 20px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.card .label { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.card .value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.card .value.blue { color: var(--accent); }
+.card .value.green { color: var(--green); }
+.card .value.purple { color: var(--purple); }
+.card .value.yellow { color: var(--yellow); }
+.section { margin-bottom: 28px; }
+.section h2 { font-size: 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.section h3 { font-size: 14px; margin: 12px 0 6px; color: var(--accent); }
+.badge { font-size: 11px; background: var(--border); padding: 2px 8px; border-radius: 10px; color: var(--dim); }
+.badge.live { background: #1a3a1a; color: var(--green); }
+.badge.new { background: #1a3a1a; color: var(--green); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+th { text-align: left; color: var(--dim); font-weight: 500; font-size: 11px; text-transform: uppercase;
+     letter-spacing: 0.5px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+td { padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+tr:hover td { background: rgba(88,166,255,0.04); }
+.bar { display: inline-block; height: 8px; border-radius: 4px; min-width: 2px; }
+.bar.in { background: var(--accent); }
+.bar.out { background: var(--purple); }
+.bars { display: flex; gap: 2px; align-items: center; }
+.key-status { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+.key-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+           padding: 14px; min-width: 260px; flex: 1; }
+.key-card .key-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.key-card .key-label { font-weight: 600; font-size: 14px; }
+.key-card .key-plan { font-size: 11px; background: var(--border); padding: 2px 8px; border-radius: 10px; }
+.key-card .key-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+.key-card .key-row .kdim { color: var(--dim); }
+.pct-bar-wrap { width: 100%; height: 6px; background: var(--border); border-radius: 3px; margin-top: 4px; overflow: hidden; position: relative; }
+.pct-bar { height: 100%; border-radius: 3px; transition: width .3s, background .3s; }
+.pct-elapsed { position: absolute; top: 0; bottom: 0; width: 2px; border-left: 2px dashed rgba(255,255,255,0.8); background: none; transition: left .3s; z-index: 1; }
+.status-ok { color: var(--green); }
+.status-err { color: var(--red); }
+.status-warn { color: var(--yellow); }
+.filters { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; }
+.filters select, .filters input { background: var(--surface); color: var(--text); border: 1px solid var(--border);
+       border-radius: 4px; padding: 4px 8px; font-size: 13px; }
+.filters label { font-size: 12px; color: var(--dim); }
+#feed-table { max-height: 500px; overflow-y: auto; }
+.model-info { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; color: var(--dim); flex-wrap: wrap; }
+.model-info .mi-val { color: var(--text); font-weight: 600; }
+.model-info .new-models { color: var(--green); }
+.model-info button, .btn { background: var(--border); color: var(--text); border: none; padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+.model-info button:hover, .btn:hover { background: var(--accent); color: #fff; }
+.model-info button:disabled, .btn:disabled { opacity: 0.5; cursor: default; }
+.btn-danger { background: #3d1214; color: var(--red); }
+.btn-danger:hover { background: var(--red); color: #fff; }
+.btn-sm { padding: 2px 8px; font-size: 11px; }
+.date-range { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.date-range select, .date-range input { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 13px; }
+.date-range label { font-size: 12px; color: var(--dim); }
+.sse-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.sse-dot.ok { background: var(--green); }
+.sse-dot.off { background: var(--red); }
+.tab-bar { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+.tab { padding: 8px 16px; font-size: 13px; color: var(--dim); cursor: pointer; border-bottom: 2px solid transparent; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 100; display: flex; align-items: center; justify-content: center; }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 24px; min-width: 400px; max-width: 600px; max-height: 80vh; overflow-y: auto; }
+.modal h3 { margin-bottom: 16px; }
+.modal label { display: block; font-size: 12px; color: var(--dim); margin: 8px 0 2px; }
+.modal input, .modal select, .modal textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font-size: 13px; font-family: monospace; }
+.modal textarea { min-height: 60px; }
+.modal .modal-actions { margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end; }
+.models-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; }
+.model-chip { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-size: 12px; transition: border-color .2s; }
+.model-chip:hover { border-color: var(--accent); }
+.model-chip .mc-name { font-weight: 600; font-size: 13px; margin-bottom: 2px; word-break: break-all; }
+.model-chip .mc-meta { color: var(--dim); font-size: 11px; }
+.model-chip .mc-ctx { color: var(--purple); }
+.model-chip .mc-keys { color: var(--green); }
+.model-chip .mc-usage { margin-top: 4px; }
+.model-chip .mc-usage .bar { height: 4px; }
+.search-input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; font-size: 13px; width: 200px; }
+.key-mgmt { margin-top: 12px; }
+.key-mgmt-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 10px; }
+.key-mgmt-card .km-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.key-mgmt-card .km-label { font-weight: 600; }
+.key-mgmt-card .km-row { font-size: 12px; color: var(--dim); padding: 2px 0; display: flex; justify-content: space-between; }
+.key-mgmt-card .km-row span:last-child { color: var(--text); }
+.cookie-bad { color: var(--red); }
+.cookie-ok { color: var(--green); }
+/* In-flight panel */
+@keyframes inflight-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(88,166,255,0.45); border-color: var(--accent); }
+  70% { box-shadow: 0 0 0 6px rgba(88,166,255,0); border-color: var(--accent); }
+  100% { box-shadow: 0 0 0 0 rgba(88,166,255,0); border-color: var(--accent); }
+}
+@keyframes flash-green { 0% { background: rgba(63,185,80,0.35); } 100% { background: transparent; } }
+@keyframes flash-red   { 0% { background: rgba(248,81,73,0.35); } 100% { background: transparent; } }
+.inflight-item { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px;
+  background: var(--surface); animation: inflight-pulse 1.6s ease-out infinite; overflow: hidden; }
+.inflight-item.ending-ok  { animation: flash-green 0.4s ease-out forwards; }
+.inflight-item.ending-err { animation: flash-red 0.4s ease-out forwards; }
+.inflight-row { display: grid;
+  grid-template-columns: minmax(140px,1fr) minmax(200px,2fr) 110px 110px 90px 18px;
+  gap: 10px; align-items: center; padding: 8px 12px; font-size: 13px; cursor: pointer;
+  user-select: none; }
+.inflight-row .if-client { color: var(--text); }
+.inflight-row .if-model  { color: var(--accent); font-family: monospace; }
+.inflight-row .if-target { color: var(--dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.inflight-row .if-tokens { color: var(--purple); font-size: 12px; font-variant-numeric: tabular-nums; }
+.inflight-row .if-tokens .if-tin  { color: var(--green); }
+.inflight-row .if-tokens .if-tout { color: var(--purple); }
+.inflight-row .if-elapsed { font-variant-numeric: tabular-nums; color: var(--yellow); text-align: right; }
+.inflight-row .if-caret { color: var(--dim); transition: transform .2s ease; text-align: center; font-size: 10px; }
+.inflight-item.expanded .if-caret { transform: rotate(90deg); }
+.inflight-details { max-height: 0; overflow: hidden; transition: max-height 0.25s ease-out;
+  padding: 0 12px; border-top: 0 solid var(--border); font-size: 12px; }
+.inflight-item.expanded .inflight-details { max-height: 380px; padding: 8px 12px; border-top: 1px solid var(--border); overflow-y: auto; }
+.inflight-details .ifd-row { display: grid; grid-template-columns: 130px 1fr; gap: 8px; padding: 2px 0; }
+.inflight-details .ifd-row .ifd-k { color: var(--dim); }
+.inflight-details .ifd-row .ifd-v { color: var(--text); font-family: monospace; word-break: break-all; }
+.inflight-details .ifd-headers { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--border); }
+.inflight-details .ifd-headers .ifd-k { font-size: 11px; }
+.inflight-details .ifd-headers .ifd-v { font-size: 11px; color: var(--dim); }
+.provider-badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px; margin-left: 6px; vertical-align: middle; }
+.provider-badge.oc { background: #173a23; color: #6fdc8c; }
+.provider-badge.nv { background: #14274d; color: #76b6ff; }
+.provider-badge.both { background: #2a2a4d; color: #c8b6ff; }
+.provider-badge.unknown { background: var(--border); color: var(--dim); }
+.fb-map-toggle { font-size: 11px; color: var(--accent); cursor: pointer; background: none; border: none; padding: 0 4px; }
+.fb-map-panel { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin-top: 6px; max-height: 240px; overflow-y: auto; font-size: 12px; }
+.fb-map-panel table { width: 100%; }
+.fb-map-panel td { padding: 3px 8px; border: none; }
+.fb-map-panel td.fb-pri { color: var(--dim); font-size: 11px; }
+.fb-map-panel td.fb-actions { width: 28px; text-align: right; }
+.fb-map-panel button.fb-rm { background: transparent; color: var(--red); border: none; cursor: pointer; font-size: 14px; padding: 0 6px; }
+.fb-map-panel button.fb-rm:hover { background: rgba(248,81,73,0.15); border-radius: 3px; }
+.fb-map-panel .fb-add-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed var(--border); flex-wrap: wrap; }
+.fb-map-panel .fb-add-row input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; font-size: 12px; font-family: monospace; min-width: 140px; flex: 1; }
+#inflight-empty { color: var(--dim); font-size: 12px; padding: 8px 12px; }
+/* Model Catalog */
+.catalog-section { margin-top: 24px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.catalog-header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; user-select: none; flex-wrap: wrap; }
+.catalog-header:hover { background: rgba(88,166,255,0.05); }
+.catalog-header .ch-title { font-weight: 600; font-size: 14px; flex: 1; }
+.catalog-header .ch-caret { color: var(--dim); font-size: 11px; transition: transform .2s ease; }
+.catalog-section.open .ch-caret { transform: rotate(90deg); }
+.catalog-body { display: none; padding: 0 14px 14px; }
+.catalog-section.open .catalog-body { display: block; }
+.catalog-controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.catalog-controls .search-input { flex: 1; min-width: 220px; }
+.catalog-org { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.catalog-org-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; user-select: none; font-size: 12px; }
+.catalog-org-header:hover { background: rgba(88,166,255,0.04); }
+.catalog-org-header .co-name { font-weight: 600; color: var(--accent); }
+.catalog-org-header .co-count { color: var(--dim); font-size: 11px; }
+.catalog-org-header .co-caret { color: var(--dim); font-size: 10px; transition: transform .2s ease; margin-left: auto; }
+.catalog-org.open .co-caret { transform: rotate(90deg); }
+.catalog-org-body { display: none; padding: 0 8px 8px; }
+.catalog-org.open .catalog-org-body { display: block; }
+.catalog-row { display: grid; grid-template-columns: 2fr 70px 80px 1.5fr 100px;
+  gap: 8px; align-items: center; padding: 6px 8px; border-top: 1px solid var(--border); font-size: 12px; overflow: hidden; }
+.catalog-row:first-child { border-top: none; }
+.catalog-row .cr-name { font-family: monospace; word-break: break-all; }
+.catalog-row .cr-name a { color: var(--text); text-decoration: none; }
+.catalog-row .cr-name a:hover { color: var(--accent); text-decoration: underline; }
+.catalog-row .cr-meta { color: var(--dim); font-variant-numeric: tabular-nums; }
+.catalog-row .cr-mapped { color: var(--green); font-size: 11px; }
+.catalog-row .cr-mapped .cr-alias { color: var(--text); font-family: monospace; }
+.catalog-row .cr-action { text-align: right; }
+.catalog-empty { color: var(--dim); font-size: 12px; padding: 8px 0; }
+</style>
+</head>
+<body>
+<h1>🦙 LlamaHerd</h1>
+<p class="brandline">One endpoint. Many llamas. Smarter routing.</p>
+<p class="subtitle">
+  <span id="upstream-url"></span>
+  <span class="sse-dot" id="sse-dot"></span>
+  <span id="sse-label" style="font-size:11px">connecting...</span>
+  <span class="date-range">
+    <label>Period:</label>
+    <select id="period-select">
+      <option value="today" selected>Today</option>
+      <option value="yesterday">Yesterday</option>
+      <option value="7d">Last 7 days</option>
+      <option value="this_week">This Week</option>
+      <option value="this_month">This Month</option>
+      <option value="last_month">Last Month</option>
+      <option value="custom">Custom</option>
+    </select>
+    <span id="custom-dates" style="display:none">
+      <input type="date" id="date-start">
+      <input type="date" id="date-end">
+    </span>
+  </span>
+</p>
+
+<div class="model-info" id="model-info">
+  <span>Models: <span class="mi-val" id="mi-count">-</span></span>
+  <span>Refreshed: <span class="mi-val" id="mi-refresh">-</span></span>
+  <span id="sticky-info" style="display:none">Sticky sessions: <span class="mi-val" id="sticky-count">-</span> / TTL <span class="mi-val" id="sticky-ttl">-</span>s</span>
+  <span id="mi-new" class="new-models" style="display:none"></span>
+  <button id="btn-refresh-models">🔄 Refresh</button>
+  <span id="fallback-control" style="display:none; margin-left:auto; align-items:center; gap:6px;">
+    <span class="badge" id="fb-provider-badge">fallback</span>
+    <span style="font-size:11px; color:var(--dim)" id="fb-model-count">0 mapped / 0 discovered</span>
+    <button type="button" class="fb-map-toggle" id="fb-map-toggle">show map</button>
+    <label style="font-size:11px; color:var(--dim)">Priority:</label>
+    <select id="fb-priority" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:12px">
+      <option value="after">after (Ollama first)</option>
+      <option value="before">before (Fallback first)</option>
+      <option value="only">only (Fallback only)</option>
+    </select>
+  </span>
+</div>
+<div id="fb-map-panel" class="fb-map-panel" style="display:none"></div>
+
+<div class="section" id="inflight-section">
+  <h2>In-Flight Requests <span class="badge live" id="inflight-count">0</span></h2>
+  <div id="inflight-list"><div id="inflight-empty">No requests in flight</div></div>
+</div>
+
+<div class="tab-bar">
+  <div class="tab active" data-tab="overview">Overview</div>
+  <div class="tab" data-tab="models">Models</div>
+  <div class="tab" data-tab="subs">Subscriptions</div>
+  <div class="tab" data-tab="quota">Quota Cost</div>
+  <div class="tab" data-tab="costs">OpenRouter $</div>
+</div>
+
+<div class="tab-panel active" id="panel-overview">
+  <div id="key-status" class="key-status"></div>
+  <div id="totals" class="grid"></div>
+
+  <div class="section">
+    <h2>Per-Client Totals <span class="badge" id="badge-client">this month</span></h2>
+    <div style="overflow-x:auto"><table id="client-table"><thead><tr>
+      <th>Client</th><th>Calls</th><th>Tokens In</th><th>Tokens Out</th><th>Total Tokens</th><th>Breakdown</th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>
+
+  <div class="section">
+    <h2>Per-Model Totals <span class="badge" id="badge-model">this month</span></h2>
+    <div style="overflow-x:auto"><table id="model-table"><thead><tr>
+      <th>Model</th><th>Calls</th><th>Tokens In</th><th>Tokens Out</th><th>Total Tokens</th><th>Avg Latency</th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>
+
+  <div class="section">
+    <h2>Daily Breakdown <span class="badge" id="badge-daily">this month</span></h2>
+    <div style="overflow-x:auto"><table id="daily-table"><thead><tr>
+      <th>Day</th><th>Calls</th><th>Tokens In</th><th>Tokens Out</th><th>Total Tokens</th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>
+
+  <div class="section">
+    <h2>Live Call Feed <span class="badge live" id="feed-count">0</span></h2>
+    <div class="filters">
+      <label>Client:</label><select id="filter-client"><option value="">All</option></select>
+      <label>Model:</label><select id="filter-model"><option value="">All</option></select>
+      <label>Limit:</label><select id="feed-limit">
+        <option value="50">50</option><option value="100" selected>100</option><option value="250">250</option><option value="500">500</option>
+      </select>
+    </div>
+    <div id="feed-table"><table id="feed-tbl"><thead><tr>
+      <th>Time</th><th>Client</th><th>Model</th><th>Key</th><th>In</th><th>Out</th><th>Latency</th><th>Status</th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>
+</div>
+
+<div class="tab-panel" id="panel-models">
+  <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+    <input type="text" class="search-input" id="model-search" placeholder="Search models...">
+    <select id="model-sort" style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:13px">
+      <option value="name">Sort: Name</option>
+      <option value="ctx">Sort: Context Length</option>
+      <option value="keys">Sort: Availability</option>
+      <option value="updated">Sort: Updated</option>
+      <option value="params">Sort: Parameters</option>
+      <option value="family">Sort: Family</option>
+    </select>
+  </div>
+  <div class="models-grid" id="models-grid"></div>
+
+  <div class="catalog-section" id="catalog-section">
+    <div class="catalog-header" id="catalog-header">
+      <span class="ch-caret">▶</span>
+      <span class="ch-title">NVIDIA Build Catalog</span>
+      <span class="badge" id="catalog-count">0</span>
+      <span style="font-size:11px; color:var(--dim)" id="catalog-summary"></span>
+    </div>
+    <div class="catalog-body">
+      <div class="catalog-controls">
+        <input type="text" class="search-input" id="catalog-search" placeholder="Filter by name or org...">
+        <button class="btn btn-sm" id="catalog-refresh">🔄 Refresh</button>
+        <button class="btn btn-sm" id="catalog-add-mapping">+ Add Mapping</button>
+      </div>
+      <div id="catalog-list"><div class="catalog-empty">Open this panel to load the catalog.</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="tab-panel" id="panel-subs">
+  <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+    <button class="btn" id="btn-add-key">+ Add Subscription</button>
+    <button class="btn" id="btn-telegram-test">📤 Send Telegram Test</button>
+    <span id="telegram-test-result" style="font-size:11px;color:var(--dim)"></span>
+  </div>
+  <div id="subs-list"></div>
+  <h3 style="margin-top:24px;border-top:1px solid var(--border);padding-top:16px">Client Keys</h3>
+  <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center">
+    <button class="btn" id="btn-add-client">+ Add Client</button>
+    <span style="font-size:11px;color:var(--dim)">Client keys attribute usage and enforce rate limits</span>
+  </div>
+  <div id="client-list"></div>
+</div>
+
+<div class="tab-panel" id="panel-quota">
+  <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+    <h2 style="margin:0">Model Usage by Quota Window</h2>
+    <span class="badge" id="quota-badge">0</span>
+    <button class="btn btn-sm" id="quota-refresh">🔄 Refresh</button>
+  <span style="font-size:11px;color:var(--dim)" id="quota-subtitle">Pie charts of model mix contributing to each key's session and weekly quota bars (scraped from ollama.com/settings).</span>
+  </div>
+  <div id="quota-status" style="color:var(--dim);margin-bottom:1em"></div>
+  <div id="quota-charts" style="display:flex;flex-wrap:wrap;gap:24px;justify-content:center"></div>
+  <div id="quota-note" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
+  <h3 style="margin-top:24px;margin-bottom:8px">Implied Quota Cost per Token</h3>
+  <div style="font-size:11px;color:var(--dim);margin-bottom:8px">Derived from scraped quota share ÷ actual token share, averaged across keys. Cheapest model = 1.0.</div>
+  <div style="overflow-x:auto"><table id="quota-coefs-table"><thead><tr>
+    <th>Model</th><th>Req</th><th>Tokens</th><th>Quota Share</th><th>Token Share</th><th>Coefficient</th><th>Relative</th><th>Keys</th>
+  </tr></thead><tbody></tbody></table></div>
+</div>
+
+<div class="tab-panel" id="panel-costs">
+  <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+    <h2 style="margin:0">OpenRouter Equivalent Cost</h2>
+    <button class="btn" id="costs-refresh">Refresh</button>
+    <span class="badge" id="costs-badge">0</span>
+    <span style="font-size:11px;color:var(--dim)">What usage WOULD have cost on OpenRouter pay-per-token pricing</span>
+  </div>
+  <div id="costs-total" class="grid" style="margin-bottom:16px"></div>
+  <div style="overflow-x:auto"><table id="costs-table"><thead><tr>
+    <th>Model</th><th>Req</th><th>Tokens In</th><th>Tokens Out</th><th>Input $</th><th>Output $</th><th>Total $</th><th>$/1M In</th><th>$/1M Out</th>
+  </tr></thead><tbody></tbody></table></div>
+  <div id="costs-unpriced" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
+</div>
+
+<div id="modal-root"></div>
+
+<script>
+const API = (function() { const p = window.location.pathname; return p.includes('/ocp') ? '/ocp' : ''; })();
+let ADMIN_TOKEN = (function() {
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  const t = fragment.get('token');
+  if (t) {
+    localStorage.setItem('ocp_admin_token', t);
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+    return t;
+  }
+  return localStorage.getItem('ocp_admin_token') || '';
+})();
+if (!ADMIN_TOKEN) {
+  ADMIN_TOKEN = window.prompt('LlamaHerd admin token') || '';
+  if (ADMIN_TOKEN) localStorage.setItem('ocp_admin_token', ADMIN_TOKEN);
+  else document.body.innerHTML = '<div style="color:var(--red);text-align:center;padding:3em"><h2>Authentication Required</h2><p>Open <code>/dashboard#token=YOUR_TOKEN</code> or reload and enter the token.</p></div>';
+}
+
+function fmt(n) { if (n >= 1e6) return (n/1e6).toFixed(2)+'M'; if (n >= 1e3) return (n/1e3).toFixed(1)+'K'; return String(n); }
+function fmtTs(ts) { const d = new Date(ts*1000); return d.toLocaleDateString('en-CA')+' '+d.toLocaleTimeString('en-GB'); }
+function fmtCtx(n) { if (!n) return '-'; if (n >= 1048576) return (n/1048576).toFixed(0)+'M'; if (n >= 1024) return (n/1024).toFixed(0)+'K'; return n; }
+function relTime(ts) { if (!ts) return '-'; const diff=(Date.now()/1000)-ts; if(diff<60)return Math.round(diff)+'s ago'; if(diff<3600)return Math.round(diff/60)+'m ago'; if(diff<86400)return Math.round(diff/3600)+'h ago'; return Math.round(diff/86400)+'d ago'; }
+
+function pctBarWithElapsed(pct, elapsedPct, defaultColor) {
+  if (pct == null || pct < 0) return '<div class="pct-bar-wrap"><div class="pct-bar" style="width:0%;background:var(--border)"></div></div>';
+  let c = defaultColor;
+  if (elapsedPct > 0 && pct > 0) { c = pct <= elapsedPct ? 'var(--green)' : pct < elapsedPct*2 ? 'var(--yellow)' : 'var(--red)'; }
+  const el = (elapsedPct > 0 && elapsedPct < 100) ? `<div class="pct-elapsed" style="left:${Math.min(elapsedPct,98)}%"></div>` : '';
+  return `<div class="pct-bar-wrap"><div class="pct-bar" style="width:${Math.min(pct,100)}%;background:${c}"></div>${el}</div>`;
+}
+function pctBar(pct, color) { if (pct == null) return ''; return `<div class="pct-bar-wrap"><div class="pct-bar" style="width:${Math.min(pct,100)}%;background:${color}"></div></div>`; }
+
+const adminHeaders = () => ({'Authorization': 'Bearer ' + ADMIN_TOKEN, 'Content-Type': 'application/json'});
+async function loadJSON(url) { const r = await fetch(API+url, {headers: adminHeaders()}); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }
+async function postJSON(url, body, method) { const r = await fetch(API+url, {method:method||'POST', headers:adminHeaders(), body:body?JSON.stringify(body):undefined}); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }
+
+// --- Date Range ---
+function getDateRange() {
+  const sel = document.getElementById('period-select').value;
+  const today = new Date(); const iso = d => d.toISOString().slice(0,10);
+  const monday = d => { const day=d.getDay(); const diff=d.getDate()-day+(day===0?-6:1); return new Date(d.setDate(diff)); };
+  switch(sel) {
+    case 'today': return {start:iso(today), end:iso(today), label:'Today'};
+    case 'yesterday': { const y=new Date(today); y.setDate(y.getDate()-1); return {start:iso(y),end:iso(y),label:'Yesterday'}; }
+    case '7d': { const s=new Date(today); s.setDate(s.getDate()-6); return {start:iso(s),end:iso(today),label:'7d'}; }
+    case 'this_week': { const m=monday(new Date(today)); return {start:iso(m),end:iso(today),label:'This week'}; }
+    case 'this_month': return {start:iso(new Date(today.getFullYear(),today.getMonth(),1)),end:iso(today),label:'This month'};
+    case 'last_month': { const lm=new Date(today.getFullYear(),today.getMonth()-1,1); const le=new Date(today.getFullYear(),today.getMonth(),0); return {start:iso(lm),end:iso(le),label:'Last month'}; }
+    case 'custom': return {start:document.getElementById('date-start').value,end:document.getElementById('date-end').value,label:'Custom'};
+    default: return {start:iso(new Date(today.getFullYear(),today.getMonth(),1)),end:iso(today),label:'This month'};
+  }
+}
+function updateBadges(l) { document.getElementById('badge-client').textContent=l; document.getElementById('badge-model').textContent=l; document.getElementById('badge-daily').textContent=l; }
+
+// --- Tabs ---
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', function() {
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(x=>x.classList.remove('active'));
+  this.classList.add('active');
+  document.getElementById('panel-'+this.dataset.tab).classList.add('active');
+  if (this.dataset.tab === 'models') loadModelsPanel();
+  if (this.dataset.tab === 'subs') { loadSubsPanel(); loadClients(); }
+}));
+
+// --- SSE ---
+let eventSource = null, reconnectDelay = 1000, feedCalls = [];
+
+async function connectSSE() {
+  try {
+    const session = await postJSON('/admin/session');
+    const url = `${window.location.protocol}//${window.location.host}${API}/admin/events?session_token=${encodeURIComponent(session.session_token)}`;
+    eventSource = new EventSource(url);
+  } catch (e) {
+    setTimeout(connectSSE, reconnectDelay); reconnectDelay=Math.min(reconnectDelay*2,30000); return;
+  }
+  eventSource.onopen = () => { reconnectDelay=1000; document.getElementById('sse-dot').className='sse-dot ok'; document.getElementById('sse-label').textContent='live'; };
+  eventSource.onerror = () => { document.getElementById('sse-dot').className='sse-dot off'; document.getElementById('sse-label').textContent='reconnecting...'; eventSource.close(); setTimeout(connectSSE,reconnectDelay); reconnectDelay=Math.min(reconnectDelay*2,30000); };
+  eventSource.addEventListener('status', e => { const d=JSON.parse(e.data); renderKeyStatus(d.keys||[]); document.getElementById('upstream-url').textContent=d.upstream||''; updateStickyBadge(d); });
+  eventSource.addEventListener('models', e => updateModelInfo(JSON.parse(e.data)));
+  eventSource.onmessage = e => {
+    try {
+      const m=JSON.parse(e.data);
+      if(m.type==='call') { if(callInCurrentRange(m.data)) schedulePeriodRefresh(); }
+      else if(m.type==='request_start') { addInFlight(m.data); }
+      else if(m.type==='request_end') { addCallToFeed(m.data); removeInFlight(m.data); }
+      else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; updateStickyBadge(d); }
+      else if(m.type==='models') updateModelInfo(m.data||{});
+      else if(m.type==='fallback_priority') { const sel=document.getElementById('fb-priority'); if(m.data && m.data.priority) sel.value = m.data.priority; }
+      else if(m.type==='fallback_map_update') { loadFallbackStatus(); if (catalogLoaded) loadCatalog(true); }
+    } catch(err){}
+  };
+}
+
+// --- In-Flight Panel ---
+const inFlight = {};  // request_id -> { client_id, model, target_key, target_provider, started_at }
+function fmtElapsed(ms) {
+  if (ms < 1000) return ms + 'ms';
+  if (ms < 60000) return (ms/1000).toFixed(1) + 's';
+  const m = Math.floor(ms/60000), s = Math.floor((ms%60000)/1000);
+  return m + 'm' + s + 's';
+}
+function providerBadge(p) {
+  if (!p) return '<span class="provider-badge unknown" title="unknown provider">?</span>';
+  // Allow combined "ollama-cloud,nvidia-build" tagging from /admin/models or end events.
+  const parts = String(p).split(',').map(s => s.trim()).filter(Boolean);
+  const hasOC = parts.some(x => x === 'ollama-cloud');
+  const hasFB = parts.some(x => x && x !== 'ollama-cloud');
+  if (hasOC && hasFB) return `<span class="provider-badge both" title="${p}">OC+NV</span>`;
+  if (hasOC) return `<span class="provider-badge oc" title="ollama-cloud">OC</span>`;
+  return `<span class="provider-badge nv" title="${p}">NV</span>`;
+}
+const expandedInFlight = new Set();  // request_ids that are currently expanded
+function escAttr(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+function escHtml(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function renderInFlightDetails(r) {
+  const startedIso = r.started_at ? new Date(r.started_at * 1000).toISOString() : '-';
+  const headers = r.headers || {};
+  const headerRows = Object.keys(headers).sort().map(k =>
+    `<div class="ifd-row"><span class="ifd-k">${escHtml(k)}</span><span class="ifd-v">${escHtml(headers[k])}</span></div>`
+  ).join('');
+  return `<div class="inflight-details">
+    <div class="ifd-row"><span class="ifd-k">request_id</span><span class="ifd-v">${escHtml(r.request_id)}</span></div>
+    <div class="ifd-row"><span class="ifd-k">target key</span><span class="ifd-v">${escHtml(r.target_key || '-')}</span></div>
+    <div class="ifd-row"><span class="ifd-k">provider</span><span class="ifd-v">${escHtml(r.target_provider || '-')}</span></div>
+    <div class="ifd-row"><span class="ifd-k">model</span><span class="ifd-v">${escHtml(r.model || '-')}</span></div>
+    <div class="ifd-row"><span class="ifd-k">client</span><span class="ifd-v">${escHtml(r.client_id || '-')}</span></div>
+    <div class="ifd-row"><span class="ifd-k">started_at</span><span class="ifd-v">${escHtml(startedIso)}</span></div>
+    ${r.path ? `<div class="ifd-row"><span class="ifd-k">path</span><span class="ifd-v">${escHtml(r.path)}</span></div>` : ''}
+    ${headerRows ? `<div class="ifd-headers">${headerRows}</div>` : '<div class="ifd-row"><span class="ifd-k">headers</span><span class="ifd-v" style="color:var(--dim)">(none captured)</span></div>'}
+  </div>`;
+}
+function renderInFlight() {
+  const list = document.getElementById('inflight-list');
+  const ids = Object.keys(inFlight);
+  document.getElementById('inflight-count').textContent = ids.length;
+  if (!ids.length) { list.innerHTML = '<div id="inflight-empty">No requests in flight</div>'; return; }
+  const now = Date.now() / 1000;
+  list.innerHTML = ids.map(id => {
+    const r = inFlight[id];
+    const elapsed = Math.max(0, Math.round((now - r.started_at) * 1000));
+    const expanded = expandedInFlight.has(id) ? ' expanded' : '';
+    const ending = r._ending ? ' ending-' + (r._ending === 'ok' ? 'ok' : 'err') : '';
+    const tin = r.tokens_in || 0, tout = r.tokens_out || 0;
+    return `<div class="inflight-item${expanded}${ending}" id="if-${escAttr(id)}" data-rid="${escAttr(id)}">
+      <div class="inflight-row" onclick="toggleInFlight('${escAttr(id)}')">
+        <div class="if-client">${escHtml(r.client_id)}</div>
+        <div><span class="if-model">${escHtml(r.model)}</span>${providerBadge(r.target_provider)}</div>
+        <div class="if-target" title="${escAttr(r.target_key || '')}">${escHtml(r.target_key || '-')}</div>
+        <div class="if-tokens"><span class="if-tin" data-tin>${fmt(tin)}</span> in / <span class="if-tout" data-tout>${fmt(tout)}</span> out</div>
+        <div class="if-elapsed" data-started="${r.started_at}">${fmtElapsed(elapsed)}</div>
+        <div class="if-caret">▶</div>
+      </div>
+      ${renderInFlightDetails(r)}
+    </div>`;
+  }).join('');
+}
+function toggleInFlight(id) {
+  if (expandedInFlight.has(id)) expandedInFlight.delete(id); else expandedInFlight.add(id);
+  const item = document.getElementById('if-' + id);
+  if (item) item.classList.toggle('expanded');
+}
+function addInFlight(d) {
+  if (!d || !d.request_id) return;
+  inFlight[d.request_id] = d;
+  renderInFlight();
+}
+function removeInFlight(d) {
+  if (!d || !d.request_id) return;
+  const cur = inFlight[d.request_id];
+  if (!cur) return;
+  cur._ending = (d.status >= 200 && d.status < 300) ? 'ok' : 'err';
+  // Reflect final tokens on close
+  if (d.tokens_in != null) cur.tokens_in = d.tokens_in;
+  if (d.tokens_out != null) cur.tokens_out = d.tokens_out;
+  const item = document.getElementById('if-' + d.request_id);
+  if (item) item.classList.add('ending-' + cur._ending);
+  setTimeout(() => { delete inFlight[d.request_id]; expandedInFlight.delete(d.request_id); renderInFlight(); }, 350);
+}
+// Tick elapsed counters every 250ms without re-rendering rows.
+setInterval(() => {
+  const now = Date.now() / 1000;
+  document.querySelectorAll('.if-elapsed').forEach(el => {
+    const started = parseFloat(el.dataset.started);
+    if (!started) return;
+    const ms = Math.max(0, Math.round((now - started) * 1000));
+    el.textContent = fmtElapsed(ms);
+  });
+}, 250);
+// Poll /admin/in-flight while there are active requests so token counters update.
+setInterval(async () => {
+  if (!Object.keys(inFlight).length) return;
+  try {
+    const r = await loadJSON('/admin/in-flight');
+    (r.in_flight || []).forEach(e => {
+      const cur = inFlight[e.request_id];
+      if (!cur) return;
+      if (e.tokens_in != null && e.tokens_in > (cur.tokens_in || 0)) {
+        cur.tokens_in = e.tokens_in;
+        const tin = document.querySelector('#if-' + e.request_id + ' [data-tin]');
+        if (tin) tin.textContent = fmt(e.tokens_in);
+      }
+      if (e.tokens_out != null && e.tokens_out > (cur.tokens_out || 0)) {
+        cur.tokens_out = e.tokens_out;
+        const tout = document.querySelector('#if-' + e.request_id + ' [data-tout]');
+        if (tout) tout.textContent = fmt(e.tokens_out);
+      }
+      if (e.headers && !cur.headers) cur.headers = e.headers;
+      if (e.path && !cur.path) cur.path = e.path;
+    });
+  } catch (e) { /* ignore */ }
+}, 2000);
+
+function callInCurrentRange(c) {
+  const r=getDateRange(); if(!r.start||!r.end||!c.ts) return false;
+  const day=new Date(c.ts*1000).toISOString().slice(0,10);
+  return day>=r.start && day<=r.end;
+}
+let periodRefreshTimer=null;
+function schedulePeriodRefresh() {
+  if(periodRefreshTimer) return;
+  periodRefreshTimer=setTimeout(async()=>{ periodRefreshTimer=null; await fetchPeriodData({preserveFeed:true}); }, 1000);
+}
+
+// --- Model Info Bar ---
+let modelState = {count:0,last_refresh:0,new_models:[]};
+function updateModelInfo(d) { modelState=d; document.getElementById('mi-count').textContent=d.count; document.getElementById('mi-refresh').textContent=relTime(d.last_refresh); const n=document.getElementById('mi-new'); if(d.new_models&&d.new_models.length){n.textContent='✨ New: '+d.new_models.join(', ');n.style.display='';}else{n.style.display='none';} }
+document.getElementById('btn-refresh-models').addEventListener('click', async function(){ this.disabled=true;this.textContent='Refreshing...'; try{await postJSON('/admin/refresh');}catch(e){} this.disabled=false;this.textContent='🔄 Refresh'; });
+setInterval(()=>{ if(modelState.last_refresh) document.getElementById('mi-refresh').textContent=relTime(modelState.last_refresh); },30000);
+
+// --- Fallback Priority Control ---
+let fbState = null;
+async function loadFallbackStatus() {
+  try {
+    const fb = await loadJSON('/admin/fallback');
+    const ctl = document.getElementById('fallback-control');
+    const panel = document.getElementById('fb-map-panel');
+    if (!fb || !fb.enabled) { ctl.style.display = 'none'; panel.style.display = 'none'; return; }
+    fbState = fb;
+    ctl.style.display = 'inline-flex';
+    document.getElementById('fb-provider-badge').textContent = fb.provider;
+    const mapped = (fb.model_map || []).length;
+    const discovered = fb.discovered_count || 0;
+    document.getElementById('fb-model-count').textContent = `${mapped} mapped / ${discovered} discovered`;
+    const sel = document.getElementById('fb-priority');
+    sel.value = fb.priority;
+    renderFallbackMap();
+  } catch (e) { /* fallback not configured */ }
+}
+function renderFallbackMap() {
+  if (!fbState) return;
+  const panel = document.getElementById('fb-map-panel');
+  const addRow = `<div class="fb-add-row">
+    <input id="fb-add-ollama" placeholder="ollama name (e.g. qwen3-coder)">
+    <input id="fb-add-nvidia" placeholder="nvidia model (e.g. qwen/qwen3-coder-480b-a35b-instruct)">
+    <button class="btn btn-sm" onclick="fbMapAddInline()">+ Add</button>
+  </div>`;
+  const rows = (fbState.model_map || []).map(a => {
+    const nvidiaName = a.nvidia_model || a.fallback_model || '-';
+    return `<tr>
+      <td><span class="if-model">${escHtml(a.id)}</span></td>
+      <td>→</td>
+      <td>${escHtml(nvidiaName)}</td>
+      <td class="fb-pri">${escHtml(a.priority || '')}</td>
+      <td class="fb-actions"><button class="fb-rm" title="Remove mapping" onclick="fbMapRemove('${escAttr(a.id)}')">×</button></td>
+    </tr>`;
+  }).join('');
+  panel.innerHTML = addRow + (rows
+    ? `<table>${rows}</table>`
+    : '<div style="color:var(--dim)">No model_map entries configured.</div>');
+}
+async function fbMapAddInline() {
+  const ollama = (document.getElementById('fb-add-ollama').value || '').trim();
+  const nvidia = (document.getElementById('fb-add-nvidia').value || '').trim();
+  if (!ollama || !nvidia) { alert('Both ollama and nvidia names are required'); return; }
+  try {
+    await postJSON('/admin/fallback-map', { ollama_name: ollama, nvidia_name: nvidia });
+    await loadFallbackStatus();
+    if (catalogLoaded) await loadCatalog(true);
+  } catch (e) { alert('Failed to add mapping: ' + e.message); }
+}
+document.getElementById('fb-map-toggle').addEventListener('click', function() {
+  const panel = document.getElementById('fb-map-panel');
+  const showing = panel.style.display !== 'none';
+  panel.style.display = showing ? 'none' : 'block';
+  this.textContent = showing ? 'show map' : 'hide map';
+});
+document.getElementById('fb-priority').addEventListener('change', async function(){
+  const requested = this.value;
+  try {
+    const r = await postJSON('/admin/fallback-priority', { priority: requested });
+    if (r && r.priority) this.value = r.priority;
+  } catch (e) { alert('Failed to set priority: ' + e.message); }
+});
+
+function updateStickyBadge(d) {
+  const info = document.getElementById('sticky-info');
+  const count = document.getElementById('sticky-count');
+  const ttl = document.getElementById('sticky-ttl');
+  if (!info || !count || !ttl) return;
+  const sessions = d.sticky_sessions || {};
+  const active = Object.keys(sessions).length;
+  count.textContent = active;
+  ttl.textContent = d.sticky_ttl_seconds != null ? d.sticky_ttl_seconds : '?';
+  info.style.display = active > 0 ? 'inline' : 'none';
+}
+
+// --- Key Status ---
+function renderKeyStatus(keys) {
+  document.getElementById('key-status').innerHTML = (keys||[]).map(k => {
+    const slotPct=Math.round((k.in_flight/k.max_concurrent)*100), periodPct=Math.round((1-k.period_remaining_pct/100)*100);
+    const sPct=k.session_usage_pct||0, wPct=k.weekly_usage_pct||0;
+    const sEl=(k.session_elapsed_pct!=null&&k.session_elapsed_pct>=0)?k.session_elapsed_pct:-1;
+    const wEl=(k.weekly_elapsed_pct!=null&&k.weekly_elapsed_pct>=0)?k.weekly_elapsed_pct:-1;
+    const cls=k.exhausted?'status-err':k.suspended?'status-warn':'status-ok';
+    const sModels = k.session_models || {};
+    const topModels = Object.entries(sModels).sort((a,b)=>(b[1].requests||0)-(a[1].requests||0)).slice(0,3);
+    const modelBreakdown = topModels.length ? '<div class="key-row" style="margin-top:6px"><span class="kdim">Top models</span></div>' +
+      topModels.map(([mid, md]) => `<div class="key-row" style="font-size:11px"><span class="kdim" style="font-family:monospace">${escHtml(mid)}</span><span>${md.requests||0} req</span></div>`).join('') : '';
+    return `<div class="key-card">
+      <div class="key-header"><span class="key-label ${cls}">${k.label}</span><span class="key-plan">${k.plan||'?'}</span></div>
+      <div class="key-row"><span class="kdim">Slots</span><span>${k.in_flight}/${k.max_concurrent}</span></div>${pctBar(slotPct,'var(--accent)')}
+      <div class="key-row"><span class="kdim">Session</span><span>${sPct<0?'?':sPct.toFixed(1)}%${sEl>=0?' ('+sEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(sPct,sEl,'var(--yellow)')}
+      <div class="key-row"><span class="kdim">Weekly</span><span>${wPct<0?'?':wPct.toFixed(1)}%${wEl>=0?' ('+wEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(wPct,wEl,'var(--purple)')}
+      <div class="key-row"><span class="kdim">Billing</span><span>${k.period_remaining_pct?.toFixed(0)}% left</span></div>${pctBar(periodPct,'var(--green)')}
+      <div class="key-row"><span class="kdim">Requests</span><span>${k.total_requests}</span></div>
+      <div class="key-row"><span class="kdim">429s</span><span>${k.total_429s}</span></div>
+      ${modelBreakdown}
+    </div>`;
+  }).join('');
+}
+
+// --- Call Feed ---
+function addCallToFeed(c) { const cf=document.getElementById('filter-client').value,mf=document.getElementById('filter-model').value; let ok=true; if(cf&&c.client_id!==cf)ok=false; if(mf&&c.model!==mf)ok=false; if(ok){feedCalls.unshift(c); const lim=parseInt(document.getElementById('feed-limit').value); if(feedCalls.length>lim)feedCalls.length=lim; renderFeed(feedCalls);} }
+function renderFeed(calls) { document.getElementById('feed-count').textContent=calls.length; document.querySelector('#feed-tbl tbody').innerHTML=calls.map(c=>{const sc=c.status===200?'status-ok':c.status>=400?'status-err':'status-warn'; const pb=c.provider?providerBadge(c.provider):''; return `<tr><td>${fmtTs(c.ts)}</td><td>${c.client_id}</td><td>${c.model}${pb}</td><td>${(c.upstream_key||'').slice(0,8)}</td><td>${fmt(c.tokens_in)}</td><td>${fmt(c.tokens_out)}</td><td>${c.latency_ms}ms</td><td class="${sc}">${c.status}</td></tr>`;}).join(''); }
+let prevClients=[],prevModels=[];
+function populateFilters(clients,models) { const sc=document.getElementById('filter-client'),sm=document.getElementById('filter-model'); const cc=sc.value,cm=sm.value; const cl=(clients||[]).map(c=>c.id||c),ml=(models||[]).map(m=>m.model||m); if(JSON.stringify(cl)!==JSON.stringify(prevClients)){sc.innerHTML='<option value="">All</option>'+cl.map(c=>`<option value="${c}">${c}</option>`).join('');sc.value=cc;prevClients=cl;} if(JSON.stringify(ml)!==JSON.stringify(prevModels)){sm.innerHTML='<option value="">All</option>'+ml.map(m=>`<option value="${m}">${m}</option>`).join('');sm.value=cm;prevModels=ml;} }
+
+// --- Models Panel ---
+let allModels = [], modelUsage = {};
+async function loadModelsPanel() {
+  const [models, usage] = await Promise.all([loadJSON('/admin/models'), loadJSON('/admin/usage/by-model?days=7')]);
+  allModels = models.models || [];
+  modelUsage = {};
+  (usage||[]).forEach(u => { modelUsage[u.model] = u; });
+  renderModelsGrid();
+}
+function renderModelsGrid() {
+  const search = document.getElementById('model-search').value.toLowerCase();
+  const sort = document.getElementById('model-sort').value;
+  let filtered = allModels.filter(m => !search || m.id.toLowerCase().includes(search));
+  if (sort === 'ctx') filtered.sort((a,b) => (b.context_length||0)-(a.context_length||0));
+  else if (sort === 'keys') filtered.sort((a,b) => (b.available_on||0)-(a.available_on||0));
+  else if (sort === 'updated') filtered.sort((a,b) => Date.parse(b.modified_at||0)-Date.parse(a.modified_at||0));
+  else if (sort === 'params') filtered.sort((a,b) => (b.parameter_count||0)-(a.parameter_count||0));
+  else if (sort === 'family') filtered.sort((a,b) => String(a.family||'').localeCompare(String(b.family||'')) || a.id.localeCompare(b.id));
+  else filtered.sort((a,b) => a.id.localeCompare(b.id));
+  document.getElementById('models-grid').innerHTML = filtered.map(m => {
+    const u = modelUsage[m.id];
+    const ctxStr = m.context_length ? `<span class="mc-ctx">${fmtCtx(m.context_length)} ctx</span>` : '';
+    const keyStr = `<span class="mc-keys">${m.available_on||0} key${m.available_on!==1?'s':''}</span>`;
+    const caps = (m.capabilities||[]).map(c => `<span class="badge">${c}</span>`).join(' ');
+    const params = m.parameter_count_display ? `${m.parameter_count_display} params` : (m.parameter_count ? `${fmt(m.parameter_count)} params` : '');
+    const updated = m.modified_at ? `updated ${m.modified_at.slice(0,10)}` : '';
+    const metaBits = [ctxStr, keyStr, m.family||'', params, updated].filter(Boolean).join(' · ');
+    const usageLine = u ? `<div class="mc-usage">${fmt(u.requests)} calls · ${fmt(u.tokens_total)} tokens · ${Math.round(u.avg_latency_ms||0)}ms</div>` : '<div class="mc-usage" style="color:var(--dim)">No usage (7d)</div>';
+    const provBadge = providerBadge((m.providers||[]).join(','));
+    return `<div class="model-chip"><div class="mc-name">${m.id}${provBadge}</div><div class="mc-meta">${metaBits}</div><div class="mc-meta">${caps}</div>${usageLine}</div>`;
+  }).join('');
+}
+document.getElementById('model-search').addEventListener('input', renderModelsGrid);
+document.getElementById('model-sort').addEventListener('change', renderModelsGrid);
+
+// --- NVIDIA Build Catalog ---
+let catalogData = null;          // { catalog: [...], by_org: {...}, count, enabled }
+let catalogLoaded = false;
+const catalogOpenOrgs = new Set();
+
+function fmtParamCount(n) {
+  if (!n || n <= 0) return '';
+  if (n >= 1e12) { const v = n / 1e12; return Math.abs(v - Math.round(v)) < 0.05 ? Math.round(v) + 'T' : v.toFixed(1) + 'T'; }
+  const v = n / 1e9; return Math.abs(v - Math.round(v)) < 0.05 ? Math.round(v) + 'B' : v.toFixed(1) + 'B';
+}
+
+async function loadCatalog(force) {
+  if (catalogLoaded && !force) return;
+  const list = document.getElementById('catalog-list');
+  list.innerHTML = '<div class="catalog-empty">Loading catalog...</div>';
+  try {
+    const r = await loadJSON('/admin/fallback-catalog');
+    catalogData = r;
+    catalogLoaded = true;
+    if (!r || !r.enabled) {
+      list.innerHTML = '<div class="catalog-empty">Fallback provider is not configured.</div>';
+      document.getElementById('catalog-count').textContent = '0';
+      return;
+    }
+    renderCatalog();
+  } catch (e) {
+    list.innerHTML = '<div class="catalog-empty">Failed to load catalog.</div>';
+  }
+}
+
+function renderCatalog() {
+  if (!catalogData || !catalogData.enabled) return;
+  const all = catalogData.catalog || [];
+  const q = (document.getElementById('catalog-search').value || '').toLowerCase().trim();
+  const filtered = q
+    ? all.filter(m => (m.id || '').toLowerCase().includes(q) || (m.org || '').toLowerCase().includes(q) || (m.owned_by || '').toLowerCase().includes(q))
+    : all;
+  const mappedCount = all.filter(m => m.is_mapped).length;
+  document.getElementById('catalog-count').textContent = String(all.length);
+  document.getElementById('catalog-summary').textContent = `${mappedCount} mapped · ${filtered.length}${q ? ' filtered' : ''} of ${all.length} total`;
+  const byOrg = {};
+  filtered.forEach(m => { const o = m.org || m.owned_by || 'unknown'; (byOrg[o] = byOrg[o] || []).push(m); });
+  const orgs = Object.keys(byOrg).sort((a, b) => a.localeCompare(b));
+  if (!orgs.length) {
+    document.getElementById('catalog-list').innerHTML = '<div class="catalog-empty">No models match the filter.</div>';
+    return;
+  }
+  // If a search query is active, auto-open all matching orgs.
+  if (q) orgs.forEach(o => catalogOpenOrgs.add(o));
+  document.getElementById('catalog-list').innerHTML = orgs.map(org => {
+    const rows = byOrg[org].slice().sort((a, b) => (a.id || '').localeCompare(b.id || ''));
+    const open = catalogOpenOrgs.has(org) ? ' open' : '';
+    const orgMapped = rows.filter(r => r.is_mapped).length;
+    const inner = rows.map(m => {
+      const params = fmtParamCount(m.parameter_count);
+      const ctx = m.context_length ? fmtCtx(m.context_length) : '';
+      const action = m.is_mapped
+        ? `<span class="cr-mapped">✓ <span class="cr-alias" title="ollama alias">${escHtml(m.ollama_equivalent || '')}</span></span>`
+        : `<button class="btn btn-sm" onclick="catalogAdd('${escAttr(m.id)}')">+ Add</button>`;
+      const url = m.model_card_url || ('https://build.nvidia.com/' + m.id);
+      return `<div class="catalog-row" data-mid="${escAttr(m.id)}">
+        <div class="cr-name"><a href="${escAttr(url)}" target="_blank" rel="noopener" title="Open model card">${escHtml(m.id)}</a></div>
+        <div class="cr-meta">${escHtml(params || '-')}</div>
+        <div class="cr-meta">${escHtml(ctx || '-')}</div>
+        <div class="cr-meta" title="${escAttr(m.description || '')}">${escHtml(m.description ? (m.description.length > 80 ? m.description.slice(0, 77) + '...' : m.description) : '')}</div>
+        <div class="cr-action">${action}</div>
+      </div>`;
+    }).join('');
+    return `<div class="catalog-org${open}" data-org="${escAttr(org)}">
+      <div class="catalog-org-header" onclick="catalogToggleOrg('${escAttr(org)}')">
+        <span class="co-caret">▶</span>
+        <span class="co-name">${escHtml(org)}</span>
+        <span class="co-count">${rows.length} model${rows.length !== 1 ? 's' : ''} · ${orgMapped} mapped</span>
+      </div>
+      <div class="catalog-org-body">${inner}</div>
+    </div>`;
+  }).join('');
+}
+function catalogToggleOrg(org) {
+  if (catalogOpenOrgs.has(org)) catalogOpenOrgs.delete(org); else catalogOpenOrgs.add(org);
+  const el = document.querySelector(`.catalog-org[data-org="${CSS.escape(org)}"]`);
+  if (el) el.classList.toggle('open');
+}
+function catalogAdd(nvidiaId) {
+  showModal(`<h3>Add Fallback Mapping</h3>
+    <p style="font-size:11px;color:var(--dim);margin-bottom:8px">Maps an Ollama model name to the NVIDIA Build model. Runtime-only — add to <code>config.yaml</code> to persist.</p>
+    <label>Ollama Model Name</label>
+    <input id="m-fb-ollama" placeholder="e.g. ${escAttr(nvidiaId.split('/').pop() || 'qwen3-coder')}" autofocus>
+    <label>NVIDIA Model</label>
+    <input id="m-fb-nvidia" value="${escAttr(nvidiaId)}" readonly>
+    <label>Priority <span style="color:var(--dim)">(optional)</span></label>
+    <select id="m-fb-priority">
+      <option value="">inherit (default)</option>
+      <option value="after">after — Ollama first</option>
+      <option value="before">before — Fallback first</option>
+      <option value="only">only — Fallback only</option>
+    </select>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" onclick="submitFbMapAdd()">Add</button>
+    </div>`);
+}
+async function submitFbMapAdd() {
+  const ollama = document.getElementById('m-fb-ollama').value.trim();
+  const nvidia = document.getElementById('m-fb-nvidia').value.trim();
+  const priority = document.getElementById('m-fb-priority').value;
+  if (!ollama || !nvidia) { alert('Both ollama_name and nvidia_name are required'); return; }
+  const body = { ollama_name: ollama, nvidia_name: nvidia };
+  if (priority) body.priority = priority;
+  try {
+    await postJSON('/admin/fallback-map', body);
+    closeModal();
+    await loadFallbackStatus();
+    await loadCatalog(true);
+  } catch (e) { alert('Failed to add mapping: ' + e.message); }
+}
+async function fbMapRemove(ollamaName) {
+  if (!confirm(`Remove fallback mapping for "${ollamaName}"? Runtime-only — also remove from config.yaml to persist.`)) return;
+  try {
+    await postJSON('/admin/fallback-map?ollama_name=' + encodeURIComponent(ollamaName), null, 'DELETE');
+    await loadFallbackStatus();
+    if (catalogLoaded) await loadCatalog(true);
+  } catch (e) { alert('Failed to remove mapping: ' + e.message); }
+}
+document.getElementById('catalog-header').addEventListener('click', function() {
+  const sec = document.getElementById('catalog-section');
+  const open = sec.classList.toggle('open');
+  if (open) loadCatalog(false);
+});
+document.getElementById('catalog-search').addEventListener('input', () => { if (catalogData) renderCatalog(); });
+document.getElementById('catalog-refresh').addEventListener('click', () => loadCatalog(true));
+document.getElementById('catalog-add-mapping').addEventListener('click', () => {
+  showModal(`<h3>Add Fallback Mapping</h3>
+    <p style="font-size:11px;color:var(--dim);margin-bottom:8px">Maps an Ollama model name to a NVIDIA Build model. Runtime-only — add to <code>config.yaml</code> to persist.</p>
+    <label>Ollama Model Name</label><input id="m-fb-ollama" placeholder="e.g. qwen3-coder" autofocus>
+    <label>NVIDIA Model</label><input id="m-fb-nvidia" placeholder="e.g. qwen/qwen3-coder-480b-a35b-instruct">
+    <label>Priority <span style="color:var(--dim)">(optional)</span></label>
+    <select id="m-fb-priority">
+      <option value="">inherit (default)</option>
+      <option value="after">after — Ollama first</option>
+      <option value="before">before — Fallback first</option>
+      <option value="only">only — Fallback only</option>
+    </select>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn" onclick="submitFbMapAdd()">Add</button>
+    </div>`);
+});
+
+// --- Subscriptions Panel ---
+async function loadSubsPanel() {
+  const keys = await loadJSON('/admin/keys');
+  document.getElementById('subs-list').innerHTML = keys.map((k, i) => {
+    const statusCls = k.suspended ? 'status-err' : 'status-ok';
+    return `<div class="key-mgmt-card">
+      <div class="km-header">
+        <span class="km-label ${statusCls}">${k.label}</span>
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-sm" onclick="editKey('${k.key_id}')">Edit</button>
+          <button class="btn btn-sm" onclick="editCookies('${k.key_id}')">🍪 Cookies</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteKey('${k.key_id}','${k.label}')">Remove</button>
+        </div>
+      </div>
+      <div class="km-row"><span>Token</span><span>${k.token_prefix}</span></div>
+      <div class="km-row"><span>Plan</span><span>${k.plan||'?'}</span></div>
+      <div class="km-row"><span>Max Concurrent</span><span>${k.max_concurrent}</span></div>
+      <div class="km-row"><span>Cycle Day</span><span>${k.cycle_day}</span></div>
+      <div class="km-row"><span>Suspended</span><span class="${k.suspended?'status-err':'status-ok'}">${k.suspended?'Yes':'No'}</span></div>
+      ${k.account_email ? `<div class="km-row"><span>Email</span><span>${k.account_email}</span></div>` : ''}
+      <div class="km-row"><span>Cookies</span><span class="${k.has_cookies?'cookie-ok':'cookie-bad'}">${k.has_cookies?'Configured':'Not set'}</span></div>
+    </div>`;
+  }).join('');
+}
+
+// --- Modals ---
+function showModal(html) { document.getElementById('modal-root').innerHTML = `<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`; }
+function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
+
+function editKey(keyId) {
+  showModal(`<h3>Edit Subscription</h3>
+    <label>Label</label><input id="m-label" placeholder="Subscription label">
+    <label>Max Concurrent</label><input id="m-concurrent" type="number" value="15" min="1" max="50">
+    <label>Cycle Day (billing reset, 1-28)</label><input id="m-cycle" type="number" value="1" min="1" max="28">
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="saveKey('${keyId}')">Save</button></div>`);
+}
+async function saveKey(keyId) {
+  const label=document.getElementById('m-label').value, mc=parseInt(document.getElementById('m-concurrent').value), cd=parseInt(document.getElementById('m-cycle').value);
+  await postJSON(`/admin/keys/${keyId}?label=${encodeURIComponent(label)}&max_concurrent=${mc}&cycle_day=${cd}`, null, 'PUT');
+  closeModal(); loadSubsPanel();
+}
+
+function editCookies(keyId) {
+  showModal(`<h3>Edit Subscription Cookies</h3>
+    <p style="font-size:11px;color:var(--dim);margin-bottom:12px">Extract from browser DevTools → Application → Cookies → ollama.com</p>
+    <label>__Secure-session <span style="color:var(--red)">*</span></label><textarea id="m-ss" placeholder="Required — unique per account"></textarea>
+    <label>aid</label><input id="m-aid" placeholder="Account ID (shared across accounts)">
+    <label>cf_clearance</label><input id="m-cf" placeholder="Cloudflare bypass (optional)">
+    <label>__stripe_mid</label><input id="m-stripe" placeholder="Stripe session (optional)">
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="saveCookies('${keyId}')">Save</button></div>`);
+}
+async function saveCookies(keyId) {
+  const body = {};
+  const ss=document.getElementById('m-ss').value.trim(); if(ss) body.secure_session=ss;
+  const aid=document.getElementById('m-aid').value.trim(); if(aid) body.aid=aid;
+  const cf=document.getElementById('m-cf').value.trim(); if(cf) body.cf_clearance=cf;
+  const stripe=document.getElementById('m-stripe').value.trim(); if(stripe) body.stripe_mid=stripe;
+  await postJSON(`/admin/keys/${keyId}/cookies`, body, 'PUT');
+  closeModal(); loadSubsPanel();
+}
+
+async function deleteKey(keyId, label) {
+  if (!confirm(`Remove "${label}"? This takes effect immediately but you should also remove it from config.yaml.`)) return;
+  await postJSON(`/admin/keys/${keyId}`, null, 'DELETE');
+  loadSubsPanel();
+}
+
+// --- Client Key Management ---
+async function loadClients() {
+  const clients = await loadJSON('/admin/clients');
+  const today = new Date().toISOString().slice(0, 10);
+  document.getElementById('client-list').innerHTML = (clients || []).map(c => {
+    const dtl = c.daily_token_limit != null ? c.daily_token_limit : '∞';
+    const drl = c.daily_request_limit != null ? c.daily_request_limit : '∞';
+    const rpm = c.rpm_limit != null ? c.rpm_limit : '∞';
+    const tok = c.token ? c.token.slice(0, 8) + '...' + c.token.slice(-4) : '—';
+    return `<div class="key-mgmt-card">
+      <div class="km-header">
+        <span class="km-label">${c.label || c.id}</span>
+        <div style="display:flex;gap:4px">
+          <button class="btn btn-sm" onclick="editClient('${c.id}')">Edit</button>
+          <button class="btn btn-sm" onclick="regenClient('${c.id}')">🔄 Token</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteClient('${c.id}','${c.label || c.id}')">Remove</button>
+        </div>
+      </div>
+      <div class="km-row"><span>ID</span><span>${c.id}</span></div>
+      <div class="km-row"><span>Token</span><span style="font-family:monospace; font-size:11px">${tok}</span></div>
+      <div class="km-row"><span>Daily Token Limit</span><span>${dtl}</span></div>
+      <div class="km-row"><span>Daily Request Limit</span><span>${drl}</span></div>
+      <div class="km-row"><span>RPM Limit</span><span>${rpm}</span></div>
+      ${c.notes ? `<div class="km-row"><span>Notes</span><span style="font-size:11px">${c.notes}</span></div>` : ''}
+    </div>`;
+  }).join('') || '<div style="color:var(--dim);font-size:12px;padding:8px">No client keys yet</div>';
+}
+
+function editClient(id) {
+  // Fetch current values to pre-fill
+  loadJSON('/admin/clients').then(clients => {
+    const c = (clients || []).find(x => x.id === id);
+    if (!c) return;
+    showModal(`<h3>Edit Client: ${id}</h3>
+      <label>Label</label><input id="m-cl-label" value="${c.label || ''}">
+      <label>Notes</label><input id="m-cl-notes" value="${c.notes || ''}">
+      <label>Daily Token Limit <span style="color:var(--dim)">(null = unlimited)</span></label><input id="m-cl-dtl" type="number" placeholder="unlimited" value="${c.daily_token_limit ?? ''}">
+      <label>Daily Request Limit</label><input id="m-cl-drl" type="number" placeholder="unlimited" value="${c.daily_request_limit ?? ''}">
+      <label>RPM Limit</label><input id="m-cl-rpm" type="number" placeholder="unlimited" value="${c.rpm_limit ?? ''}">
+      <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="saveClient('${id}')">Save</button></div>`);
+  });
+}
+async function saveClient(id) {
+  const body = {};
+  const label = document.getElementById('m-cl-label').value;
+  if (label) body.label = label;
+  const notes = document.getElementById('m-cl-notes').value;
+  if (notes) body.notes = notes;
+  const dtl = document.getElementById('m-cl-dtl').value;
+  body.daily_token_limit = dtl === '' ? null : parseInt(dtl);
+  const drl = document.getElementById('m-cl-drl').value;
+  body.daily_request_limit = drl === '' ? null : parseInt(drl);
+  const rpm = document.getElementById('m-cl-rpm').value;
+  body.rpm_limit = rpm === '' ? null : parseInt(rpm);
+  await postJSON(`/admin/clients/${id}`, body, 'PATCH');
+  closeModal(); loadClients();
+}
+async function regenClient(id) {
+  if (!confirm(`Regenerate token for "${id}"? The old token will stop working immediately.`)) return;
+  const r = await postJSON(`/admin/clients/${id}/regenerate-token`, null, 'POST');
+  closeModal(); loadClients();
+  alert(`New token: ${r.token}`);
+}
+async function deleteClient(id, label) {
+  if (!confirm(`Remove client "${label}"? The token will stop working immediately.`)) return;
+  await postJSON(`/admin/clients/${id}`, null, 'DELETE');
+  loadClients();
+}
+
+document.getElementById('btn-add-key').addEventListener('click', () => {
+  showModal(`<h3>Add Subscription</h3>
+    <p style="font-size:11px;color:var(--dim);margin-bottom:12px">Add an Ollama Cloud API key. Get it from ollama.com/settings/keys</p>
+    <label>API Key <span style="color:var(--red)">*</span></label><textarea id="m-token" placeholder="Required — paste the full API key"></textarea>
+    <label>Label</label><input id="m-label" placeholder="e.g. Sub 3">
+    <label>Max Concurrent</label><input id="m-concurrent" type="number" value="15" min="1" max="50">
+    <label>Cycle Day (billing reset, 1-28)</label><input id="m-cycle" type="number" value="1" min="1" max="28">
+    <h3 style="margin-top:16px">Cookies (optional)</h3>
+    <p style="font-size:11px;color:var(--dim);margin-bottom:8px">For usage tracking from ollama.com/settings</p>
+    <label>__Secure-session</label><textarea id="m-ss" placeholder="Per-account session cookie"></textarea>
+    <label>aid</label><input id="m-aid" placeholder="Account ID">
+    <label>cf_clearance</label><input id="m-cf" placeholder="Cloudflare bypass">
+    <label>__stripe_mid</label><input id="m-stripe" placeholder="Stripe session">
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="addKey()">Add</button></div>`);
+});
+async function addKey() {
+  const token=document.getElementById('m-token').value.trim();
+  if(!token){alert('API key is required');return;}
+  const body={token, label:document.getElementById('m-label').value||undefined, max_concurrent:parseInt(document.getElementById('m-concurrent').value)||15, cycle_day:parseInt(document.getElementById('m-cycle').value)||1, cookies:{}};
+  const ss=document.getElementById('m-ss').value.trim(); if(ss) body.cookies.secure_session=ss;
+  const aid=document.getElementById('m-aid').value.trim(); if(aid) body.cookies.aid=aid;
+  const cf=document.getElementById('m-cf').value.trim(); if(cf) body.cookies.cf_clearance=cf;
+  const stripe=document.getElementById('m-stripe').value.trim(); if(stripe) body.cookies.stripe_mid=stripe;
+  const r=await postJSON('/admin/keys', body);
+  closeModal(); loadSubsPanel();
+  alert(r.note||'Key added');
+}
+
+// --- Telegram test button ---
+document.getElementById('btn-telegram-test').addEventListener('click', async function() {
+  const btn = this;
+  const result = document.getElementById('telegram-test-result');
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = '📤 Sending...';
+  result.style.color = 'var(--dim)';
+  result.textContent = 'Sending notification to Telegram...';
+  try {
+    const r = await postJSON('/admin/telegram-test');
+    if (r.sent) {
+      result.style.color = 'var(--green)';
+      result.textContent = `✅ Sent to chat ${r.chat_id}${r.topic_id ? ' topic '+r.topic_id : ''}`;
+    } else if (r.error) {
+      result.style.color = 'var(--red)';
+      result.textContent = `❌ ${r.error}`;
+    } else {
+      result.style.color = 'var(--red)';
+      result.textContent = '❌ Unknown error';
+    }
+  } catch (e) {
+    result.style.color = 'var(--red)';
+    result.textContent = '❌ ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+});
+
+// --- Add Client ---
+document.getElementById('btn-add-client').addEventListener('click', () => {
+  showModal(`<h3>Add Client Key</h3>
+    <p style="font-size:11px;color:var(--dim);margin-bottom:12px">Create a client key for usage attribution and rate limiting</p>
+    <label>Client ID <span style="color:var(--red)">*</span></label><input id="m-cl-id" placeholder="e.g. my-app (alphanumeric, dashes ok)">
+    <label>Label</label><input id="m-cl-label" placeholder="e.g. My Application">
+    <label>Notes</label><input id="m-cl-notes" placeholder="Optional notes">
+    <h4 style="margin-top:12px">Rate Limits <span style="color:var(--dim);font-weight:normal">(leave empty for unlimited)</span></h4>
+    <label>Daily Token Limit</label><input id="m-cl-dtl" type="number" placeholder="unlimited">
+    <label>Daily Request Limit</label><input id="m-cl-drl" type="number" placeholder="unlimited">
+    <label>RPM Limit</label><input id="m-cl-rpm" type="number" placeholder="unlimited">
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn" onclick="addClient()">Create</button></div>`);
+});
+
+async function addClient() {
+  const id = document.getElementById('m-cl-id').value.trim();
+  if (!id) { alert('Client ID is required'); return; }
+  const body = { id, label: document.getElementById('m-cl-label').value || id };
+  const notes = document.getElementById('m-cl-notes').value.trim();
+  if (notes) body.notes = notes;
+  const dtl = document.getElementById('m-cl-dtl').value;
+  if (dtl) body.daily_token_limit = parseInt(dtl);
+  const drl = document.getElementById('m-cl-drl').value;
+  if (drl) body.daily_request_limit = parseInt(drl);
+  const rpm = document.getElementById('m-cl-rpm').value;
+  if (rpm) body.rpm_limit = parseInt(rpm);
+  try {
+    const r = await postJSON('/admin/clients', body);
+    closeModal(); loadClients();
+    alert(`Client created! Token: ${r.token}`);
+  } catch (e) {
+    // postJSON already shows error
+  }
+}
+
+// --- Data Fetch ---
+async function fetchPeriodData(opts) {
+  opts = opts || {};
+  const range=getDateRange(); if(!range.start||!range.end)return; updateBadges(range.label);
+  const fetches=[
+    loadJSON(`/admin/totals?start_date=${range.start}&end_date=${range.end}`),
+    loadJSON(`/admin/usage/by-client?start_date=${range.start}&end_date=${range.end}`),
+    loadJSON(`/admin/usage/by-model?start_date=${range.start}&end_date=${range.end}`),
+    loadJSON(`/admin/usage/daily?start_date=${range.start}&end_date=${range.end}`),
+  ];
+  if(!opts.preserveFeed) fetches.push(fetchRecentCalls());
+  const [totals,clients,models,daily,calls]=await Promise.all(fetches);
+  const t=totals||{};
+  document.getElementById('totals').innerHTML=`
+    <div class="card"><div class="label">Total Calls</div><div class="value blue">${fmt(t.total_calls||0)}</div></div>
+    <div class="card"><div class="label">Tokens In</div><div class="value green">${fmt(t.total_tokens_in||0)}</div></div>
+    <div class="card"><div class="label">Tokens Out</div><div class="value purple">${fmt(t.total_tokens_out||0)}</div></div>
+    <div class="card"><div class="label">Total Tokens</div><div class="value yellow">${fmt(t.total_tokens||0)}</div></div>`;
+  const maxTok=Math.max(...(clients||[]).map(c=>c.tokens_total||0),1);
+  document.querySelector('#client-table tbody').innerHTML=(clients||[]).map(c=>{const inW=Math.round((c.tokens_in/maxTok)*80),outW=Math.round((c.tokens_out/maxTok)*80); return `<tr><td>${c.client_id}</td><td>${fmt(c.requests)}</td><td>${fmt(c.tokens_in)}</td><td>${fmt(c.tokens_out)}</td><td>${fmt(c.tokens_total)}</td><td><div class="bars"><div class="bar in" style="width:${inW}px"></div><div class="bar out" style="width:${outW}px"></div></div></td></tr>`;}).join('');
+  document.querySelector('#model-table tbody').innerHTML=(models||[]).map(m=>`<tr><td>${m.model}</td><td>${fmt(m.requests)}</td><td>${fmt(m.tokens_in)}</td><td>${fmt(m.tokens_out)}</td><td>${fmt(m.tokens_total)}</td><td>${Math.round(m.avg_latency_ms||0)}ms</td></tr>`).join('');
+  document.querySelector('#daily-table tbody').innerHTML=(daily||[]).map(d=>`<tr><td>${d.day}</td><td>${fmt(d.requests)}</td><td>${fmt(d.tokens_in)}</td><td>${fmt(d.tokens_out)}</td><td>${fmt(d.tokens_total)}</td></tr>`).join('');
+  if(!opts.preserveFeed) { feedCalls=calls||[]; renderFeed(feedCalls); }
+  populateFilters(null,models);
+}
+async function fetchRecentCalls() { const r=getDateRange(); const c=document.getElementById('filter-client').value,m=document.getElementById('filter-model').value,l=document.getElementById('feed-limit').value; let u=`/admin/recent-calls?limit=${l}&start_date=${r.start}&end_date=${r.end}`; if(c)u+=`&client=${encodeURIComponent(c)}`; if(m)u+=`&model=${encodeURIComponent(m)}`; return loadJSON(u); }
+
+// --- Event Listeners ---
+document.getElementById('period-select').addEventListener('change', function(){ document.getElementById('custom-dates').style.display=this.value==='custom'?'':'none'; fetchPeriodData(); });
+document.getElementById('date-start').addEventListener('change',()=>fetchPeriodData());
+document.getElementById('date-end').addEventListener('change',()=>fetchPeriodData());
+document.getElementById('filter-client').addEventListener('change',()=>fetchPeriodData());
+document.getElementById('filter-model').addEventListener('change',()=>fetchPeriodData());
+document.getElementById('feed-limit').addEventListener('change',()=>fetchPeriodData());
+
+async function loadInFlightInitial() {
+  try {
+    const r = await loadJSON('/admin/in-flight');
+    (r.in_flight || []).forEach(e => { inFlight[e.request_id] = e; });
+    renderInFlight();
+  } catch (e) { /* ignore */ }
+}
+
+// --- Init ---
+fetchPeriodData();
+loadFallbackStatus();
+loadInFlightInitial();
+connectSSE();
+
+// --- Quota Cost (now usage pie charts) ---
+function drawPie(canvas, slices, title) {
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = 260, h = 260;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  ctx.scale(dpr, dpr);
+  const cx = w/2, cy = h/2 - 10, radius = 90;
+  const colors = ['#22c55e','#3b82f6','#a855f7','#f59e0b','#ef4444','#06b6d4','#ec4899','#84cc16','#6366f1','#f97316'];
+  let total = slices.reduce((a,b)=>a+b.value,0);
+  if (total <= 0) {
+    ctx.fillStyle = 'var(--dim)';
+    ctx.textAlign = 'center';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('No data', cx, cy);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillText(title, cx, h - 10);
+    return;
+  }
+  let angle = -Math.PI/2;
+  slices.forEach((s, i) => {
+    const a = (s.value/total) * 2 * Math.PI;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, radius, angle, angle + a);
+    ctx.closePath();
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fill();
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // label wedge if > 8%
+    if (s.value/total > 0.08) {
+      const mid = angle + a/2;
+      const lx = cx + Math.cos(mid)*(radius*0.65);
+      const ly = cy + Math.sin(mid)*(radius*0.65);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(Math.round((s.value/total)*100)+'%', lx, ly);
+    }
+    angle += a;
+  });
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(title, cx, h - 10);
+}
+
+function modelSlices(models) {
+  // Graph by actual Ollama quota share (bar_pct), not request count.
+  const entries = Object.entries(models || {})
+    .map(([name, m]) => ({ name, value: m.bar_pct || 0, requests: m.requests || 0 }))
+    .filter(s => s.value > 0)
+    .sort((a,b) => b.value - a.value);
+  if (entries.length > 10) {
+    const top = entries.slice(0, 9);
+    const other = entries.slice(9).reduce((a,b)=>({ name: 'Other', value: a.value + b.value, requests: a.requests + b.requests }), { name: 'Other', value: 0, requests: 0 });
+    top.push(other);
+    return top;
+  }
+  return entries;
+}
+
+async function loadQuotaCost() {
+  try {
+    const data = await loadJSON('/admin/quota-cost');
+    const coefData = await loadJSON('/admin/quota-coefficients?days=7');
+    const badge = document.getElementById('quota-badge');
+    const note = document.getElementById('quota-note');
+    const status = document.getElementById('quota-status');
+    const charts = document.getElementById('quota-charts');
+    if (!data.keys || data.keys.length === 0) {
+      charts.innerHTML = '<div style="color:var(--dim);padding:2em">' + (data.note || 'No quota data yet.') + '</div>';
+      badge.textContent = '0';
+      note.textContent = data.note || '';
+      status.textContent = '';
+    } else {
+      badge.textContent = data.keys.length;
+      note.textContent = data.note || '';
+      let chartCount = 0;
+      let html = '';
+      const colors = ['#22c55e','#3b82f6','#a855f7','#f59e0b','#ef4444','#06b6d4','#ec4899','#84cc16','#6366f1','#f97316'];
+      for (const k of data.keys) {
+        const windows = [
+          { name: 'Session', pct: k.session_usage_pct, resets: k.session_resets_at, models: k.session_models || {} },
+          { name: 'Weekly', pct: k.weekly_usage_pct, resets: k.weekly_resets_at, models: k.weekly_models || {} }
+        ];
+        for (const w of windows) {
+          const slices = modelSlices(w.models);
+          if (slices.length === 0) continue;
+          chartCount++;
+          const title = `${escHtml(k.label)} — ${w.name} (${w.pct >= 0 ? w.pct + '%' : '?'})`;
+          html += `<div style="background:var(--panel-bg);border:1px solid var(--border);border-radius:8px;padding:12px">
+            <div style="font-weight:600;margin-bottom:8px;font-size:13px">${title}</div>
+            <canvas id="quota-pie-${k.token_prefix}-${w.name}"></canvas>
+            <div style="margin-top:8px;font-size:11px;color:var(--dim)">${slices.map((s,i)=>`<span style="display:inline-block;margin-right:8px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${colors[i%colors.length]}"></span> ${escHtml(s.name)} ${s.value.toFixed(1)}% (${fmt(s.requests)})</span>`).join('')}</div>
+          </div>`;
+        }
+      }
+      charts.innerHTML = html || '<div style="color:var(--dim);padding:2em">No model usage data yet.</div>';
+      status.textContent = `${chartCount} charts from ${data.keys.length} keys`;
+      // draw after DOM insertion
+      for (const k of data.keys) {
+        const windows = [
+          { name: 'Session', models: k.session_models || {} },
+          { name: 'Weekly', models: k.weekly_models || {} }
+        ];
+        for (const w of windows) {
+          const slices = modelSlices(w.models);
+          const canvas = document.getElementById(`quota-pie-${k.token_prefix}-${w.name}`);
+          if (canvas) drawPie(canvas, slices, `${k.label} ${w.name}`);
+        }
+      }
+    }
+
+    // Coefficients table
+    const tbody = document.querySelector('#quota-coefs-table tbody');
+    const models = coefData.models || [];
+    if (models.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" style="color:var(--dim);padding:1em">${coefData.note || 'No coefficient data yet.'}</td></tr>`;
+    } else {
+      tbody.innerHTML = models.map(m => {
+        const rel = m.relative != null ? `x${m.relative}` : '—';
+        return `<tr>
+          <td style="font-family:monospace">${escHtml(m.model)}</td>
+          <td>${fmt(m.requests)}</td>
+          <td>${fmt(m.tokens)}</td>
+          <td>${m.quota_share_pct.toFixed(1)}%</td>
+          <td>${m.token_share_pct.toFixed(2)}%</td>
+          <td style="font-weight:600">${m.coefficient}</td>
+          <td style="font-weight:600;color:${m.relative > 10 ? 'var(--red)' : m.relative > 3 ? 'var(--yellow)' : 'var(--green)'}">${rel}</td>
+          <td>${m.keys_used}</td>
+        </tr>`;
+      }).join('');
+    }
+  } catch (e) { console.error('Failed to load quota cost:', e); }
+}
+
+document.getElementById('quota-refresh').addEventListener('click', loadQuotaCost);
+// Load quota data when tab is clicked
+document.querySelectorAll('.tab').forEach(t => {
+  if (t.dataset.tab === 'quota') t.addEventListener('click', loadQuotaCost);
+  if (t.dataset.tab === 'costs') t.addEventListener('click', loadCosts);
+});
+
+// --- OpenRouter Costs ---
+async function loadCosts() {
+  try {
+    const range = getDateRange(); if (!range.start || !range.end) return;
+    const data = await loadJSON(`/admin/usage/openrouter-costs?start_date=${range.start}&end_date=${range.end}`);
+    const models = data.models || [];
+    const total = data.total_cost_usd || 0;
+    const totalIn = data.total_input_cost_usd || 0;
+    const totalOut = data.total_output_cost_usd || 0;
+    const unpriced = data.unpriced_models || [];
+
+    document.getElementById('costs-badge').textContent = models.length;
+    document.getElementById('costs-total').innerHTML = `
+      <div class="card"><div class="label">Total Cost</div><div class="value" style="color:var(--green)">$${total.toFixed(2)}</div></div>
+      <div class="card"><div class="label">Input Cost</div><div class="value" style="color:var(--blue)">$${totalIn.toFixed(2)}</div></div>
+      <div class="card"><div class="label">Output Cost</div><div class="value" style="color:var(--purple)">$${totalOut.toFixed(2)}</div></div>`;
+
+    document.querySelector('#costs-table tbody').innerHTML = models.map(m => {
+      const inP = m.input_per_1m !== null ? '$' + m.input_per_1m.toFixed(2) : '?';
+      const outP = m.output_per_1m !== null ? '$' + m.output_per_1m.toFixed(2) : '?';
+      return `<tr><td style="font-family:monospace">${escHtml(m.model)}</td><td>${fmt(m.requests)}</td><td>${fmt(m.tokens_in)}</td><td>${fmt(m.tokens_out)}</td>
+        <td>$${m.input_cost_usd.toFixed(2)}</td><td>$${m.output_cost_usd.toFixed(2)}</td><td style="font-weight:600">$${m.total_cost_usd.toFixed(2)}</td>
+        <td style="font-family:monospace">${inP}</td><td style="font-family:monospace">${outP}</td></tr>`;
+    }).join('');
+
+    document.getElementById('costs-unpriced').textContent = unpriced.length
+      ? 'Unpriced models (no OpenRouter data): ' + unpriced.join(', ')
+      : '';
+  } catch (e) { console.error('Failed to load costs:', e); }
+}
+document.getElementById('costs-refresh').addEventListener('click', loadCosts);
+</script>
+</body>
+</html>

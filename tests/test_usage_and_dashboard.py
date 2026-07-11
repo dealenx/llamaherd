@@ -37,7 +37,7 @@ def test_recent_calls_filters_by_client_and_model(tmp_path):
 
 
 def test_dashboard_script_has_no_five_second_polling_and_valid_syntax(tmp_path):
-    html = proxy.DASHBOARD_HTML
+    html = proxy.DASHBOARD_PATH.read_text()
     assert "EventSource" in html
     assert "/admin/events" in html
     assert "setInterval" in html  # allowed for relative refresh labels

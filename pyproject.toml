@@ -56,6 +56,9 @@ llamaherd = "llamaherd.cli:main"
 [tool.setuptools.packages.find]
 include = ["llamaherd*"]
 
+[tool.setuptools.package-data]
+llamaherd = ["static/*.html"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"

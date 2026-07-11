@@ -67,7 +67,7 @@ def test_admin_in_flight_requires_token():
 
 def test_dashboard_renders_in_flight_panel():
     """The dashboard HTML should reference in-flight elements + request_start/end events."""
-    html = proxy.DASHBOARD_HTML
+    html = proxy.DASHBOARD_PATH.read_text()
     assert "inflight-list" in html
     assert "request_start" in html
     assert "request_end" in html
