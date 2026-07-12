@@ -447,7 +447,8 @@ async def lifespan(app: FastAPI):
     if not admin_token:
         log.warning("admin_token not set in config — admin endpoints will be inaccessible")
     else:
-        log.info(f"Admin authentication enabled (token: {admin_token[:8]}...)")
+        # Redact the token — never log even a prefix. Reviewer #1 on PR #2.
+        log.info(f"Admin authentication enabled (token length: {len(admin_token)})")
     manager = KeyManager(cfg.get("keys", []))
     db_auth_token = cfg.get("db_auth_token") or os.environ.get("LLAMAHERD_DB_AUTH_TOKEN")
     db_auth_user = cfg.get("db_auth_user") or os.environ.get("LLAMAHERD_DB_AUTH_USER")
@@ -2688,12 +2689,20 @@ async def admin_update_key(key_id: str, label: str = None, max_concurrent: int =
     k = _find_key(key_id)
     if not k:
         raise HTTPException(status_code=404, detail="key not found")
+    label_changed = False
+    old_label = k.label
     if label is not None:
         k.label = label
+        label_changed = (label != old_label)
     if max_concurrent is not None:
         k.max_concurrent = max_concurrent
     if cycle_day is not None:
         k.cycle_day = cycle_day
+    # If the label was renamed and the usage scraper has cookies stored under
+    # the old label, migrate them so scraping keeps working. Reviewer #5 on PR #2.
+    if label_changed and usage_scraper and hasattr(usage_scraper, "cookie_map"):
+        if old_label in usage_scraper.cookie_map and old_label != label:
+            usage_scraper.cookie_map[label] = usage_scraper.cookie_map.pop(old_label)
     # Persist to DB
     if key_registry:
         key_registry.update(k.token, label=label, max_concurrent=max_concurrent, cycle_day=cycle_day)

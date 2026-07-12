@@ -1,4 +1,5 @@
 import logging
+import base64
 import secrets
 import sqlite3
 import time
@@ -66,7 +67,9 @@ class _LibSQLHTTPCursor:
         if t == "text":
             return val
         if t == "blob":
-            return val.encode() if isinstance(val, str) else val
+            # Hrana returns blob values as base64-encoded strings when the request
+            # used base64=True. Decode to recover the original bytes.
+            return base64.b64decode(val) if isinstance(val, str) else val
         return val
 
     def _build_arg(self, p):
@@ -79,7 +82,9 @@ class _LibSQLHTTPCursor:
         if isinstance(p, float):
             return {"type": "float", "value": p}
         if isinstance(p, bytes):
-            return {"type": "blob", "base64": True, "value": p.hex()}
+            # Hrana expects base64-encoded bytes when base64=True is set.
+            # Sending .hex() corrupts blob values (Reviewer #2 on PR #2).
+            return {"type": "blob", "base64": True, "value": base64.b64encode(p).decode("ascii")}
         return {"type": "text", "value": str(p)}
 
     def _run_pipeline(self, stmt: dict):

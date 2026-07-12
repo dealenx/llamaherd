@@ -130,7 +130,6 @@ class TelegramNotifier:
             payload: dict = {
                 "chat_id": self.chat_id,
                 "text": text,
-                "parse_mode": "HTML",
             }
             if self.topic_id:
                 payload["message_thread_id"] = int(self.topic_id)

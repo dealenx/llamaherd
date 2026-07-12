@@ -407,7 +407,6 @@ def cmd_telegram_test(args):
             payload = {
                 "chat_id": chat_id,
                 "text": "☁️ Ollama Cloud Monitor\n\n✅ Test notification from LlamaHerd CLI\n\nIf you see this, Telegram notifications are configured correctly!",
-                "parse_mode": "HTML",
             }
             topic_id = os.environ.get("LLAMAHERD_TELEGRAM_TOPIC_ID")
             if topic_id:
