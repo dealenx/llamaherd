@@ -111,15 +111,65 @@ To see session and weekly usage percentages, you need browser cookies from each 
 3. Copy `__Secure-session` (required, per-account), `aid`, `cf_clearance`, and `__stripe_mid`
 4. Add them to `config.yaml` under each key's `cookies` section, or via the Subscriptions tab in the dashboard
 
-## 🐳 Docker
+## 🐳 Docker (recommended: docker-compose)
+
+A `docker-compose.yml` is provided at the repo root. The build context is the
+repo itself (the Dockerfile lives at the repo root), so a fresh clone just
+needs `config.yaml`, `data/`, and a one-time chown.
+
+Production layout on atrium-services (`100.69.208.20`) or any fresh host:
+
+```
+  <repo-root>/                     <- this is the git clone
+  ├── docker-compose.yml           # tracked in repo
+  ├── Dockerfile                   # tracked in repo
+  ├── llamaherd/                   # package source (tracked in repo)
+  ├── config.yaml                  # NOT in repo (admin_token, upstream keys)
+  ├── openrouter_pricing.yaml
+  └── data/                        # bind-mounted SQLite + cache files
+      ├── proxy.db
+      ├── usage.db
+      └── nvidia_model_cache.json
+```
+
+### First-time setup
 
 ```bash
-docker build -t llamaherd .
-docker run -p 8399:8399 \
-  -v $(pwd)/config.yaml:/app/config.yaml \
-  -v $(pwd)/usage.db:/app/usage.db \
-  llamaherd
+# 1. Clone the repo into the deploy directory
+git clone https://github.com/bennybuoy/llamaherd.git /srv/services/llamaherd
+cd /srv/services/llamaherd
+
+# 2. Copy config.example.yaml to config.yaml and edit (admin_token, upstream keys)
+cp config.example.yaml config.yaml
+
+# 3. Create the data dir and pre-create the bind-mounted files
+#    (Docker would otherwise create directories at those paths on first mount)
+mkdir -p data
+touch data/proxy.db data/usage.db data/nvidia_model_cache.json
+
+# 4. Chown the files so the container's llamaherd user (uid 999) can write
+sudo chown 999:999 data/proxy.db data/usage.db data/nvidia_model_cache.json
+
+# 5. Build and run
+docker compose build && docker compose up -d
 ```
+
+Without step 4, chat completions return 500 with `sqlite3.OperationalError:
+attempt to write a readonly database`. Without step 3, Docker creates
+directories at the bind-mount paths, and SQLite / cache loads fail in
+confusing ways.
+
+### Sidecar workflow for code changes
+
+The proxy is the inference backend for every Hermes profile — a broken deploy
+affects every agent. Don't push code changes directly to prod. The recommended
+flow is:
+
+1. Clone a second copy of the repo into `/srv/services/llamaherd-sidecar/`
+   (or any other host) and run it on port **8499** with an isolated DB.
+2. Develop on a feature branch in the sidecar.
+3. Smoke-test against `:8499` before merging.
+4. After review: merge to main, then `docker compose build && up -d` on prod.
 
 ## 🤖 CLI (Agent-Friendly)
 

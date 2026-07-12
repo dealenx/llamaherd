@@ -19,6 +19,15 @@ RUN pip install --no-cache-dir /wheels/* \
 COPY --chown=llamaherd:llamaherd config.example.yaml config.yaml
 COPY --chown=llamaherd:llamaherd openrouter_pricing.yaml openrouter_pricing.yaml
 
+# Create directories that docker-compose bind-mounts files into.
+# Without these, the runtime image (built from a wheel, not a local pip install)
+# has no /app/llamaherd/ or /app/data/ and the proxy.db / usage.db bind mounts
+# fail with "unable to open database file". The pre-hardening Dockerfile used
+# `pip install .` which incidentally created /app/llamaherd/ via the package
+# metadata; the multi-stage wheel build does not.
+RUN mkdir -p /app/llamaherd /app/data \
+    && chown -R llamaherd:llamaherd /app/llamaherd /app/data
+
 USER llamaherd
 EXPOSE 8399
 

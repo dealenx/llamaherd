@@ -1,0 +1,64 @@
+# docker-compose.yml for LlamaHerd.
+#
+# This file is intentionally tracked at the repo root so the deploy is
+# reproducible from a fresh `git clone`. The build context is the repo
+# itself (the Dockerfile lives at the repo root), so a fresh clone just
+# needs `config.yaml`, `data/`, and a one-time chown.
+#
+# Layout (production on atrium-services or any fresh host):
+#
+#   <repo-root>/                     <- this is the git clone
+#   ├── docker-compose.yml           # THIS FILE
+#   ├── Dockerfile                   # image build recipe
+#   ├── llamaherd/                   # package source
+#   ├── config.yaml                  # NOT in repo (admin_token, upstream keys)
+#   ├── openrouter_pricing.yaml
+#   └── data/                        # bind-mounted SQLite + cache files
+#
+# First-time setup:
+#
+#   git clone https://github.com/bennybuoy/llamaherd.git /srv/services/llamaherd
+#   cd /srv/services/llamaherd
+#   cp config.example.yaml config.yaml        # edit admin_token + upstream keys
+#   mkdir -p data
+#   touch data/proxy.db data/usage.db data/nvidia_model_cache.json
+#   sudo chown 999:999 data/proxy.db data/usage.db data/nvidia_model_cache.json
+#   docker compose build && docker compose up -d
+#
+# The chown is required because the container runs as user `llamaherd` (uid 999);
+# without it, chat completions return 500 with
+# `sqlite3.OperationalError: attempt to write a readonly database`.
+# The touch is required because Docker creates a DIRECTORY at a bind-mount
+# path if the source file doesn't exist, which makes SQLite/cache loads
+# fail in confusing ways.
+
+services:
+  llamaherd:
+    build: .
+    container_name: llamaherd
+    restart: unless-stopped
+    ports:
+      - "8399:8399"
+    environment:
+      PYTHONPATH: /app
+      HOME: /app
+      LLAMAHERD_CONFIG: /app/config.yaml
+      # The hardened image installs the package to
+      # /usr/local/lib/python3.11/site-packages/llamaherd/. Without these
+      # env vars, the proxy opens the site-packages DB path instead of the
+      # bind-mounted files at /app/data/ and /app/llamaherd/.
+      LLAMAHERD_DB: /app/llamaherd/proxy.db
+      LLAMAHERD_USAGE_DB: /app/data/usage.db
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./openrouter_pricing.yaml:/app/openrouter_pricing.yaml
+      - ./data/usage.db:/app/data/usage.db
+      - ./data/proxy.db:/app/llamaherd/proxy.db
+      - ./data/nvidia_model_cache.json:/app/llamaherd/nvidia_model_cache.json
+    command: ["llamaherd", "--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "8399", "serve"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8399/healthz', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
