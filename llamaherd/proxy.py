@@ -687,6 +687,32 @@ async def _sweep_stale_inflight(interval: int = 300, max_age_seconds: int = 600)
 
 
 app = FastAPI(title="Ollama Cloud Proxy", lifespan=lifespan)
+
+
+@asynccontextmanager
+async def _cancellation_safe_stream(client: httpx.AsyncClient, method: str, url: str, **kwargs):
+    """Keep response cleanup alive when an ASGI stream is cancelled repeatedly."""
+    stream_context = client.stream(method, url, **kwargs)
+    response = await stream_context.__aenter__()
+    exc_info = (None, None, None)
+    try:
+        yield response
+    except BaseException as exc:
+        exc_info = (type(exc), exc, exc.__traceback__)
+        raise
+    finally:
+        cleanup = asyncio.create_task(stream_context.__aexit__(*exc_info))
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+
 STATIC_DIR = Path(__file__).parent / "static"
 DASHBOARD_PATH = STATIC_DIR / "dashboard.html"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -1078,8 +1104,10 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
         usage_captured = False
         final_status = 200
         try:
-            async with upstream_http_client.stream("POST", f"{upstream_url}{path}",
-                                                   content=body, headers=headers) as resp:
+            async with _cancellation_safe_stream(
+                upstream_http_client, "POST", f"{upstream_url}{path}",
+                content=body, headers=headers,
+            ) as resp:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
                         final_status = 429
@@ -1228,7 +1256,9 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
         usage_captured = False
         status_code = 200
         try:
-            async with upstream_http_client.stream("POST", url, content=body, headers=headers) as resp:
+            async with _cancellation_safe_stream(
+                upstream_http_client, "POST", url, content=body, headers=headers,
+            ) as resp:
                     status_code = resp.status_code
                     if resp.status_code >= 400:
                         err = await resp.aread()
@@ -1308,8 +1338,10 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
         final_status = 200
         api_upstream = _native_api_upstream()
         try:
-            async with upstream_http_client.stream("POST", f"{api_upstream}{path}",
-                                                   content=body, headers=headers) as resp:
+            async with _cancellation_safe_stream(
+                upstream_http_client, "POST", f"{api_upstream}{path}",
+                content=body, headers=headers,
+            ) as resp:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
                         if sticky and session_id:
@@ -1925,11 +1957,13 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
         bridge_reason = "stop"  # default
         final_status = 200
         try:
-            async with upstream_http_client.stream("POST", f"{api_upstream}/chat",
-                                                   content=body, headers={
-                                                       "Authorization": f"Bearer {key.token}",
-                                                       "Content-Type": "application/json",
-                                                   }) as resp:
+            async with _cancellation_safe_stream(
+                upstream_http_client, "POST", f"{api_upstream}/chat",
+                content=body, headers={
+                    "Authorization": f"Bearer {key.token}",
+                    "Content-Type": "application/json",
+                },
+            ) as resp:
                     if resp.status_code == 429:
                         await manager.mark_429(key)
                         final_status = 429
