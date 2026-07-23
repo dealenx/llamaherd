@@ -689,6 +689,66 @@ async def _sweep_stale_inflight(interval: int = 300, max_age_seconds: int = 600)
 app = FastAPI(title="Ollama Cloud Proxy", lifespan=lifespan)
 
 
+_STREAM_CLEANUP_TIMEOUT_SECONDS = 30.0
+
+
+async def _await_cleanup(
+    awaitable,
+    *,
+    label: str,
+    preserve_cancellation: bool = False,
+    timeout: float = _STREAM_CLEANUP_TIMEOUT_SECONDS,
+):
+    """Run cleanup to completion despite repeated cancellation, with a deadline.
+
+    Cancellation remains the primary outcome when cleanup itself fails.  A
+    deadline prevents a broken close/release implementation from pinning an
+    ASGI task forever, and the cleanup task is always reaped before returning.
+    """
+    cleanup = asyncio.create_task(awaitable, name=f"llamaherd-cleanup:{label}")
+    cancelled = preserve_cancellation
+    deadline = asyncio.get_running_loop().time() + timeout
+
+    while not cleanup.done():
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            cleanup.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(cleanup), timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+            if not cleanup.done():
+                cleanup.add_done_callback(
+                    lambda task: task.exception() if not task.cancelled() else None
+                )
+            error = TimeoutError(f"{label} did not finish within {timeout:g}s")
+            if cancelled:
+                log.error("%s; preserving request cancellation", error)
+                raise asyncio.CancelledError from error
+            raise error
+        try:
+            await asyncio.wait_for(asyncio.shield(cleanup), timeout=remaining)
+        except asyncio.CancelledError:
+            cancelled = True
+        except asyncio.TimeoutError:
+            # Re-enter the loop so the deadline branch cancels and reaps the task.
+            continue
+
+    try:
+        cleanup.result()
+    except asyncio.CancelledError:
+        if not cancelled:
+            raise
+    except Exception:
+        if cancelled:
+            log.exception("%s failed while preserving request cancellation", label)
+        else:
+            raise
+
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 @asynccontextmanager
 async def _cancellation_safe_stream(client: httpx.AsyncClient, method: str, url: str, **kwargs):
     """Keep response cleanup alive when an ASGI stream is cancelled repeatedly."""
@@ -701,16 +761,18 @@ async def _cancellation_safe_stream(client: httpx.AsyncClient, method: str, url:
         exc_info = (type(exc), exc, exc.__traceback__)
         raise
     finally:
-        cleanup = asyncio.create_task(stream_context.__aexit__(*exc_info))
-        cancelled = False
-        while not cleanup.done():
-            try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                cancelled = True
-        cleanup.result()
-        if cancelled:
-            raise asyncio.CancelledError
+        try:
+            await _await_cleanup(
+                stream_context.__aexit__(*exc_info),
+                label="upstream response close",
+                preserve_cancellation=isinstance(exc_info[1], asyncio.CancelledError),
+            )
+        except BaseException:
+            if exc_info[1] is None:
+                raise
+            log.exception("Upstream response close failed while preserving stream exit")
+        if exc_info[1] is not None:
+            raise exc_info[1].with_traceback(exc_info[2])
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -1164,12 +1226,16 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
             yield f"data: {error_payload}\n\n"
         finally:
             elapsed_ms = int((time.time() - start) * 1000)
-            await manager.release(key, tokens_out)
-            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
-                                  final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
             usage_src = "usage" if usage_captured else "estimate"
             status_suffix = "" if final_status == 200 else f" status={final_status}"
-            log.info(f"{client_id} -> {model} via {key.label}: stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src}){status_suffix}")
+
+            async def finalize():
+                await manager.release(key, tokens_out)
+                _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+                                      final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+                log.info(f"{client_id} -> {model} via {key.label}: stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src}){status_suffix}")
+
+            await _await_cleanup(finalize(), label="OpenAI stream accounting")
 
     stream_headers = {
         "Cache-Control": "no-cache",
@@ -1397,11 +1463,15 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
             log.error(f"NDJSON stream error for {model} (client={client_id}): {e}")
         finally:
             elapsed_ms = int((time.time() - start) * 1000)
-            await manager.release(key, tokens_out)
-            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
-                                  final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
             usage_src = "usage" if usage_captured else "estimate"
-            log.info(f"{client_id} -> {model} via {key.label}: ndjson {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src})")
+
+            async def finalize():
+                await manager.release(key, tokens_out)
+                _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+                                      final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+                log.info(f"{client_id} -> {model} via {key.label}: ndjson {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src})")
+
+            await _await_cleanup(finalize(), label="native stream accounting")
 
     ndjson_headers = {"Content-Type": "application/x-ndjson"}
     if sticky and session_id:
@@ -2022,11 +2092,15 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
             log.error(f"Bridge stream error for {model} (client={client_id}): {e}")
         finally:
             elapsed_ms = int((time.time() - start) * 1000)
-            await manager.release(key, tokens_out)
-            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
-                                  final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
             usage_src = "usage" if usage_captured else "estimate"
-            log.info(f"{client_id} -> {model} via {key.label}: bridge {tokens_in}+{tokens_out}tok {elapsed_ms}ms done={bridge_reason} ({usage_src})")
+
+            async def finalize():
+                await manager.release(key, tokens_out)
+                _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+                                      final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+                log.info(f"{client_id} -> {model} via {key.label}: bridge {tokens_in}+{tokens_out}tok {elapsed_ms}ms done={bridge_reason} ({usage_src})")
+
+            await _await_cleanup(finalize(), label="bridge stream accounting")
 
     bridge_headers = {
         "Cache-Control": "no-cache",
