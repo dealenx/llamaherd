@@ -190,28 +190,104 @@ async def test_cleanup_timeout_cancels_and_reaps_task():
     assert not [task for task in asyncio.all_tasks() if task.get_name().startswith("llamaherd-cleanup:")]
 
 
-async def _make_stream(monkeypatch, stream_kind, response, manager, records=None):
+def test_usage_db_failure_does_not_leave_request_in_flight(monkeypatch):
+    request_id = "db-failure"
+    proxy._in_flight[request_id] = {"target_provider": "ollama-cloud"}
+
+    class FailingUsageDB:
+        def record(self, *args, **kwargs):
+            raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(proxy, "usage_db", FailingUsageDB())
+    proxy._record_and_broadcast(
+        "client", "key", "model", 1, 1, 10, 200, request_id=request_id,
+    )
+    assert request_id not in proxy._in_flight
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_kind", ["openai", "native", "fallback", "bridge"])
+async def test_response_start_failure_finalizes_before_body_iteration(monkeypatch, stream_kind):
+    request_id = f"never-started-{stream_kind}"
+    proxy._in_flight[request_id] = {"target_provider": "ollama-cloud"}
+    response = _CancellableCloseResponse()
+    manager = _FakeManager()
+    records = []
+    streaming_response = await _make_stream(
+        monkeypatch, stream_kind, response, manager, records, request_id,
+    )
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        raise RuntimeError("response start failed")
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}}
+    with pytest.raises(RuntimeError, match="response start failed"):
+        await streaming_response(scope, receive, send)
+
+    assert response.close_count == 0
+    assert manager.releases == (0 if stream_kind == "fallback" else 1)
+    assert len(records) == 1
+    assert request_id not in proxy._in_flight
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_kind", ["openai", "native", "fallback", "bridge"])
+async def test_asgi_23_immediate_disconnect_finalizes_acquired_resources(monkeypatch, stream_kind):
+    request_id = f"immediate-disconnect-{stream_kind}"
+    proxy._in_flight[request_id] = {"target_provider": "ollama-cloud"}
+    response = _CancellableCloseResponse()
+    response.allow_close.set()
+    manager = _FakeManager()
+    records = []
+    streaming_response = await _make_stream(
+        monkeypatch, stream_kind, response, manager, records, request_id,
+    )
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        return None
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}}
+    await asyncio.wait_for(streaming_response(scope, receive, send), 1)
+
+    assert manager.releases == (0 if stream_kind == "fallback" else 1)
+    assert len(records) == 1
+    assert request_id not in proxy._in_flight
+
+
+async def _make_stream(monkeypatch, stream_kind, response, manager, records=None, request_id=None):
     records = records if records is not None else []
     monkeypatch.setattr(proxy, "upstream_http_client", _FakeClient(response))
     monkeypatch.setattr(proxy, "upstream_url", "https://upstream.invalid/v1")
     monkeypatch.setattr(proxy, "manager", manager)
     monkeypatch.setattr(proxy, "sticky", None)
-    monkeypatch.setattr(proxy, "_record_and_broadcast", lambda *args, **kwargs: records.append((args, kwargs)))
+    def record(*args, **kwargs):
+        records.append((args, kwargs))
+        recorded_request_id = kwargs.get("request_id")
+        if recorded_request_id:
+            proxy._in_flight.pop(recorded_request_id, None)
+
+    monkeypatch.setattr(proxy, "_record_and_broadcast", record)
     key = KeyState(token="secret-key", label="test", max_concurrent=1)
     if stream_kind == "openai":
         return await proxy._proxy_stream(
-            "client", key, "/chat/completions", {}, b"{}", "model", time.time()
+            "client", key, "/chat/completions", {}, b"{}", "model", time.time(), request_id
         )
     if stream_kind == "native":
         return await proxy._proxy_ndjson_stream(
-            "client", key, "/chat", {}, b"{}", "model", time.time()
+            "client", key, "/chat", {}, b"{}", "model", time.time(), request_id
         )
     if stream_kind == "fallback":
         fallback = FallbackProvider({"provider": "fallback-test"})
         return await proxy._proxy_fallback_stream(
             "client", fallback, "https://fallback.invalid/chat/completions", {}, b"{}",
-            "model", "mapped-model", time.time(), "fb:test",
+            "model", "mapped-model", time.time(), "fb:test", request_id,
         )
     return await proxy._proxy_bridge_stream(
-        "client", key, b"{}", "model", time.time()
+        "client", key, b"{}", "model", time.time(), request_id
     )

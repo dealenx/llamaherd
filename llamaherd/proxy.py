@@ -367,9 +367,18 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
                            provider: Optional[str] = None,
                            session_id: Optional[str] = None):
     """Record usage to DB and broadcast call + request_end events to SSE subscribers."""
+    # End the live request first. Usage persistence is best-effort and must not
+    # leave a completed request occupying the dashboard/in-flight registry.
+    entry = _in_flight.pop(request_id, None) if request_id else None
     if usage_db:
-        usage_db.record(client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status,
-                        session_id=session_id or "")
+        try:
+            usage_db.record(client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status,
+                            session_id=session_id or "")
+        except Exception:
+            log.exception(
+                "Failed to persist usage for request %s (client=%s model=%s)",
+                request_id or "unknown", client_id, model,
+            )
     call_data = {
         "ts": time.time(),
         "client_id": client_id,
@@ -383,7 +392,6 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
     }
     end_data: Optional[dict] = None
     if request_id:
-        entry = _in_flight.pop(request_id, None)
         end_data = {
             **call_data,
             "request_id": request_id,
@@ -749,6 +757,52 @@ async def _await_cleanup(
         raise asyncio.CancelledError
 
 
+class _OnceAsyncFinalizer:
+    """Serialize and run a stream finalizer at most once."""
+
+    def __init__(self, callback):
+        self._callback = callback
+        self._lock = asyncio.Lock()
+        self.done = False
+
+    async def __call__(self):
+        async with self._lock:
+            if self.done:
+                return
+            self.done = True
+            await self._callback()
+
+
+class _FinalizingStreamingResponse(StreamingResponse):
+    """Finalize acquired resources even if body iteration never starts."""
+
+    def __init__(self, *args, finalizer: _OnceAsyncFinalizer, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._stream_finalizer = finalizer
+
+    async def __call__(self, scope, receive, send):
+        exit_exc = None
+        try:
+            return await super().__call__(scope, receive, send)
+        except BaseException as exc:
+            exit_exc = exc
+            raise
+        finally:
+            try:
+                await _await_cleanup(
+                    self._stream_finalizer(),
+                    label="response-level stream accounting",
+                    preserve_cancellation=isinstance(exit_exc, asyncio.CancelledError),
+                )
+            except BaseException as cleanup_exc:
+                if exit_exc is None:
+                    raise
+                if not isinstance(cleanup_exc, asyncio.CancelledError):
+                    log.exception("Response-level stream finalization failed while preserving response exit")
+            if exit_exc is not None:
+                raise exit_exc.with_traceback(exit_exc.__traceback__)
+
+
 @asynccontextmanager
 async def _cancellation_safe_stream(client: httpx.AsyncClient, method: str, url: str, **kwargs):
     """Keep response cleanup alive when an ASGI stream is cancelled repeatedly."""
@@ -767,10 +821,11 @@ async def _cancellation_safe_stream(client: httpx.AsyncClient, method: str, url:
                 label="upstream response close",
                 preserve_cancellation=isinstance(exc_info[1], asyncio.CancelledError),
             )
-        except BaseException:
+        except BaseException as cleanup_exc:
             if exc_info[1] is None:
                 raise
-            log.exception("Upstream response close failed while preserving stream exit")
+            if not isinstance(cleanup_exc, asyncio.CancelledError):
+                log.exception("Upstream response close failed while preserving stream exit")
         if exc_info[1] is not None:
             raise exc_info[1].with_traceback(exc_info[2])
 
@@ -1160,11 +1215,24 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
                          request_id: Optional[str] = None,
                          session_id: Optional[str] = None) -> StreamingResponse:
 
+    tokens_out = 0
+    tokens_in = 0
+    usage_captured = False
+    final_status = 200
+
+    async def finalize():
+        elapsed_ms = int((time.time() - start) * 1000)
+        await manager.release(key, tokens_out)
+        _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+                              final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+        usage_src = "usage" if usage_captured else "estimate"
+        status_suffix = "" if final_status == 200 else f" status={final_status}"
+        log.info(f"{client_id} -> {model} via {key.label}: stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src}){status_suffix}")
+
+    finalizer = _OnceAsyncFinalizer(finalize)
+
     async def generate():
-        tokens_out = 0
-        tokens_in = 0
-        usage_captured = False
-        final_status = 200
+        nonlocal tokens_out, tokens_in, usage_captured, final_status
         try:
             async with _cancellation_safe_stream(
                 upstream_http_client, "POST", f"{upstream_url}{path}",
@@ -1225,17 +1293,7 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
             })
             yield f"data: {error_payload}\n\n"
         finally:
-            elapsed_ms = int((time.time() - start) * 1000)
-            usage_src = "usage" if usage_captured else "estimate"
-            status_suffix = "" if final_status == 200 else f" status={final_status}"
-
-            async def finalize():
-                await manager.release(key, tokens_out)
-                _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
-                                      final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
-                log.info(f"{client_id} -> {model} via {key.label}: stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src}){status_suffix}")
-
-            await _await_cleanup(finalize(), label="OpenAI stream accounting")
+            await _await_cleanup(finalizer(), label="OpenAI stream accounting")
 
     stream_headers = {
         "Cache-Control": "no-cache",
@@ -1245,7 +1303,9 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
         stream_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
         stream_headers["X-LlamaHerd-Session"] = session_id
         stream_headers["X-LlamaHerd-Key"] = key.label
-    return StreamingResponse(generate(), media_type="text/event-stream", headers=stream_headers)
+    return _FinalizingStreamingResponse(
+        generate(), media_type="text/event-stream", headers=stream_headers, finalizer=finalizer,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1316,11 +1376,24 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
                                   mapped: str, start: float, upstream_label: str,
                                   request_id: Optional[str] = None,
                                   session_id: Optional[str] = None) -> StreamingResponse:
+    tokens_in = 0
+    tokens_out = 0
+    usage_captured = False
+    status_code = 200
+
+    async def finalize():
+        elapsed_ms = int((time.time() - start) * 1000)
+        _record_and_broadcast(client_id, upstream_label, original_model,
+                              tokens_in, tokens_out, elapsed_ms, status_code,
+                              request_id=request_id, provider=fp.provider, session_id=session_id)
+        src = "usage" if usage_captured else "estimate"
+        log.info(f"{client_id} -> {original_model} via {upstream_label}({mapped}): "
+                 f"stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({src})")
+
+    finalizer = _OnceAsyncFinalizer(finalize)
+
     async def generate():
-        tokens_in = 0
-        tokens_out = 0
-        usage_captured = False
-        status_code = 200
+        nonlocal tokens_in, tokens_out, usage_captured, status_code
         try:
             async with _cancellation_safe_stream(
                 upstream_http_client, "POST", url, content=body, headers=headers,
@@ -1357,13 +1430,7 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
         except Exception as e:
             log.error(f"Fallback stream error for {original_model}: {e}")
         finally:
-            elapsed_ms = int((time.time() - start) * 1000)
-            _record_and_broadcast(client_id, upstream_label, original_model,
-                                  tokens_in, tokens_out, elapsed_ms, status_code,
-                                  request_id=request_id, provider=fp.provider, session_id=session_id)
-            src = "usage" if usage_captured else "estimate"
-            log.info(f"{client_id} -> {original_model} via {upstream_label}({mapped}): "
-                     f"stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({src})")
+            await _await_cleanup(finalizer(), label="fallback stream accounting")
 
     bridge_headers = {
         "Cache-Control": "no-cache",
@@ -1373,7 +1440,9 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
         bridge_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
         bridge_headers["X-LlamaHerd-Session"] = session_id
         bridge_headers["X-LlamaHerd-Key"] = upstream_label
-    return StreamingResponse(generate(), media_type="text/event-stream", headers=bridge_headers)
+    return _FinalizingStreamingResponse(
+        generate(), media_type="text/event-stream", headers=bridge_headers, finalizer=finalizer,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1397,12 +1466,24 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
                                 session_id: Optional[str] = None) -> StreamingResponse:
     """Stream NDJSON from the native Ollama API, capturing usage from the final chunk."""
 
+    tokens_out = 0
+    tokens_in = 0
+    usage_captured = False
+    final_status = 200
+    api_upstream = _native_api_upstream()
+
+    async def finalize():
+        elapsed_ms = int((time.time() - start) * 1000)
+        await manager.release(key, tokens_out)
+        _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+                              final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+        usage_src = "usage" if usage_captured else "estimate"
+        log.info(f"{client_id} -> {model} via {key.label}: ndjson {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src})")
+
+    finalizer = _OnceAsyncFinalizer(finalize)
+
     async def generate():
-        tokens_out = 0
-        tokens_in = 0
-        usage_captured = False
-        final_status = 200
-        api_upstream = _native_api_upstream()
+        nonlocal tokens_out, tokens_in, usage_captured, final_status
         try:
             async with _cancellation_safe_stream(
                 upstream_http_client, "POST", f"{api_upstream}{path}",
@@ -1462,23 +1543,16 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
                 await sticky.clear_session(session_id)
             log.error(f"NDJSON stream error for {model} (client={client_id}): {e}")
         finally:
-            elapsed_ms = int((time.time() - start) * 1000)
-            usage_src = "usage" if usage_captured else "estimate"
-
-            async def finalize():
-                await manager.release(key, tokens_out)
-                _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
-                                      final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
-                log.info(f"{client_id} -> {model} via {key.label}: ndjson {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src})")
-
-            await _await_cleanup(finalize(), label="native stream accounting")
+            await _await_cleanup(finalizer(), label="native stream accounting")
 
     ndjson_headers = {"Content-Type": "application/x-ndjson"}
     if sticky and session_id:
         ndjson_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
         ndjson_headers["X-LlamaHerd-Session"] = session_id
         ndjson_headers["X-LlamaHerd-Key"] = key.label
-    return StreamingResponse(generate(), media_type="application/x-ndjson", headers=ndjson_headers)
+    return _FinalizingStreamingResponse(
+        generate(), media_type="application/x-ndjson", headers=ndjson_headers, finalizer=finalizer,
+    )
 
 
 async def _proxy_ndjson_request(request: Request, path: str) -> Response:
@@ -2019,13 +2093,24 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
     """
     api_upstream = _native_api_upstream()
     chunk_id = f"chatcmpl-bridge-{uuid.uuid4().hex[:8]}"
+    tokens_out = 0
+    tokens_in = 0
+    usage_captured = False
+    bridge_reason = "stop"
+    final_status = 200
+
+    async def finalize():
+        elapsed_ms = int((time.time() - start) * 1000)
+        await manager.release(key, tokens_out)
+        _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+                              final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+        usage_src = "usage" if usage_captured else "estimate"
+        log.info(f"{client_id} -> {model} via {key.label}: bridge {tokens_in}+{tokens_out}tok {elapsed_ms}ms done={bridge_reason} ({usage_src})")
+
+    finalizer = _OnceAsyncFinalizer(finalize)
 
     async def generate():
-        tokens_out = 0
-        tokens_in = 0
-        usage_captured = False
-        bridge_reason = "stop"  # default
-        final_status = 200
+        nonlocal tokens_out, tokens_in, usage_captured, bridge_reason, final_status
         try:
             async with _cancellation_safe_stream(
                 upstream_http_client, "POST", f"{api_upstream}/chat",
@@ -2091,16 +2176,7 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
         except Exception as e:
             log.error(f"Bridge stream error for {model} (client={client_id}): {e}")
         finally:
-            elapsed_ms = int((time.time() - start) * 1000)
-            usage_src = "usage" if usage_captured else "estimate"
-
-            async def finalize():
-                await manager.release(key, tokens_out)
-                _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
-                                      final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
-                log.info(f"{client_id} -> {model} via {key.label}: bridge {tokens_in}+{tokens_out}tok {elapsed_ms}ms done={bridge_reason} ({usage_src})")
-
-            await _await_cleanup(finalize(), label="bridge stream accounting")
+            await _await_cleanup(finalizer(), label="bridge stream accounting")
 
     bridge_headers = {
         "Cache-Control": "no-cache",
@@ -2110,7 +2186,9 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
         bridge_headers["Set-Cookie"] = _session_cookie_for_response(session_id, sticky.ttl)
         bridge_headers["X-LlamaHerd-Session"] = session_id
         bridge_headers["X-LlamaHerd-Key"] = key.label
-    return StreamingResponse(generate(), media_type="text/event-stream", headers=bridge_headers)
+    return _FinalizingStreamingResponse(
+        generate(), media_type="text/event-stream", headers=bridge_headers, finalizer=finalizer,
+    )
 
 
 # ---------------------------------------------------------------------------
