@@ -65,6 +65,7 @@ def test_dashboard_uses_pixel_mascot_and_compact_operations_layout():
     assert 'class="tab" data-tab="subs">Accounts</' in html
     assert "url('/static/llamaherd-hero.png')" in html
     assert "max-width: 1920px" in html
+    assert "#fallback-control { margin-left: 0 !important; width: 100%; flex-wrap: wrap; }" in html
 
     assert (STATIC / "llamaherd-logo.png").stat().st_size > 0
     assert (STATIC / "llamaherd-hero.png").stat().st_size > 0
