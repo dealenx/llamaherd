@@ -26,7 +26,7 @@ clients --> [ LlamaHerd ] --> { Sub 1 | Sub 2 | Sub N }
 - **Sticky session routing** — keeps the same conversation on the same upstream subscription to maximize KV-cache reuse. Falls back to hashing the start of the conversation context when clients don't send a session ID.
 - **Multi-key load balancing** — routes across N Ollama Cloud keys, preferring freshest billing cycle and least usage
 - **Auto model discovery** — polls `/v1/models` from each key, merges into one list
-- **Live dashboard** — SSE-powered real-time updates, time-period filtering, per-model usage, session/weekly progress tracking
+- **Live operations dashboard** — period KPIs, urgency-sorted account health, per-model usage, and SSE-powered real-time updates
 - **Usage attribution** — per-client API keys track which service made each request
 - **Dynamic key management** — add/remove subscriptions and client keys via API, no restart needed
 - **Cookie-based usage scraping** — tracks session & weekly usage % from ollama.com/settings
@@ -79,9 +79,12 @@ Then point your OpenAI-compatible client at `http://127.0.0.1:8399/v1`.
 Open `http://127.0.0.1:8399/dashboard?token=YOUR_ADMIN_TOKEN` in a browser.
 
 The dashboard features:
-- **Overview tab** — key status cards with session/weekly usage progress bars, totals, per-client/model/daily breakdowns, live call feed
+- **Operations summary** — compact status header and six KPI cards for calls, tokens, in-flight requests, average latency, and recorded-call error rate
+- **Account health rail** — the canonical account overview, urgency-sorted with slot pressure, session/weekly usage, billing remaining, request counts, and 429s. It stays alongside the dashboard on wide screens and moves below the main content on narrower displays.
+- **Overview tab** — per-client, per-model, and daily breakdowns plus the live call feed
 - **Models tab** — all discovered models with context lengths, key availability, and 7-day usage stats. Search and sort.
-- **Subscriptions tab** — add/remove Ollama Cloud keys, edit cookies for usage tracking, see plan and billing info
+- **Accounts tab** — add/remove Ollama Cloud accounts, edit cookies for usage tracking, and inspect plan and billing details
+- **Quota Cost and OpenRouter $ tabs** — quota-equivalent usage and fallback-provider cost reporting
 - **Time period filtering** — Today, Yesterday, Last 7 days, This Week, This Month, Last Month, or Custom dates
 - **SSE live updates** — new calls and status changes stream in real-time, no polling
 
@@ -113,7 +116,7 @@ To see session and weekly usage percentages, you need browser cookies from each 
 1. Log into ollama.com/settings in your browser
 2. Open DevTools → Application → Cookies → ollama.com
 3. Copy `__Secure-session` (required, per-account), `aid`, `cf_clearance`, and `__stripe_mid`
-4. Add them to `config.yaml` under each key's `cookies` section, or via the Subscriptions tab in the dashboard
+4. Add them to `config.yaml` under each key's `cookies` section, or via the Accounts tab in the dashboard
 
 ## 🐳 Docker (recommended: docker-compose)
 
