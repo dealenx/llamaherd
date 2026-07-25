@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 import httpx
 import yaml
@@ -728,7 +729,7 @@ async def _await_cleanup(
             cleanup.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(cleanup), timeout=1.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            except (TimeoutError, asyncio.CancelledError, Exception):
                 pass
             if not cleanup.done():
                 cleanup.add_done_callback(
@@ -743,7 +744,7 @@ async def _await_cleanup(
             await asyncio.wait_for(asyncio.shield(cleanup), timeout=remaining)
         except asyncio.CancelledError:
             cancelled = True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Re-enter the loop so the deadline branch cancels and reaps the task.
             continue
 
