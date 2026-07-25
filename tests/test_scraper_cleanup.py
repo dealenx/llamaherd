@@ -130,17 +130,23 @@ async def test_activity_refresh_close_cancels_delayed_tasks():
 
 @pytest.mark.asyncio
 async def test_completed_ollama_request_schedules_its_account_only(monkeypatch):
-    active_key = SimpleNamespace(label="sub-1", token="abcdefgh-token")
-    idle_key = SimpleNamespace(label="sub-2", token="ijklmnop-token")
+    idle_key = SimpleNamespace(label="sub-1", token="sk-ollama-idle")
+    active_key = SimpleNamespace(label="sub-2", token="sk-ollama-active")
     scheduled = []
+    recorded = []
     refresher = SimpleNamespace(schedule=lambda key: scheduled.append(key.label))
-    manager = SimpleNamespace(keys=[active_key, idle_key], status=lambda: [])
-    monkeypatch.setattr(proxy, "usage_db", None)
+    manager = SimpleNamespace(
+        keys=[idle_key, active_key],
+        status=lambda: [],
+        key_by_token=lambda token: next((key for key in [idle_key, active_key] if key.token == token), None),
+    )
+    usage_db = SimpleNamespace(record=lambda *args, **kwargs: recorded.append(args))
+    monkeypatch.setattr(proxy, "usage_db", usage_db)
     monkeypatch.setattr(proxy, "usage_refresher", refresher)
     monkeypatch.setattr(proxy, "manager", manager)
 
     proxy._record_and_broadcast(
-        "client", "abcdefgh", "glm", 1, 1, 10, 200,
+        "client", active_key.token, "glm", 1, 1, 10, 200,
         provider="ollama-cloud",
     )
     proxy._record_and_broadcast(
@@ -149,7 +155,9 @@ async def test_completed_ollama_request_schedules_its_account_only(monkeypatch):
     )
     await asyncio.sleep(0)
 
-    assert scheduled == ["sub-1"]
+    assert scheduled == ["sub-2"]
+    assert recorded[0][1] == "sk-ollam"
+    assert active_key.token not in repr(recorded)
 
 
 @pytest.mark.asyncio
