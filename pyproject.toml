@@ -38,7 +38,9 @@ scraping = [
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
-    "ruff>=0.1",
+    # Ruff 0.16 enables a much broader default rule set; keep CI stable until
+    # the repository adopts those rules deliberately.
+    "ruff>=0.1,<0.16",
 ]
 # Optional: remote libSQL database (Turso, self-hosted, etc.)
 # Enables http(s):// URLs in usage_db / LLAMAHERD_DB for persistent storage in containers.
