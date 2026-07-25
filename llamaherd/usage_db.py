@@ -1,14 +1,13 @@
 import sqlite3
 import time
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from .db import _safe_alter_add_column, db_connect
 
 
 class UsageDB:
-    def __init__(self, db_path: str, auth_token: Optional[str] = None,
-                 auth_user: Optional[str] = None):
+    def __init__(self, db_path: str, auth_token: str | None = None,
+                 auth_user: str | None = None):
         self.db_path = db_path
         self._conn = db_connect(db_path, auth_token=auth_token, auth_user=auth_user)
         self._conn.execute("""
@@ -50,7 +49,7 @@ class UsageDB:
     def record(self, client_id: str, upstream_key: str, model: str,
                tokens_in: int, tokens_out: int, latency_ms: int, status: int,
                session_id: str = ""):
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now(UTC).date().isoformat()
         self._conn.execute(
             "INSERT INTO usage (ts, day, client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (time.time(), today, client_id, upstream_key, model,
@@ -58,7 +57,7 @@ class UsageDB:
         )
         self._conn.commit()
 
-    def summary(self, hours: int = 24, client: str = None, model: str = None) -> list[dict]:
+    def summary(self, hours: int = 24, client: str | None = None, model: str | None = None) -> list[dict]:
         since = time.time() - hours * 3600
         query = """
             SELECT client_id, model, day,
@@ -90,7 +89,7 @@ class UsageDB:
             "avg_latency_ms": round(r[7] or 0, 1),
         } for r in rows]
 
-    def _date_range_where(self, days: int = None, start_date: str = None, end_date: str = None):
+    def _date_range_where(self, days: int | None = None, start_date: str | None = None, end_date: str | None = None):
         """Build WHERE clause + params for date range filtering.
         Supports both `days` (relative) and start_date/end_date (absolute ISO date).
         Returns (where_clause, params).
@@ -105,7 +104,7 @@ class UsageDB:
             since = time.time() - (days or 30) * 86400
             return "ts > ?", [since]
 
-    def daily_totals(self, days: int = 30, start_date: str = None, end_date: str = None) -> list[dict]:
+    def daily_totals(self, days: int = 30, start_date: str | None = None, end_date: str | None = None) -> list[dict]:
         where, params = self._date_range_where(days, start_date, end_date)
         rows = self._conn.execute(f"""
             SELECT day,
@@ -124,7 +123,7 @@ class UsageDB:
             "tokens_total": r[4] or 0,
         } for r in rows]
 
-    def by_client(self, days: int = 30, start_date: str = None, end_date: str = None) -> list[dict]:
+    def by_client(self, days: int = 30, start_date: str | None = None, end_date: str | None = None) -> list[dict]:
         where, params = self._date_range_where(days, start_date, end_date)
         rows = self._conn.execute(f"""
             SELECT client_id,
@@ -143,7 +142,7 @@ class UsageDB:
             "tokens_total": r[4] or 0,
         } for r in rows]
 
-    def by_model(self, days: int = 30, start_date: str = None, end_date: str = None) -> list[dict]:
+    def by_model(self, days: int = 30, start_date: str | None = None, end_date: str | None = None) -> list[dict]:
         where, params = self._date_range_where(days, start_date, end_date)
         rows = self._conn.execute(f"""
             SELECT model,
@@ -254,8 +253,8 @@ class UsageDB:
         return {"models": out, "note": f"Implied Ollama quota cost per token, averaged across keys (last {days} days)."}
 
     def openrouter_costs(self, pricing: dict, days: int = 30,
-                         start_date: str = None, end_date: str = None,
-                         client_id: str = None, alias_manager=None) -> dict:
+                         start_date: str | None = None, end_date: str | None = None,
+                         client_id: str | None = None, alias_manager=None) -> dict:
         """Calculate what the usage WOULD have cost on OpenRouter.
 
         Args:
@@ -353,8 +352,8 @@ class UsageDB:
             "unpriced_models": unpriced,
         }
 
-    def recent_calls(self, limit: int = 100, start_date: str = None, end_date: str = None,
-                     client_id: str = None, model: str = None) -> list[dict]:
+    def recent_calls(self, limit: int = 100, start_date: str | None = None, end_date: str | None = None,
+                     client_id: str | None = None, model: str | None = None) -> list[dict]:
         where_parts = []
         params: list = []
         if start_date:
@@ -380,7 +379,7 @@ class UsageDB:
         rows = self._conn.execute(query, params).fetchall()
         return [{
             "ts": r[0],
-            "time": datetime.fromtimestamp(r[0], tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "time": datetime.fromtimestamp(r[0], tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "client_id": r[1],
             "upstream_key": r[2],
             "model": r[3],
@@ -391,7 +390,7 @@ class UsageDB:
             "status": r[7],
         } for r in rows]
 
-    def totals(self, start_date: str = None, end_date: str = None) -> dict:
+    def totals(self, start_date: str | None = None, end_date: str | None = None) -> dict:
         if start_date or end_date:
             where, params = self._date_range_where(None, start_date, end_date)
             row = self._conn.execute(f"""

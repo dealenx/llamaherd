@@ -1,13 +1,11 @@
-import logging
 import base64
+import logging
 import secrets
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional
 
 import httpx
-
 
 log = logging.getLogger("llamaherd")
 
@@ -35,9 +33,7 @@ def _looks_like_basic_auth(token: str) -> bool:
     if ":" not in token:
         return False
     # Exclude http(s):// which would contain colons but be a URL
-    if "://" in token:
-        return False
-    return True
+    return "://" not in token
 
 
 class _LibSQLHTTPCursor:
@@ -50,7 +46,7 @@ class _LibSQLHTTPCursor:
         self._pos = 0
         self.rowcount = -1
         self.lastrowid = None
-        self.description: Optional[list] = None
+        self.description: list | None = None
         self.arraysize = 1
 
     def _convert_value(self, v: dict):
@@ -183,8 +179,8 @@ class _LibSQLHTTPConnection:
     so LlamaHerd's UsageDB / ClientRegistry work unchanged.
     """
 
-    def __init__(self, url: str, auth_token: Optional[str] = None,
-                 basic_user: Optional[str] = None, timeout: float = 30.0):
+    def __init__(self, url: str, auth_token: str | None = None,
+                 basic_user: str | None = None, timeout: float = 30.0):
         self._pipeline_url = url.rstrip("/") + "/v2/pipeline"
         self._timeout = timeout
         import base64
@@ -222,8 +218,8 @@ class _LibSQLHTTPConnection:
         self._client.close()
 
 
-def db_connect(dsn: str, auth_token: Optional[str] = None,
-               auth_user: Optional[str] = None):
+def db_connect(dsn: str, auth_token: str | None = None,
+               auth_user: str | None = None):
     """Open a DB connection. Dispatches between sqlite3, libsql, and HTTP fallback.
 
     - File path / :memory: → stdlib sqlite3.connect()
@@ -261,7 +257,7 @@ def db_connect(dsn: str, auth_token: Optional[str] = None,
 
 
 def _safe_alter_add_column(conn, table: str, columns: list[tuple[str, str]],
-                           default: Optional[str] = None) -> None:
+                           default: str | None = None) -> None:
     """Add columns to a table if they don't already exist.
 
     Works with both stdlib sqlite3 (raises sqlite3.OperationalError) and the
@@ -296,8 +292,8 @@ class ClientRegistry:
     inserted on first run (if the DB is empty).
     """
 
-    def __init__(self, db_path: str, seed_clients=None, auth_token: Optional[str] = None,
-                 auth_user: Optional[str] = None):
+    def __init__(self, db_path: str, seed_clients=None, auth_token: str | None = None,
+                 auth_user: str | None = None):
         self._db_path = db_path
         self._conn = db_connect(db_path, auth_token=auth_token, auth_user=auth_user)
         self._conn.execute("""
@@ -353,8 +349,8 @@ class ClientRegistry:
             self._by_id[r[0]] = entry
 
     def _insert(self, client_id: str, label: str, token: str, notes: str = "",
-                daily_token_limit: int = None, daily_request_limit: int = None,
-                rpm_limit: int = None) -> dict:
+                daily_token_limit: int | None = None, daily_request_limit: int | None = None,
+                rpm_limit: int | None = None) -> dict:
         now = time.time()
         self._conn.execute(
             "INSERT OR REPLACE INTO clients (id, label, token, created, notes, daily_token_limit, daily_request_limit, rpm_limit) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -366,7 +362,7 @@ class ClientRegistry:
                 "daily_token_limit": daily_token_limit, "daily_request_limit": daily_request_limit,
                 "rpm_limit": rpm_limit}
 
-    def resolve(self, token: str) -> Optional[dict]:
+    def resolve(self, token: str) -> dict | None:
         """Resolve a Bearer token to a registered client identity.
 
         Unknown tokens are rejected by the caller. LlamaHerd used to allow
@@ -382,9 +378,9 @@ class ClientRegistry:
         return None
 
     def create(self, client_id: str, label: str, notes: str = "",
-               token: Optional[str] = None,
-               daily_token_limit: int = None, daily_request_limit: int = None,
-               rpm_limit: int = None) -> dict:
+               token: str | None = None,
+               daily_token_limit: int | None = None, daily_request_limit: int | None = None,
+               rpm_limit: int | None = None) -> dict:
         """Create a new client. Auto-generates a token if not provided."""
         if client_id in self._by_id:
             raise ValueError(f"client id '{client_id}' already exists")
@@ -397,11 +393,11 @@ class ClientRegistry:
                             daily_request_limit=daily_request_limit,
                             rpm_limit=rpm_limit)
 
-    def update(self, client_id: str, label: Optional[str] = None,
-               notes: Optional[str] = None, token: Optional[str] = None,
-               daily_token_limit: Optional[int] = ...,
-               daily_request_limit: Optional[int] = ...,
-               rpm_limit: Optional[int] = ...) -> Optional[dict]:
+    def update(self, client_id: str, label: str | None = None,
+               notes: str | None = None, token: str | None = None,
+               daily_token_limit: int | None = ...,
+               daily_request_limit: int | None = ...,
+               rpm_limit: int | None = ...) -> dict | None:
         """Update an existing client's label, notes, token, or rate limits.
         Use ... (Ellipsis) as sentinel to distinguish None (clear limit) from 'not provided'."""
         if client_id not in self._by_id:

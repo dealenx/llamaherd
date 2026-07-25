@@ -1,13 +1,12 @@
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Awaitable, Callable, Optional
 
 import httpx
 
 from .key_manager import KeyManager
-
 
 log = logging.getLogger("llamaherd")
 
@@ -54,7 +53,7 @@ MODEL_CONTEXT_LENGTHS: dict[str, int] = {
 }
 
 
-def fmt_param_count(n: Optional[int]) -> str:
+def fmt_param_count(n: int | None) -> str:
     """Format a parameter count as a B/T-suffixed string.
 
     Uses T when n >= 1 trillion, otherwise B. Drops the decimal when the
@@ -75,20 +74,20 @@ def fmt_param_count(n: Optional[int]) -> str:
         v = n / 1_000_000_000
         suffix = "B"
     if abs(v - round(v)) < 0.05:
-        return f"{int(round(v))}{suffix}"
+        return f"{round(v)}{suffix}"
     return f"{v:.1f}{suffix}"
 
 
 class ModelRegistry:
     def __init__(self, manager: KeyManager, upstream: str,
-                 pricing_sync: Optional[Callable[[], Awaitable[int]]] = None,
+                 pricing_sync: Callable[[], Awaitable[int]] | None = None,
                  event_broadcaster=None):
         self.manager = manager
         self.upstream = upstream
         self.models: dict[str, list[str]] = {}
         self.model_metadata: dict[str, dict] = {}
         self.last_refresh: float = 0
-        self._refresh_task: Optional[asyncio.Task] = None
+        self._refresh_task: asyncio.Task | None = None
         self._pricing_sync = pricing_sync
         self._event_broadcaster = event_broadcaster
 
@@ -114,16 +113,16 @@ class ModelRegistry:
         return base + "/api"
 
     @staticmethod
-    def _created_from_modified(modified_at: Optional[str], fallback: float) -> int:
+    def _created_from_modified(modified_at: str | None, fallback: float) -> int:
         if modified_at:
             try:
-                return int(datetime.fromisoformat(modified_at.replace("Z", "+00:00")).timestamp())
+                return int(datetime.fromisoformat(modified_at).timestamp())
             except Exception:
                 pass
         return int(fallback or time.time())
 
     @staticmethod
-    def _context_from_show(show_data: dict) -> Optional[int]:
+    def _context_from_show(show_data: dict) -> int | None:
         info = show_data.get("model_info") or {}
         for key, value in info.items():
             if key.endswith(".context_length"):
@@ -134,7 +133,7 @@ class ModelRegistry:
         return None
 
     @staticmethod
-    def _parameter_count(show_data: dict) -> Optional[int]:
+    def _parameter_count(show_data: dict) -> int | None:
         info = show_data.get("model_info") or {}
         value = info.get("general.parameter_count")
         if value is None:
@@ -231,7 +230,7 @@ class ModelRegistry:
                     log.debug(f"/api/show metadata error for {model_id}: {e}")
 
         self.models = all_models
-        self.model_metadata = {mid: metadata[mid] for mid in all_models.keys() if mid in metadata}
+        self.model_metadata = {mid: metadata[mid] for mid in all_models if mid in metadata}
         self.last_refresh = time.time()
         new_models = set(all_models.keys()) - old_models
         if new_models:
@@ -261,7 +260,7 @@ class ModelRegistry:
             "data": [self._model_entry(model_id) for model_id in sorted(self.models.keys())],
         }
 
-    def get_preferred_key(self, model: str) -> Optional[str]:
+    def get_preferred_key(self, model: str) -> str | None:
         """Return the preferred key token for a model.
 
         If the model exists on only one key, prefer that key.

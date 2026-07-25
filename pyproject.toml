@@ -61,7 +61,7 @@ llamaherd = "llamaherd.cli:main"
 include = ["llamaherd*"]
 
 [tool.setuptools.package-data]
-llamaherd = ["static/*.html"]
+llamaherd = ["static/*"]
 
 [tool.ruff]
 line-length = 120

@@ -3,10 +3,8 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 import httpx
-
 
 log = logging.getLogger("llamaherd")
 
@@ -43,7 +41,7 @@ class ModelAliasManager:
                     "context_length": int(e["context_length"]) if e.get("context_length") else None,
                 }
 
-    def resolve(self, model: str) -> tuple[str, Optional[int]]:
+    def resolve(self, model: str) -> tuple[str, int | None]:
         """If *model* is an alias, return (upstream_model, context_length_override).
 
         If not an alias, return (model, None) unchanged.
@@ -99,12 +97,12 @@ class FallbackProvider:
               priority: before
     """
 
-    def __init__(self, config: Optional[dict]):
+    def __init__(self, config: dict | None):
         cfg = config or {}
         self.provider: str = cfg.get("provider", "fallback")
         self.base_url: str = (cfg.get("base_url") or "").rstrip("/")
         self.api_key: str = cfg.get("api_key", "") or ""
-        self.default_model: Optional[str] = cfg.get("default_model")
+        self.default_model: str | None = cfg.get("default_model")
         self.priority: str = cfg.get("priority", "after")
         if self.priority not in VALID_FALLBACK_PRIORITIES:
             log.warning(f"Invalid fallback priority {self.priority!r}; defaulting to 'after'")
@@ -133,7 +131,7 @@ class FallbackProvider:
     def label(self) -> str:
         return self.provider
 
-    def resolve_model(self, ollama_model: str) -> Optional[str]:
+    def resolve_model(self, ollama_model: str) -> str | None:
         """Map an Ollama-style model name to the fallback's model name.
 
         Returns None when the model isn't in the explicit map.
@@ -207,7 +205,7 @@ class FallbackProvider:
     # ----- Runtime model_map mutations (used by /admin/fallback-map) -----
 
     def add_mapping(self, ollama_name: str, nvidia_name: str,
-                    priority: Optional[str] = None) -> dict:
+                    priority: str | None = None) -> dict:
         """Add or update an in-memory mapping. Returns the stored entry."""
         if not ollama_name or not nvidia_name:
             raise ValueError("ollama_name and nvidia_name are required")
@@ -254,7 +252,7 @@ class FallbackProvider:
     def _model_card_url(model_id: str) -> str:
         return f"https://build.nvidia.com/{model_id}"
 
-    async def fetch_model_metadata(self, model_id: str, timeout: float = 5.0) -> Optional[dict]:
+    async def fetch_model_metadata(self, model_id: str, timeout: float = 5.0) -> dict | None:
         """Fetch metadata for a single fallback model from the docs API.
 
         Best-effort: returns None on failure. Stores result in self.metadata_cache.

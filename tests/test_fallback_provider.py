@@ -1,5 +1,5 @@
 """Unit tests for FallbackProvider routing decisions."""
-from llamaherd.proxy import FallbackProvider, VALID_FALLBACK_PRIORITIES
+from llamaherd.proxy import VALID_FALLBACK_PRIORITIES, FallbackProvider
 
 
 def _provider(**overrides):

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import UTC
 from pathlib import Path
 
 import httpx
@@ -120,7 +121,7 @@ def _clients_table(clients):
         dtl = c.get("daily_token_limit")
         drl = c.get("daily_request_limit")
         rpm = c.get("rpm_limit")
-        print(f"{c['id']:<20} {c.get('label', ''):<25} {tok_display:<35} {str(dtl or '∞'):>12} {str(drl or '∞'):>10} {str(rpm or '∞'):>5}")
+        print(f"{c['id']:<20} {c.get('label', ''):<25} {tok_display:<35} {dtl or '∞'!s:>12} {drl or '∞'!s:>10} {rpm or '∞'!s:>5}")
 
 
 def _validate_api_token(token: str) -> str:
@@ -340,8 +341,8 @@ def _sync_pricing_table(data):
     last_sync = data.get("last_sync")
     sync_time = ""
     if last_sync:
-        from datetime import datetime, timezone
-        sync_time = datetime.fromtimestamp(last_sync, tz=timezone.utc).isoformat()
+        from datetime import datetime
+        sync_time = datetime.fromtimestamp(last_sync, tz=UTC).isoformat()
     print(f"Models updated/added: {result}")
     print(f"Total priced models: {total}")
     print(f"Last sync: {sync_time or 'never'}")
@@ -379,15 +380,30 @@ def _models_table(data):
         family = m.get('family') or ''
         caps = ','.join(m.get('capabilities') or [])
         params = m.get('parameter_count_display') or ''
-        print(f"{m['id']:<35} {str(cl):>10} {params:>8} {str(ao):>5} {updated:<10} {family:<14} {caps}")
+        print(f"{m['id']:<35} {cl!s:>10} {params:>8} {ao!s:>5} {updated:<10} {family:<14} {caps}")
     print(f"\nTotal: {data.get('count', len(models))} models")
 
 
 # ---- Branding command ----
 
 def cmd_banner(args):
-    print(BANNER)
-    print(f"\n{__tagline__}")
+    """Print the LlamaHerd ASCII banner with optional color."""
+    # ANSI colors — only emit if stdout is a TTY
+    use_color = sys.stdout.isatty()
+    if use_color:
+        cream = "\033[38;2;242;214;162m"
+        cyan = "\033[38;2;88;166;255m"
+        dim = "\033[38;2;139;148;158m"
+        reset = "\033[0m"
+        for line in BANNER.split("\n"):
+            # Color the slash-forward strokes cyan, the rest cream
+            print(f"{cream}{line}{reset}")
+        print(f"\n  {cyan}{__tagline__}{reset}")
+        print(f"  {dim}https://github.com/bennybuoy/llamaherd{reset}")
+    else:
+        print(BANNER)
+        print(f"\n{__tagline__}")
+        print("https://github.com/bennybuoy/llamaherd")
 
 
 def cmd_telegram_test(args):
@@ -444,6 +460,16 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="llamaherd",
         description=f"LlamaHerd — {__tagline__}",
+        epilog=(
+            "  _    _                 _  _            _ \n"
+            " | |  | |__ _ _ __  __ _| || |___ _ _ __| |\n"
+            " | |__| / _` | '  \\/ _` | __ / -_) '_/ _` |\n"
+            " |____|\\__,_|_|_|_\\__,_|_||_\\___|_| \\__,_|\n"
+            "\n"
+            "  One endpoint. Many llamas. Smarter routing.\n"
+            "  https://github.com/bennybuoy/llamaherd\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"llamaherd {__version__}")
     parser.add_argument("--config", "-c", default="config.yaml", help="Config file path")
@@ -555,8 +581,9 @@ def main():
 
     if args.command == "serve":
         # Import and start the proxy server
-        from .proxy import main as proxy_main
         import os
+
+        from .proxy import main as proxy_main
         if args.config:
             os.environ["LLAMAHERD_CONFIG"] = args.config
         if args.admin_token:

@@ -2,11 +2,10 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Optional
 
 import httpx
-
 
 log = logging.getLogger("llamaherd")
 
@@ -26,16 +25,16 @@ class KeyState:
     exhausted_until: float = 0.0
     # Populated by /api/me subscription poll
     plan: str = ""
-    period_start: Optional[str] = None  # ISO timestamp
-    period_end: Optional[str] = None      # ISO timestamp
+    period_start: str | None = None  # ISO timestamp
+    period_end: str | None = None      # ISO timestamp
     suspended: bool = False
     account_email: str = ""
     account_id: str = ""
     # Populated by cookie-based settings scrape
     session_usage_pct: float = -1.0  # -1 = unknown
-    session_resets_at: Optional[str] = None
+    session_resets_at: str | None = None
     weekly_usage_pct: float = -1.0
-    weekly_resets_at: Optional[str] = None
+    weekly_resets_at: str | None = None
     session_models: dict = field(default_factory=dict)
     weekly_models: dict = field(default_factory=dict)
 
@@ -62,9 +61,9 @@ class KeyState:
         """
         if self.period_start and self.period_end:
             try:
-                start = datetime.fromisoformat(self.period_start.replace("Z", "+00:00"))
-                end = datetime.fromisoformat(self.period_end.replace("Z", "+00:00"))
-                now = datetime.now(timezone.utc)
+                start = datetime.fromisoformat(self.period_start)
+                end = datetime.fromisoformat(self.period_end)
+                now = datetime.now(UTC)
                 total = (end - start).total_seconds()
                 elapsed = (now - start).total_seconds()
                 if total <= 0:
@@ -73,7 +72,7 @@ class KeyState:
             except (ValueError, TypeError):
                 pass
         # Fallback: use cycle_day
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         day = now.day
         cycle = self.cycle_day
         if cycle <= day:
@@ -87,9 +86,9 @@ class KeyState:
         """Percentage of billing period remaining (0-100)."""
         if self.period_start and self.period_end:
             try:
-                start = datetime.fromisoformat(self.period_start.replace("Z", "+00:00"))
-                end = datetime.fromisoformat(self.period_end.replace("Z", "+00:00"))
-                now = datetime.now(timezone.utc)
+                start = datetime.fromisoformat(self.period_start)
+                end = datetime.fromisoformat(self.period_end)
+                now = datetime.now(UTC)
                 total = (end - start).total_seconds()
                 remaining = (end - now).total_seconds()
                 if total <= 0:
@@ -98,18 +97,18 @@ class KeyState:
             except (ValueError, TypeError):
                 pass
         # Fallback: use cycle_day
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         remaining_days = (self.cycle_day - now.day) % 30 or 30
         return round((remaining_days / 30) * 100, 1)
 
-    def _elapsed_from_iso(self, iso_start: Optional[str], iso_end: Optional[str]) -> float:
+    def _elapsed_from_iso(self, iso_start: str | None, iso_end: str | None) -> float:
         """Calculate elapsed percentage (0-100) between two ISO timestamps. Returns -1 if unknown."""
         if not iso_start or not iso_end:
             return -1.0
         try:
-            start = datetime.fromisoformat(iso_start.replace("Z", "+00:00"))
-            end = datetime.fromisoformat(iso_end.replace("Z", "+00:00"))
-            now = datetime.now(timezone.utc)
+            start = datetime.fromisoformat(iso_start)
+            end = datetime.fromisoformat(iso_end)
+            now = datetime.now(UTC)
             total = (end - start).total_seconds()
             elapsed = (now - start).total_seconds()
             if total <= 0:
@@ -124,8 +123,8 @@ class KeyState:
             # session_resets_at is when the session ENDS (resets)
             # Session is 5 hours = 18000 seconds
             try:
-                end = datetime.fromisoformat(self.session_resets_at.replace("Z", "+00:00"))
-                now = datetime.now(timezone.utc)
+                end = datetime.fromisoformat(self.session_resets_at)
+                now = datetime.now(UTC)
                 remaining = (end - now).total_seconds()
                 total = 18000  # 5 hours
                 elapsed = total - remaining
@@ -140,8 +139,8 @@ class KeyState:
         """Percentage of the current weekly usage window that has elapsed. -1 if unknown."""
         if self.weekly_resets_at:
             try:
-                end = datetime.fromisoformat(self.weekly_resets_at.replace("Z", "+00:00"))
-                now = datetime.now(timezone.utc)
+                end = datetime.fromisoformat(self.weekly_resets_at)
+                now = datetime.now(UTC)
                 remaining = (end - now).total_seconds()
                 total = 7 * 86400  # 7 days
                 elapsed = total - remaining
@@ -167,7 +166,7 @@ class StickySessionManager:
         self._sessions: dict[str, dict] = {}  # session_id -> {"key_token": str, "expires_at": float}
         self._lock = asyncio.Lock()
 
-    async def get_preferred_key(self, session_id: Optional[str]) -> Optional[str]:
+    async def get_preferred_key(self, session_id: str | None) -> str | None:
         if not session_id:
             return None
         async with self._lock:
@@ -185,7 +184,7 @@ class StickySessionManager:
                 "expires_at": time.time() + self.ttl,
             }
 
-    async def clear_session(self, session_id: Optional[str]) -> None:
+    async def clear_session(self, session_id: str | None) -> None:
         if not session_id:
             return
         async with self._lock:
@@ -291,9 +290,7 @@ class KeyManager:
         if w < self.WEEKLY_LOW_ABSOLUTE:
             return True
         elapsed = k._weekly_elapsed_pct()
-        if elapsed >= 0 and w <= max(elapsed * self.WEEKLY_PACE_FACTOR, elapsed + 5.0):
-            return True
-        return False
+        return bool(elapsed >= 0 and w <= max(elapsed * self.WEEKLY_PACE_FACTOR, elapsed + 5.0))
 
     def _select_from_candidates(self, candidates: list["KeyState"]) -> "KeyState":
         """Pick best key from available candidates.
@@ -322,7 +319,7 @@ class KeyManager:
         ))
         return pool[0]
 
-    def key_by_token(self, token: Optional[str]) -> Optional["KeyState"]:
+    def key_by_token(self, token: str | None) -> Optional["KeyState"]:
         if not token:
             return None
         for k in self.keys:
@@ -330,7 +327,7 @@ class KeyManager:
                 return k
         return None
 
-    def should_rebind_sticky(self, prev_token: Optional[str], new_key: "KeyState") -> bool:
+    def should_rebind_sticky(self, prev_token: str | None, new_key: "KeyState") -> bool:
         """Whether sticky mapping should move from *prev_token* to *new_key*.
 
         Temporary spills (sticky sub at max concurrent / short 429 cooldown)
@@ -355,11 +352,9 @@ class KeyManager:
         if self._weekly_pct(prev) >= self.WEEKLY_HARD_LIMIT:
             return True
         # Temporary alternate onto a worse-weekly key: keep original sticky
-        if self._weekly_pct(new_key) > self._weekly_pct(prev) + self.STICKY_REBIND_WEEKLY_MARGIN:
-            return False
-        return True
+        return not self._weekly_pct(new_key) > self._weekly_pct(prev) + self.STICKY_REBIND_WEEKLY_MARGIN
 
-    async def acquire(self, prefer_key: Optional[str] = None, sticky_key: Optional[str] = None) -> Optional[KeyState]:
+    async def acquire(self, prefer_key: str | None = None, sticky_key: str | None = None) -> KeyState | None:
         async with self._lock:
             # Sticky key takes precedence for cache affinity (even if higher load)
             if sticky_key:
@@ -431,7 +426,7 @@ class KeyManager:
             "weekly_models": k.weekly_models,
         } for k in self.keys]
 
-    def key_by_token_prefix(self, prefix: str) -> Optional[KeyState]:
+    def key_by_token_prefix(self, prefix: str) -> KeyState | None:
         """Look up a key by its token prefix (first 8 chars)."""
         for k in self.keys:
             if k.token[:8] == prefix[:8]:

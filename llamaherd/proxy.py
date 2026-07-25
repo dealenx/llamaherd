@@ -14,17 +14,18 @@ OpenAI-compatible proxy that routes requests across multiple Ollama Cloud API ke
 """
 
 import asyncio
-from collections import deque
 import hashlib
 import json
 import logging
+import os
 import secrets
+import sys
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from datetime import datetime, timezone, timedelta
-import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -37,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from uvicorn import Config, Server
 
 from .db import ClientRegistry, _is_libsql_url
-from .fallback import FallbackProvider, ModelAliasManager, VALID_FALLBACK_PRIORITIES
+from .fallback import VALID_FALLBACK_PRIORITIES, FallbackProvider, ModelAliasManager
 from .key_manager import KeyManager, KeyState, StickySessionManager
 from .key_registry import KeyRegistry
 from .model_registry import MODEL_CONTEXT_LENGTHS, ModelRegistry, fmt_param_count
@@ -154,7 +155,7 @@ def _check_rpm(client_id: str, rpm_limit: int) -> bool:
     return True
 
 
-async def _check_rate_limit(request: Request, client: dict) -> Optional[JSONResponse]:
+async def _check_rate_limit(request: Request, client: dict) -> JSONResponse | None:
     """Check all rate limits for a client. Returns 429 JSONResponse if limited, None if OK."""
     client_id = client["id"]
 
@@ -180,7 +181,7 @@ async def _check_rate_limit(request: Request, client: dict) -> Optional[JSONResp
     daily_token_limit = client.get("daily_token_limit")
     daily_request_limit = client.get("daily_request_limit")
     if daily_token_limit is not None or daily_request_limit is not None:
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now(UTC).date().isoformat()
         row = usage_db._conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(tokens_in + tokens_out), 0) FROM usage WHERE client_id = ? AND day = ?",
             (client_id, today),
@@ -197,7 +198,7 @@ async def _check_rate_limit(request: Request, client: dict) -> Optional[JSONResp
                     "limit_type": "daily_requests",
                     "limit": daily_request_limit,
                     "used": today_requests,
-                    "reset_at": int((datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp()),
+                    "reset_at": int((datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp()),
                 },
             )
 
@@ -210,7 +211,7 @@ async def _check_rate_limit(request: Request, client: dict) -> Optional[JSONResp
                     "limit_type": "daily_tokens",
                     "limit": daily_token_limit,
                     "used": today_tokens,
-                    "reset_at": int((datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp()),
+                    "reset_at": int((datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)).timestamp()),
                 },
             )
 
@@ -220,18 +221,18 @@ async def _check_rate_limit(request: Request, client: dict) -> Optional[JSONResp
 # Proxy App — Lifespan
 # ---------------------------------------------------------------------------
 
-manager: Optional[KeyManager] = None
-key_registry: Optional[KeyRegistry] = None
-registry: Optional[ModelRegistry] = None
-usage_db: Optional[UsageDB] = None
-client_registry: Optional[ClientRegistry] = None
-usage_scraper: Optional[UsageScraper] = None
-usage_refresher: Optional[ActivityUsageRefresher] = None
-telegram_notifier: Optional[TelegramNotifier] = None
-upstream_http_client: Optional[httpx.AsyncClient] = None
-fallback_provider: Optional[FallbackProvider] = None
-model_alias_manager: Optional[ModelAliasManager] = None
-sticky: Optional[StickySessionManager] = None
+manager: KeyManager | None = None
+key_registry: KeyRegistry | None = None
+registry: ModelRegistry | None = None
+usage_db: UsageDB | None = None
+client_registry: ClientRegistry | None = None
+usage_scraper: UsageScraper | None = None
+usage_refresher: ActivityUsageRefresher | None = None
+telegram_notifier: TelegramNotifier | None = None
+upstream_http_client: httpx.AsyncClient | None = None
+fallback_provider: FallbackProvider | None = None
+model_alias_manager: ModelAliasManager | None = None
+sticky: StickySessionManager | None = None
 upstream_url: str = ""
 retry_on_429: bool = True
 max_retries: int = 2
@@ -299,8 +300,8 @@ def _new_request_id() -> str:
 
 def _request_start(request_id: str, client_id: str, model: str,
                     target_key: str, target_provider: str,
-                    *, headers: Optional[dict] = None,
-                    path: Optional[str] = None) -> None:
+                    *, headers: dict | None = None,
+                    path: str | None = None) -> None:
     """Register an in-flight request and broadcast a request_start SSE event."""
     entry: dict = {
         "request_id": request_id,
@@ -347,9 +348,9 @@ def _sanitize_headers(headers: dict) -> dict:
     return out
 
 
-def _update_in_flight_tokens(request_id: Optional[str],
-                              tokens_in: Optional[int] = None,
-                              tokens_out: Optional[int] = None) -> None:
+def _update_in_flight_tokens(request_id: str | None,
+                              tokens_in: int | None = None,
+                              tokens_out: int | None = None) -> None:
     """Update the live token counters on an in-flight entry (no-op if missing)."""
     if not request_id:
         return
@@ -364,9 +365,9 @@ def _update_in_flight_tokens(request_id: Optional[str],
 
 def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
                            tokens_in: int, tokens_out: int, latency_ms: int, status: int,
-                           *, request_id: Optional[str] = None,
-                           provider: Optional[str] = None,
-                           session_id: Optional[str] = None):
+                           *, request_id: str | None = None,
+                           provider: str | None = None,
+                           session_id: str | None = None):
     """Record usage to DB and broadcast call + request_end events to SSE subscribers."""
     # Internal Ollama call sites provide the full token so activity refresh can
     # target the exact account even when tokens share a prefix. Redact it before
@@ -397,7 +398,7 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
         "status": status,
         "session_id": session_id or "",
     }
-    end_data: Optional[dict] = None
+    end_data: dict | None = None
     if request_id:
         end_data = {
             **call_data,
@@ -541,7 +542,7 @@ async def lifespan(app: FastAPI):
     usage_refresher.mark_scraped([key for key in manager.keys if key.label in scrape_results])
     # Telegram notifier (env-based, no UI)
     telegram_notifier = TelegramNotifier()
-    telegram_task: Optional[asyncio.Task] = None
+    telegram_task: asyncio.Task | None = None
     if telegram_notifier.enabled:
         log.info(f"Telegram notifications enabled (interval={telegram_notifier.interval}s, chat={telegram_notifier.chat_id})")
         telegram_task = asyncio.create_task(
@@ -555,12 +556,12 @@ async def lifespan(app: FastAPI):
     model_alias_manager = ModelAliasManager(cfg.get("model_aliases") or [])
     if model_alias_manager.aliases:
         log.info(f"Model aliases configured: {list(model_alias_manager.aliases.keys())}")
-    fb_metadata_task: Optional[asyncio.Task] = None
+    fb_metadata_task: asyncio.Task | None = None
     if fallback_provider.enabled:
         # Best-effort discovery — don't block startup if it's slow.
         try:
             await asyncio.wait_for(fallback_provider.discover_models(timeout=5.0), timeout=6.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning("Fallback model discovery timed out")
         except Exception as e:
             log.warning(f"Fallback model discovery error: {e}")
@@ -728,7 +729,7 @@ async def _await_cleanup(
             cleanup.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(cleanup), timeout=1.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            except (TimeoutError, asyncio.CancelledError, Exception):
                 pass
             if not cleanup.done():
                 cleanup.add_done_callback(
@@ -743,7 +744,7 @@ async def _await_cleanup(
             await asyncio.wait_for(asyncio.shield(cleanup), timeout=remaining)
         except asyncio.CancelledError:
             cancelled = True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Re-enter the loop so the deadline branch cancels and reaps the task.
             continue
 
@@ -897,7 +898,7 @@ def _resolve_client(request: Request) -> dict:
     return client
 
 
-def _extract_session_id(request: Request, body_json: Optional[dict] = None) -> Optional[str]:
+def _extract_session_id(request: Request, body_json: dict | None = None) -> str | None:
     """Extract or generate a session id for sticky routing.
 
     This implements an **optimistic cache-affinity strategy**: LlamaHerd assumes
@@ -1106,10 +1107,9 @@ async def _proxy_request(request: Request, path: str) -> Response:
 
         # Pin this session to the chosen sub (new or refreshed TTL).
         # Do not rebind sticky onto a worse-weekly temporary alternate.
-        if sticky and session_id:
-            if manager.should_rebind_sticky(sticky_key, key):
-                await sticky.set_session(session_id, key.token)
-                sticky_key = key.token
+        if sticky and session_id and manager.should_rebind_sticky(sticky_key, key):
+            await sticky.set_session(session_id, key.token)
+            sticky_key = key.token
             # else: keep previous sticky mapping; this request is a one-shot spill
 
         try:
@@ -1217,8 +1217,8 @@ async def _proxy_request(request: Request, path: str) -> Response:
 
 async def _proxy_stream(client_id: str, key: KeyState, path: str,
                          headers: dict, body: bytes, model: str, start: float,
-                         request_id: Optional[str] = None,
-                         session_id: Optional[str] = None) -> StreamingResponse:
+                         request_id: str | None = None,
+                         session_id: str | None = None) -> StreamingResponse:
 
     tokens_out = 0
     tokens_in = 0
@@ -1319,8 +1319,8 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
 
 async def _route_to_fallback(client_id: str, fp: FallbackProvider, path: str,
                               body: bytes, req_json: dict, original_model: str,
-                              is_stream: bool, request_id: Optional[str] = None,
-                              session_id: Optional[str] = None) -> Response:
+                              is_stream: bool, request_id: str | None = None,
+                              session_id: str | None = None) -> Response:
     """Forward an OpenAI-style request to the fallback provider.
 
     Rewrites the model name in the request body using fp.resolve_model().
@@ -1396,7 +1396,6 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
                  f"stream {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({src})")
 
     finalizer = _OnceAsyncFinalizer(finalize)
-
     async def generate():
         nonlocal tokens_in, tokens_out, usage_captured, status_code
         try:
@@ -1467,8 +1466,8 @@ def _native_api_upstream() -> str:
 
 async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
                                 headers: dict, body: bytes, model: str,
-                                start: float, request_id: Optional[str] = None,
-                                session_id: Optional[str] = None) -> StreamingResponse:
+                                start: float, request_id: str | None = None,
+                                session_id: str | None = None) -> StreamingResponse:
     """Stream NDJSON from the native Ollama API, capturing usage from the final chunk."""
 
     tokens_out = 0
@@ -1622,10 +1621,9 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
 
         # Pin this native session to the chosen sub (new or refreshed TTL).
         # Do not rebind sticky onto a worse-weekly temporary alternate.
-        if sticky and session_id:
-            if manager.should_rebind_sticky(sticky_key, key):
-                await sticky.set_session(session_id, key.token)
-                sticky_key = key.token
+        if sticky and session_id and manager.should_rebind_sticky(sticky_key, key):
+            await sticky.set_session(session_id, key.token)
+            sticky_key = key.token
             # else: keep previous sticky mapping; this request is a one-shot spill
 
         try:
@@ -1864,7 +1862,7 @@ async def api_tags(request: Request):
             "name": model_id,
             "model": model_id,
             "modified_at": meta.get("modified_at") or (
-                datetime.fromtimestamp(registry.last_refresh, tz=timezone.utc).isoformat()
+                datetime.fromtimestamp(registry.last_refresh, tz=UTC).isoformat()
                 if registry.last_refresh else ""
             ),
             "size": meta.get("size") or 0,
@@ -2086,8 +2084,8 @@ def _should_bridge_to_native(model: str) -> bool:
 
 async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
                                 model: str, start: float,
-                                request_id: Optional[str] = None,
-                                session_id: Optional[str] = None) -> StreamingResponse:
+                                request_id: str | None = None,
+                                session_id: str | None = None) -> StreamingResponse:
     """Bridge stream: receive NDJSON from /api/chat, emit SSE for /v1/chat/completions client.
 
     This is the core of the native bridge. It re-routes the upstream request
@@ -2214,28 +2212,28 @@ async def admin_status():
 
 
 @app.get("/admin/usage", dependencies=[Depends(_verify_admin)])
-async def admin_usage(hours: int = 24, client: str = None, model: str = None):
+async def admin_usage(hours: int = 24, client: str | None = None, model: str | None = None):
     if usage_db:
         return usage_db.summary(hours, client=client, model=model)
     return []
 
 
 @app.get("/admin/usage/daily", dependencies=[Depends(_verify_admin)])
-async def admin_usage_daily(days: int = 30, start_date: str = None, end_date: str = None):
+async def admin_usage_daily(days: int = 30, start_date: str | None = None, end_date: str | None = None):
     if usage_db:
         return usage_db.daily_totals(days, start_date=start_date, end_date=end_date)
     return []
 
 
 @app.get("/admin/usage/by-client", dependencies=[Depends(_verify_admin)])
-async def admin_usage_by_client(days: int = 30, start_date: str = None, end_date: str = None):
+async def admin_usage_by_client(days: int = 30, start_date: str | None = None, end_date: str | None = None):
     if usage_db:
         return usage_db.by_client(days, start_date=start_date, end_date=end_date)
     return []
 
 
 @app.get("/admin/usage/by-model", dependencies=[Depends(_verify_admin)])
-async def admin_usage_by_model(days: int = 30, start_date: str = None, end_date: str = None):
+async def admin_usage_by_model(days: int = 30, start_date: str | None = None, end_date: str | None = None):
     if usage_db:
         return usage_db.by_model(days, start_date=start_date, end_date=end_date)
     return []
@@ -2243,9 +2241,9 @@ async def admin_usage_by_model(days: int = 30, start_date: str = None, end_date:
 
 # --- OpenRouter cost tracking ---
 
-_OPENROUTER_PRICING: Optional[dict] = None
+_OPENROUTER_PRICING: dict | None = None
 _LAST_DISCOVERY_REFRESH: float = 0.0  # epoch seconds of last immediate discovery refresh
-_PRICING_LAST_SYNC: Optional[float] = None  # epoch seconds of last successful OpenRouter API sync
+_PRICING_LAST_SYNC: float | None = None  # epoch seconds of last successful OpenRouter API sync
 
 # Mapping from LlamaHerd model names to OpenRouter model IDs.
 # Used to enrich local models with OpenRouter pricing when they aren't in the YAML already.
@@ -2293,7 +2291,7 @@ def _save_pricing_yaml(pricing: dict):
         "# OpenRouter equivalent pricing for LlamaHerd models",
         "# All prices in USD per 1M tokens",
         "# Source: OpenRouter API (https://openrouter.ai/api/v1/models) + supplementary sources",
-        f"# Auto-synced: {datetime.now(timezone.utc).isoformat()}",
+        f"# Auto-synced: {datetime.now(UTC).isoformat()}",
         "#",
         '# Strips :cloud suffix automatically — "glm-5.1:cloud" uses "glm-5.1" prices.',
         "",
@@ -2472,7 +2470,7 @@ def _guess_openrouter_id(model_name: str) -> list[str]:
             # e.g. "glm-5.1" -> ["z-ai/glm-5.1", "z-ai/glm5.1"]
             # e.g. "gemma3:12b" -> "gemma3" -> ["google/gemma-3-12b-it"]
             stem = base[len(prefix):]
-            if stem.startswith("-") or stem.startswith("_"):
+            if stem.startswith(("-", "_")):
                 stem = stem[1:]
             # Try provider/stem as-is
             candidates.append(f"{or_provider}/{base}")
@@ -2505,8 +2503,8 @@ async def _pricing_sync_loop(interval_hours: float = 24.0):
 
 
 @app.get("/admin/usage/openrouter-costs", dependencies=[Depends(_verify_admin)])
-async def admin_openrouter_costs(days: int = 30, start_date: str = None,
-                                  end_date: str = None, client: str = None):
+async def admin_openrouter_costs(days: int = 30, start_date: str | None = None,
+                                  end_date: str | None = None, client: str | None = None):
     """Calculate what usage WOULD have cost on OpenRouter (pay-per-token pricing reference)."""
     if not usage_db:
         return {"models": [], "total_cost_usd": 0, "unpriced_models": []}
@@ -2542,13 +2540,13 @@ async def admin_pricing_status():
         "priced_models": len(pricing) - len(unpriced),
         "unpriced_models": unpriced,
         "last_sync": _PRICING_LAST_SYNC,
-        "last_sync_iso": datetime.fromtimestamp(_PRICING_LAST_SYNC, tz=timezone.utc).isoformat() if _PRICING_LAST_SYNC else None,
+        "last_sync_iso": datetime.fromtimestamp(_PRICING_LAST_SYNC, tz=UTC).isoformat() if _PRICING_LAST_SYNC else None,
     }
 
 
 @app.get("/admin/recent-calls", dependencies=[Depends(_verify_admin)])
-async def admin_recent_calls(limit: int = 100, client: str = None, model: str = None,
-                              start_date: str = None, end_date: str = None):
+async def admin_recent_calls(limit: int = 100, client: str | None = None, model: str | None = None,
+                              start_date: str | None = None, end_date: str | None = None):
     """Return recent individual calls (not aggregates) for the live feed."""
     if not usage_db:
         return []
@@ -2557,7 +2555,7 @@ async def admin_recent_calls(limit: int = 100, client: str = None, model: str = 
 
 
 @app.get("/admin/totals", dependencies=[Depends(_verify_admin)])
-async def admin_totals(start_date: str = None, end_date: str = None):
+async def admin_totals(start_date: str | None = None, end_date: str | None = None):
     """Totals across all clients/models. Optionally filter by date range."""
     if usage_db:
         return usage_db.totals(start_date=start_date, end_date=end_date)
@@ -2842,7 +2840,7 @@ def _key_id(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
-def _find_key(key_id: str) -> Optional[KeyState]:
+def _find_key(key_id: str) -> KeyState | None:
     if not manager:
         return None
     return next((key for key in manager.keys if _key_id(key.token) == key_id), None)
@@ -2874,8 +2872,8 @@ async def admin_list_keys():
 
 
 @app.put("/admin/keys/{key_id}", dependencies=[Depends(_verify_admin)])
-async def admin_update_key(key_id: str, label: str = None, max_concurrent: int = None,
-                           cycle_day: int = None):
+async def admin_update_key(key_id: str, label: str | None = None, max_concurrent: int | None = None,
+                           cycle_day: int | None = None):
     """Update a key's mutable fields (label, max_concurrent, cycle_day). Persists to DB."""
     k = _find_key(key_id)
     if not k:
@@ -3004,7 +3002,7 @@ async def admin_events(request: Request, session_token: str = ""):
                 try:
                     payload = await asyncio.wait_for(q.get(), timeout=15)
                     yield f"data: {payload}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # Heartbeat keepalive
                     yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
         finally:
@@ -3172,9 +3170,20 @@ def main():
     port = cfg.get("port", 8399)
     log.setLevel(logging.INFO)
 
+    # Startup banner (stderr so it doesn't interfere with piped JSON)
+    from . import __tagline__
+    _banner = r"""
+    __    __                      __  __              __
+   / /   / /___ _____ ___  ____ _/ / / /__  _________/ /
+  / /   / / __ `/ __ `__ \/ __ `/ /_/ / _ \/ ___/ __  /
+ / /___/ / /_/ / / / / / / /_/ / __  /  __/ /  / /_/ /
+/_____/_/\__,_/_/ /_/ /_/\__,_/_/ /_/\___/_/   \__,_/
+""".strip("\n")
+    print(f"\n{_banner}\n\n  {__tagline__}\n  http://{host}:{port}/dashboard\n", file=sys.stderr)
+
     config = Config(app, host=host, port=port, log_level="info")
     server = Server(config)
-    log.info(f"Starting LlamaHerd on {host}:{port} — One endpoint. Many llamas. Smarter routing.")
+    log.info(f"LlamaHerd listening on {host}:{port}")
     server.run()
 
 

@@ -241,7 +241,7 @@ async def test_sticky_session_pins_to_same_key(proxy_server):
     assert sid2 == sid1
 
     # Streaming third request also pinned
-    status3, key3, sid3, _ = await chat(proxy_url, "test-token", session_id=sid1, stream=True)
+    status3, key3, _sid3, _ = await chat(proxy_url, "test-token", session_id=sid1, stream=True)
     assert status3 == 200
     assert key3 == key1
 
@@ -250,10 +250,10 @@ async def test_sticky_session_pins_to_same_key(proxy_server):
 async def test_sticky_session_ttl_breaks_affinity():
     async with proxy_server_context(sticky_ttl=1) as cfg:
         proxy_url = f"http://{cfg['host']}:{cfg['port']}"
-        status1, key1, sid1, _ = await chat(proxy_url, "test-token", stream=False)
+        status1, _key1, sid1, _ = await chat(proxy_url, "test-token", stream=False)
         assert status1 == 200
         await asyncio.sleep(1.1)  # wait for TTL
-        status2, key2, _, _ = await chat(proxy_url, "test-token", session_id=sid1, stream=False)
+        status2, _key2, _, _ = await chat(proxy_url, "test-token", session_id=sid1, stream=False)
         # After TTL, mapping is gone; key2 may differ (load balancing)
         assert status2 == 200
 
