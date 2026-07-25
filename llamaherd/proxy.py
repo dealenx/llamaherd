@@ -372,7 +372,7 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
     # target the exact account even when tokens share a prefix. Redact it before
     # persistence, events, or logs.
     activity_key = manager.key_by_token(upstream_key) if provider == "ollama-cloud" and manager else None
-    if activity_key is not None:
+    if provider == "ollama-cloud":
         upstream_key = upstream_key[:8]
     # End the live request first. Usage persistence is best-effort and must not
     # leave a completed request occupying the dashboard/in-flight registry.
