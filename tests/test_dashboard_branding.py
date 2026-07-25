@@ -69,6 +69,9 @@ def test_dashboard_uses_pixel_mascot_and_compact_operations_layout():
     assert '.fallback-priority { width: 100%; min-width: 0; flex: 0 0 100%; }' in html
     assert '<label for="fb-priority"' in html
     assert "#fb-priority { min-width: 0; max-width: 100%; flex: 1; box-sizing: border-box; }" in html
+    assert ".section { margin-bottom: 28px; overflow-x: auto; }" in html
+    assert "min-width: min(400px, calc(100vw - 24px))" in html
+    assert ".inflight-row .if-tokens { display: none; }" in html
 
     assert (STATIC / "llamaherd-logo.png").stat().st_size > 0
     assert (STATIC / "llamaherd-hero.png").stat().st_size > 0
