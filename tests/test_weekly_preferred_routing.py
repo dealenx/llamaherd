@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC
 
 import pytest
 
@@ -22,14 +23,14 @@ def _set_usage(k: KeyState, *, weekly: float, session: float = 0.0, weekly_elaps
     remaining = total * (1.0 - weekly_elapsed / 100.0)
     # session_resets_at / weekly_resets_at are ISO end times
     end = time.time() + remaining
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    k.weekly_resets_at = datetime.fromtimestamp(end, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    k.weekly_resets_at = datetime.fromtimestamp(end, tz=UTC).isoformat().replace("+00:00", "Z")
     # session elapsed unused for preferred pool primarily; set a mid session
     sess_total = 18000
     sess_remaining = sess_total * 0.5
     k.session_resets_at = (
-        datetime.fromtimestamp(time.time() + sess_remaining, tz=timezone.utc)
+        datetime.fromtimestamp(time.time() + sess_remaining, tz=UTC)
         .isoformat()
         .replace("+00:00", "Z")
     )

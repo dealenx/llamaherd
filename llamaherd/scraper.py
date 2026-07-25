@@ -6,7 +6,6 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import Any
 
-
 log = logging.getLogger("llamaherd")
 
 

@@ -3,8 +3,8 @@ import time
 
 from fastapi.testclient import TestClient
 
-from llamaherd.proxy import FallbackProvider
 from llamaherd import proxy
+from llamaherd.proxy import FallbackProvider
 
 
 def _provider(tmp_path, **overrides):

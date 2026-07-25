@@ -1,9 +1,7 @@
 import logging
 import time
-from typing import Optional
 
 from .db import db_connect
-
 
 log = logging.getLogger("llamaherd")
 
@@ -19,8 +17,8 @@ class KeyRegistry:
     survive restarts too.
     """
 
-    def __init__(self, db_path: str, seed_keys: list[dict] = None,
-                 auth_token: Optional[str] = None, auth_user: Optional[str] = None):
+    def __init__(self, db_path: str, seed_keys: list[dict] | None = None,
+                 auth_token: str | None = None, auth_user: str | None = None):
         self._db_path = db_path
         self._conn = db_connect(db_path, auth_token=auth_token, auth_user=auth_user)
         self._conn.execute("""
@@ -81,7 +79,7 @@ class KeyRegistry:
                 for r in rows]
 
     def add(self, token: str, label: str, max_concurrent: int = 15, cycle_day: int = 1,
-            cookies: dict = None) -> dict:
+            cookies: dict | None = None) -> dict:
         cookies = cookies or {}
         return self._insert(token, label, max_concurrent, cycle_day,
                             secure_session=cookies.get("secure_session", ""),
@@ -89,8 +87,8 @@ class KeyRegistry:
                             cf_clearance=cookies.get("cf_clearance", ""),
                             stripe_mid=cookies.get("stripe_mid", ""))
 
-    def update(self, token: str, label: str = None, max_concurrent: int = None,
-               cycle_day: int = None) -> Optional[dict]:
+    def update(self, token: str, label: str | None = None, max_concurrent: int | None = None,
+               cycle_day: int | None = None) -> dict | None:
         sets, params = [], []
         if label is not None:
             sets.append("label = ?")
@@ -108,7 +106,7 @@ class KeyRegistry:
         self._conn.commit()
         return self.get_by_token(token)
 
-    def update_cookies(self, token: str, cookies: dict) -> Optional[dict]:
+    def update_cookies(self, token: str, cookies: dict) -> dict | None:
         sets, params = [], []
         field_map = {"secure_session": "secure_session", "aid": "aid",
                      "cf_clearance": "cf_clearance", "stripe_mid": "stripe_mid"}
@@ -128,7 +126,7 @@ class KeyRegistry:
         self._conn.commit()
         return cur.rowcount > 0
 
-    def get_by_token(self, token: str) -> Optional[dict]:
+    def get_by_token(self, token: str) -> dict | None:
         r = self._conn.execute(
             "SELECT token, label, max_concurrent, cycle_day, secure_session, aid, cf_clearance, stripe_mid FROM upstream_keys WHERE token = ?",
             [token]

@@ -1,10 +1,8 @@
 import logging
 import os
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import httpx
-
 
 log = logging.getLogger("llamaherd")
 
@@ -47,13 +45,13 @@ class TelegramNotifier:
             return "🟡"
         return "🟢"
 
-    def _format_reset_time(self, resets_at: Optional[str]) -> str:
+    def _format_reset_time(self, resets_at: str | None) -> str:
         """Format reset time as 'in X hours/days'."""
         if not resets_at:
             return "unknown"
         try:
-            end = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
-            now = datetime.now(timezone.utc)
+            end = datetime.fromisoformat(resets_at)
+            now = datetime.now(UTC)
             remaining = end - now
             if remaining.total_seconds() <= 0:
                 return "now"
@@ -68,7 +66,7 @@ class TelegramNotifier:
 
     def format_message(self, keys: list) -> str:
         """Format the notification message matching the dashboard layout."""
-        now_str = datetime.now(timezone.utc).strftime("%d.%m.%Y, %H:%M:%S")
+        now_str = datetime.now(UTC).strftime("%d.%m.%Y, %H:%M:%S")
 
         # Count statuses by weekly usage
         red = sum(1 for k in keys if k.weekly_usage_pct >= 80)
