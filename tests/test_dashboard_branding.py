@@ -62,6 +62,7 @@ def test_dashboard_uses_pixel_mascot_and_compact_operations_layout():
     assert parser.id_counts["kpi-total-tokens"] == 1
     assert parser.id_counts["kpi-in-flight"] == 1
     assert parser.id_counts["kpi-latency"] == 1
+    assert parser.id_counts["totals"] == 1
     assert 'class="tab" data-tab="subs">Accounts</' in html
     assert "url('/static/llamaherd-hero.png')" in html
     assert "max-width: 1920px" in html
@@ -72,6 +73,9 @@ def test_dashboard_uses_pixel_mascot_and_compact_operations_layout():
     assert ".section { margin-bottom: 28px; overflow-x: auto; }" in html
     assert "min-width: min(400px, calc(100vw - 24px))" in html
     assert ".inflight-row .if-tokens { display: none; }" in html
+    assert html.count('class="kpi-value') == 6
+    assert 'id="kpi-total-calls">—</div>' in html
+    assert 'id="kpi-latency">—</div>' in html
 
     assert (STATIC / "llamaherd-logo.png").stat().st_size > 0
     assert (STATIC / "llamaherd-hero.png").stat().st_size > 0

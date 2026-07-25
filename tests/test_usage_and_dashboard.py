@@ -1,3 +1,5 @@
+import asyncio
+import json
 import shutil
 import subprocess
 
@@ -72,9 +74,19 @@ def test_empty_totals_include_zero_operational_metrics(tmp_path):
         "total_tokens_in": 0,
         "total_tokens_out": 0,
         "total_tokens": 0,
-        "avg_latency_ms": 0.0,
-        "error_rate_pct": 0.0,
+        "avg_latency_ms": None,
+        "error_rate_pct": None,
     }
+
+
+def test_admin_totals_without_usage_db_keeps_unknown_rates_unknown(monkeypatch):
+    monkeypatch.setattr(proxy, "usage_db", None)
+
+    totals = asyncio.run(proxy.admin_totals())
+
+    assert totals["total_calls"] == 0
+    assert totals["avg_latency_ms"] is None
+    assert totals["error_rate_pct"] is None
 
 
 def test_dashboard_script_has_no_five_second_polling_and_valid_syntax(tmp_path):
@@ -87,8 +99,11 @@ def test_dashboard_script_has_no_five_second_polling_and_valid_syntax(tmp_path):
     assert "period-select" in html
     assert "last_month" in html
     assert "function renderKpis(" in html
+    assert "function accountHealth(" in html
     assert "function sortAccountsByUrgency(" in html
     assert "account-health-summary" in html
+    assert 'id="totals"' in html
+    assert "recorded-call error rate" in html
 
     node = shutil.which("node")
     if not node:
@@ -102,3 +117,42 @@ def test_dashboard_script_has_no_five_second_polling_and_valid_syntax(tmp_path):
 
     result = subprocess.run([node, "--check", str(script_path)], text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
+
+    account_source = script[script.index("function accountHealth("):script.index("\n\nfunction renderKeyStatus(")]
+    account_probe = account_source + """
+const cases = {
+  capacity: accountHealth({in_flight:10,max_concurrent:10,period_remaining_pct:5,session_usage_pct:-1,weekly_usage_pct:-1}),
+  billing: accountHealth({in_flight:0,max_concurrent:10,period_remaining_pct:5,session_usage_pct:10,weekly_usage_pct:10}),
+  unknown: accountHealth({in_flight:0,max_concurrent:10,period_remaining_pct:50,session_usage_pct:null,weekly_usage_pct:null}),
+  healthy: accountHealth({in_flight:0,max_concurrent:10,period_remaining_pct:50,session_usage_pct:10,weekly_usage_pct:10})
+};
+console.log(JSON.stringify(cases));
+"""
+    result = subprocess.run([node, "-e", account_probe], text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    health = json.loads(result.stdout)
+    assert {name: value["label"] for name, value in health.items()} == {
+        "capacity": "At capacity",
+        "billing": "Low billing",
+        "unknown": "Telemetry unknown",
+        "healthy": "Healthy",
+    }
+    assert all(health[name]["attention"] for name in ("capacity", "billing", "unknown"))
+    assert not health["healthy"]["attention"]
+
+    fmt_source = script[script.index("function fmt(n)"):script.index("\nfunction fmtTs(")]
+    latency_source = script[script.index("function fmtLatency("):script.index("\n\nfunction pctBarWithElapsed(")]
+    kpi_source = script[script.index("function renderKpis("):script.index("\n\nconst adminHeaders")]
+    kpi_probe = fmt_source + latency_source + kpi_source + """
+const elements = {};
+const document = {getElementById: id => elements[id] ||= {textContent:''}};
+function getDateRange() { return {label:'Today'}; }
+renderKpis({total_calls:0,total_tokens_in:0,total_tokens_out:0,total_tokens:0,avg_latency_ms:null,error_rate_pct:null}, 'Empty');
+console.log(JSON.stringify(Object.fromEntries(Object.entries(elements).map(([k,v]) => [k,v.textContent]))));
+"""
+    result = subprocess.run([node, "-e", kpi_probe], text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    kpis = json.loads(result.stdout)
+    assert kpis["kpi-total-calls"] == "0"
+    assert kpis["kpi-latency"] == "—"
+    assert kpis["kpi-error-rate"] == "—"

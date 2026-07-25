@@ -2564,8 +2564,8 @@ async def admin_totals(start_date: str | None = None, end_date: str | None = Non
         "total_tokens_in": 0,
         "total_tokens_out": 0,
         "total_tokens": 0,
-        "avg_latency_ms": 0.0,
-        "error_rate_pct": 0.0,
+        "avg_latency_ms": None,
+        "error_rate_pct": None,
     }
 
 

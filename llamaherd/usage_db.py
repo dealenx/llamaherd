@@ -397,8 +397,8 @@ class UsageDB:
                 SELECT COUNT(*),
                        COALESCE(SUM(tokens_in), 0),
                        COALESCE(SUM(tokens_out), 0),
-                       COALESCE(AVG(latency_ms), 0),
-                       COALESCE(100.0 * SUM(CASE WHEN status < 200 OR status >= 400 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 0)
+                       AVG(latency_ms),
+                       100.0 * SUM(CASE WHEN status < 200 OR status >= 400 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)
                 FROM usage WHERE {where}
             """, params).fetchone()
         else:
@@ -406,8 +406,8 @@ class UsageDB:
                 SELECT COUNT(*),
                        COALESCE(SUM(tokens_in), 0),
                        COALESCE(SUM(tokens_out), 0),
-                       COALESCE(AVG(latency_ms), 0),
-                       COALESCE(100.0 * SUM(CASE WHEN status < 200 OR status >= 400 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 0)
+                       AVG(latency_ms),
+                       100.0 * SUM(CASE WHEN status < 200 OR status >= 400 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)
                 FROM usage
             """).fetchone()
         assert row is not None
@@ -416,6 +416,6 @@ class UsageDB:
             "total_tokens_in": row[1],
             "total_tokens_out": row[2],
             "total_tokens": row[1] + row[2],
-            "avg_latency_ms": round(row[3] or 0, 1),
-            "error_rate_pct": round(row[4] or 0, 1),
+            "avg_latency_ms": round(row[3], 1) if row[3] is not None else None,
+            "error_rate_pct": round(row[4], 1) if row[4] is not None else None,
         }
