@@ -14,26 +14,70 @@
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-       background: var(--bg); color: var(--text); padding: 20px; font-size: 14px; }
+       background: var(--bg); color: var(--text); padding: 20px; font-size: 14px; max-width: 1920px; margin: 0 auto; }
 h1 { font-size: 22px; margin-bottom: 4px; }
-.brand-hero { min-height: clamp(150px, 22vw, 240px); margin-bottom: 14px; border: 1px solid var(--border);
-  border-radius: 12px; overflow: hidden; position: relative; display: flex; align-items: flex-end;
-  background: #05090d url('/static/llamaherd-hero.png') center / cover no-repeat; }
-.brand-hero::after { content: ''; position: absolute; inset: 0;
-  background: linear-gradient(90deg, rgba(5,9,13,.92) 0%, rgba(5,9,13,.55) 36%, rgba(5,9,13,.08) 70%); }
-.dash-header { position: relative; z-index: 1; display: flex; align-items: center; gap: 16px; padding: 18px 20px; }
-.dash-logo { width: 84px; height: 84px; border-radius: 12px; flex-shrink: 0; image-rendering: pixelated;
+.operations-header { min-height: 126px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 12px;
+  overflow: hidden; position: relative; background: #070c12; }
+.operations-header::after { content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, rgba(7,12,18,.98) 0%, rgba(7,12,18,.9) 45%, rgba(7,12,18,.18) 72%, rgba(7,12,18,.08) 100%); }
+.header-art { position: absolute; inset: 0 0 0 42%;
+  background: url('/static/llamaherd-hero.png') right center / auto 100% no-repeat; }
+.header-content { min-height: 126px; position: relative; z-index: 1; display: flex; align-items: center; gap: 24px;
+  padding: 16px 22px; }
+.product-identity { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
+.dash-logo { width: 70px; height: 70px; border-radius: 12px; flex-shrink: 0; image-rendering: pixelated;
   box-shadow: 0 0 0 1px rgba(255,255,255,.14), 0 8px 28px rgba(0,0,0,.45); }
-.dash-title h1 { margin-bottom: 3px; font-size: 28px; text-shadow: 0 2px 12px #000; }
-.brandline { color: #f2d6a2; font-size: 14px; margin-bottom: 0; text-shadow: 0 1px 8px #000; }
-@media (max-width: 640px) {
-  .brand-hero { min-height: 140px; background-position: 58% center; }
-  .dash-header { padding: 14px; gap: 12px; }
-  .dash-logo { width: 68px; height: 68px; }
-  .dash-title h1 { font-size: 23px; }
-  .brandline { font-size: 12px; }
+.dash-title h1 { margin-bottom: 2px; font-size: 26px; text-shadow: 0 2px 12px #000; }
+.brandline { color: #f2d6a2; font-size: 12px; max-width: 190px; line-height: 1.35; text-shadow: 0 1px 8px #000; }
+.header-controls { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 10px 14px;
+  background: rgba(13,17,23,.76); border: 1px solid rgba(48,54,61,.78); border-radius: 9px; backdrop-filter: blur(5px); }
+.header-stat { min-width: 72px; }
+.header-stat-label { display: block; color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .45px; margin-bottom: 3px; }
+.header-stat-value { color: var(--text); font-weight: 600; white-space: nowrap; }
+.live-state { display: inline-flex; align-items: center; gap: 7px; color: var(--green); font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .4px; }
+.header-secondary { position: relative; z-index: 1; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 6px 22px 10px; margin-top: -13px; color: var(--dim); font-size: 11px; }
+.header-secondary button, .header-secondary select, .header-controls button, .header-controls select { background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px; padding: 4px 8px; font-size: 12px; }
+.date-range { display: flex; align-items: center; gap: 6px; }
+.kpi-strip { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.kpi-card { min-width: 0; background: linear-gradient(145deg, #161d26, var(--surface)); border: 1px solid var(--border);
+  border-radius: 9px; padding: 13px 15px; }
+.kpi-label { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 5px; }
+.kpi-value { font-size: clamp(20px, 1.7vw, 27px); font-weight: 700; font-variant-numeric: tabular-nums; }
+.kpi-value.blue { color: var(--accent); }
+.kpi-value.green { color: var(--green); }
+.kpi-value.purple { color: var(--purple); }
+.kpi-value.yellow { color: var(--yellow); }
+.kpi-note { color: var(--dim); font-size: 10px; margin-top: 3px; min-height: 13px; }
+.dashboard-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 400px); gap: 12px; align-items: start; }
+.dashboard-main { min-width: 0; }
+.account-health-rail { position: sticky; top: 12px; align-self: start; max-height: calc(100vh - 24px); overflow-y: auto;
+  scrollbar-width: thin; }
+.rail-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; padding: 0 2px; }
+.rail-header h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .5px; }
+.rail-summary { color: var(--dim); font-size: 11px; }
+@media (max-width: 1180px) {
+  .header-art { left: 46%; opacity: .72; }
+  .header-content { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .header-controls { width: min(100%, 720px); }
+  .kpi-strip { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
+  .dashboard-layout { grid-template-columns: minmax(0, 1fr); }
+  .account-health-rail { position: static; max-height: none; }
 }
-.subtitle { color: var(--dim); font-size: 13px; margin-bottom: 20px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+@media (max-width: 640px) {
+  body { padding: 12px; }
+  .operations-header, .header-content { min-height: 0; }
+  .header-art { inset: 0; background-position: 65% center; opacity: .4; }
+  .header-content { padding: 14px; }
+  .header-secondary { padding: 7px 14px 12px; margin-top: 0; }
+  .dash-logo { width: 58px; height: 58px; }
+  .dash-title h1 { font-size: 22px; }
+  .header-controls { gap: 10px; padding: 8px 10px; }
+  .header-stat { min-width: 58px; }
+  .kpi-strip { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+}
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 24px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 .card .label { font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
@@ -57,9 +101,9 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .bar.in { background: var(--accent); }
 .bar.out { background: var(--purple); }
 .bars { display: flex; gap: 2px; align-items: center; }
-.key-status { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
-.key-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-           padding: 14px; min-width: 260px; flex: 1; }
+.key-status { display: flex; flex-direction: column; gap: 9px; }
+.key-card { background: linear-gradient(145deg, #161d26, var(--surface)); border: 1px solid var(--border); border-radius: 8px;
+           padding: 13px; min-width: 0; }
 .key-card .key-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .key-card .key-label { font-weight: 600; font-size: 14px; }
 .key-card .key-plan { font-size: 11px; background: var(--border); padding: 2px 8px; border-radius: 10px; }
@@ -91,8 +135,8 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .sse-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .sse-dot.ok { background: var(--green); }
 .sse-dot.off { background: var(--red); }
-.tab-bar { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
-.tab { padding: 8px 16px; font-size: 13px; color: var(--dim); cursor: pointer; border-bottom: 2px solid transparent; }
+.tab-bar { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: thin; }
+.tab { padding: 8px 16px; font-size: 13px; color: var(--dim); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 .tab-panel { display: none; }
@@ -206,43 +250,43 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 </style>
 </head>
 <body>
-<section class="brand-hero" aria-label="LlamaHerd routing overview">
-  <div class="dash-header">
-    <img src="/static/llamaherd-logo.png" alt="LlamaHerd pixel llama mascot" class="dash-logo">
-    <div class="dash-title">
-      <h1>LlamaHerd</h1>
-      <p class="brandline">One endpoint. Many llamas. Smarter routing.</p>
+<header class="operations-header" aria-label="LlamaHerd routing overview">
+  <div class="header-art" aria-hidden="true"></div>
+  <div class="header-content">
+    <div class="product-identity">
+      <img src="/static/llamaherd-logo.png" alt="LlamaHerd pixel llama mascot" class="dash-logo">
+      <div class="dash-title">
+        <h1>LlamaHerd</h1>
+        <p class="brandline">One endpoint. Many llamas.<br>Smarter routing.</p>
+      </div>
+    </div>
+    <div class="header-controls">
+      <span class="live-state"><span class="sse-dot" id="sse-dot"></span><span id="sse-label">connecting...</span></span>
+      <span class="header-stat"><span class="header-stat-label">Endpoint</span><span class="header-stat-value" id="upstream-url">—</span></span>
+      <span class="header-stat date-range">
+        <span><span class="header-stat-label">Period</span>
+          <select id="period-select">
+            <option value="today" selected>Today</option>
+            <option value="yesterday">Yesterday</option>
+            <option value="7d">Last 7 days</option>
+            <option value="this_week">This Week</option>
+            <option value="this_month">This Month</option>
+            <option value="last_month">Last Month</option>
+            <option value="custom">Custom</option>
+          </select>
+        </span>
+        <span id="custom-dates" style="display:none">
+          <input type="date" id="date-start"><input type="date" id="date-end">
+        </span>
+      </span>
+      <span class="header-stat"><span class="header-stat-label">Models</span><span class="header-stat-value" id="mi-count">—</span></span>
+      <span class="header-stat"><span class="header-stat-label">Refreshed</span><span class="header-stat-value" id="mi-refresh">—</span></span>
+      <button id="btn-refresh-models">↻ Refresh</button>
     </div>
   </div>
-</section>
-<p class="subtitle">
-  <span id="upstream-url"></span>
-  <span class="sse-dot" id="sse-dot"></span>
-  <span id="sse-label" style="font-size:11px">connecting...</span>
-  <span class="date-range">
-    <label>Period:</label>
-    <select id="period-select">
-      <option value="today" selected>Today</option>
-      <option value="yesterday">Yesterday</option>
-      <option value="7d">Last 7 days</option>
-      <option value="this_week">This Week</option>
-      <option value="this_month">This Month</option>
-      <option value="last_month">Last Month</option>
-      <option value="custom">Custom</option>
-    </select>
-    <span id="custom-dates" style="display:none">
-      <input type="date" id="date-start">
-      <input type="date" id="date-end">
-    </span>
-  </span>
-</p>
-
-<div class="model-info" id="model-info">
-  <span>Models: <span class="mi-val" id="mi-count">-</span></span>
-  <span>Refreshed: <span class="mi-val" id="mi-refresh">-</span></span>
+  <div class="header-secondary" id="model-info">
   <span id="sticky-info" style="display:none">Sticky sessions: <span class="mi-val" id="sticky-count">-</span> / TTL <span class="mi-val" id="sticky-ttl">-</span>s</span>
   <span id="mi-new" class="new-models" style="display:none"></span>
-  <button id="btn-refresh-models">🔄 Refresh</button>
   <span id="fallback-control" style="display:none; margin-left:auto; align-items:center; gap:6px;">
     <span class="badge" id="fb-provider-badge">fallback</span>
     <span style="font-size:11px; color:var(--dim)" id="fb-model-count">0 mapped / 0 discovered</span>
@@ -255,8 +299,20 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     </select>
   </span>
 </div>
+</header>
 <div id="fb-map-panel" class="fb-map-panel" style="display:none"></div>
 
+<section class="kpi-strip" aria-label="Selected period summary">
+  <div class="kpi-card"><div class="kpi-label">Total Calls</div><div class="kpi-value blue" id="kpi-total-calls">0</div><div class="kpi-note" id="kpi-period-label">Today</div></div>
+  <div class="kpi-card"><div class="kpi-label">Tokens In</div><div class="kpi-value green" id="kpi-tokens-in">0</div><div class="kpi-note">prompt and input tokens</div></div>
+  <div class="kpi-card"><div class="kpi-label">Tokens Out</div><div class="kpi-value purple" id="kpi-tokens-out">0</div><div class="kpi-note">generated tokens</div></div>
+  <div class="kpi-card"><div class="kpi-label">Total Tokens</div><div class="kpi-value yellow" id="kpi-total-tokens">0</div><div class="kpi-note">selected period</div></div>
+  <div class="kpi-card"><div class="kpi-label">In Flight</div><div class="kpi-value blue" id="kpi-in-flight">0</div><div class="kpi-note">active requests now</div></div>
+  <div class="kpi-card"><div class="kpi-label">Avg Latency</div><div class="kpi-value" id="kpi-latency">0ms</div><div class="kpi-note"><span id="kpi-error-rate">0%</span> error rate</div></div>
+</section>
+
+<div class="dashboard-layout">
+<main class="dashboard-main">
 <div class="section" id="inflight-section">
   <h2>In-Flight Requests <span class="badge live" id="inflight-count">0</span></h2>
   <div id="inflight-list"><div id="inflight-empty">No requests in flight</div></div>
@@ -265,15 +321,12 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 <div class="tab-bar">
   <div class="tab active" data-tab="overview">Overview</div>
   <div class="tab" data-tab="models">Models</div>
-  <div class="tab" data-tab="subs">Subscriptions</div>
+  <div class="tab" data-tab="subs">Accounts</div>
   <div class="tab" data-tab="quota">Quota Cost</div>
   <div class="tab" data-tab="costs">OpenRouter $</div>
 </div>
 
 <div class="tab-panel active" id="panel-overview">
-  <div id="key-status" class="key-status"></div>
-  <div id="totals" class="grid"></div>
-
   <div class="section">
     <h2>Per-Client Totals <span class="badge" id="badge-client">this month</span></h2>
     <div style="overflow-x:auto"><table id="client-table"><thead><tr>
@@ -387,6 +440,16 @@ tr:hover td { background: rgba(88,166,255,0.04); }
   </tr></thead><tbody></tbody></table></div>
   <div id="costs-unpriced" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
 </div>
+</main>
+
+<aside class="account-health-rail" aria-label="Account health">
+  <div class="rail-header">
+    <h2>Account Health</h2>
+    <span class="rail-summary" id="account-health-summary">Waiting for status…</span>
+  </div>
+  <div id="key-status" class="key-status"></div>
+</aside>
+</div>
 
 <div id="modal-root"></div>
 
@@ -412,6 +475,7 @@ function fmt(n) { if (n >= 1e6) return (n/1e6).toFixed(2)+'M'; if (n >= 1e3) ret
 function fmtTs(ts) { const d = new Date(ts*1000); return d.toLocaleDateString('en-CA')+' '+d.toLocaleTimeString('en-GB'); }
 function fmtCtx(n) { if (!n) return '-'; if (n >= 1048576) return (n/1048576).toFixed(0)+'M'; if (n >= 1024) return (n/1024).toFixed(0)+'K'; return n; }
 function relTime(ts) { if (!ts) return '-'; const diff=(Date.now()/1000)-ts; if(diff<60)return Math.round(diff)+'s ago'; if(diff<3600)return Math.round(diff/60)+'m ago'; if(diff<86400)return Math.round(diff/3600)+'h ago'; return Math.round(diff/86400)+'d ago'; }
+function fmtLatency(ms) { const n=Number(ms||0); return n>=1000 ? (n/1000).toFixed(n>=10000?1:2)+'s' : Math.round(n)+'ms'; }
 
 function pctBarWithElapsed(pct, elapsedPct, defaultColor) {
   if (pct == null || pct < 0) return '<div class="pct-bar-wrap"><div class="pct-bar" style="width:0%;background:var(--border)"></div></div>';
@@ -421,6 +485,17 @@ function pctBarWithElapsed(pct, elapsedPct, defaultColor) {
   return `<div class="pct-bar-wrap"><div class="pct-bar" style="width:${Math.min(pct,100)}%;background:${c}"></div>${el}</div>`;
 }
 function pctBar(pct, color) { if (pct == null) return ''; return `<div class="pct-bar-wrap"><div class="pct-bar" style="width:${Math.min(pct,100)}%;background:${color}"></div></div>`; }
+
+function renderKpis(totals, periodLabel) {
+  const t = totals || {};
+  document.getElementById('kpi-total-calls').textContent = fmt(t.total_calls || 0);
+  document.getElementById('kpi-tokens-in').textContent = fmt(t.total_tokens_in || 0);
+  document.getElementById('kpi-tokens-out').textContent = fmt(t.total_tokens_out || 0);
+  document.getElementById('kpi-total-tokens').textContent = fmt(t.total_tokens || 0);
+  document.getElementById('kpi-latency').textContent = fmtLatency(t.avg_latency_ms);
+  document.getElementById('kpi-error-rate').textContent = `${Number(t.error_rate_pct || 0).toFixed(1)}%`;
+  document.getElementById('kpi-period-label').textContent = periodLabel || getDateRange().label;
+}
 
 const adminHeaders = () => ({'Authorization': 'Bearer ' + ADMIN_TOKEN, 'Content-Type': 'application/json'});
 async function loadJSON(url) { const r = await fetch(API+url, {headers: adminHeaders()}); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }
@@ -525,6 +600,7 @@ function renderInFlight() {
   const list = document.getElementById('inflight-list');
   const ids = Object.keys(inFlight);
   document.getElementById('inflight-count').textContent = ids.length;
+  document.getElementById('kpi-in-flight').textContent = ids.length;
   if (!ids.length) { list.innerHTML = '<div id="inflight-empty">No requests in flight</div>'; return; }
   const now = Date.now() / 1000;
   list.innerHTML = ids.map(id => {
@@ -697,8 +773,28 @@ function updateStickyBadge(d) {
 }
 
 // --- Key Status ---
+function sortAccountsByUrgency(keys) {
+  const urgency = k => {
+    const slots = k.max_concurrent ? (k.in_flight || 0) / k.max_concurrent : 0;
+    const quota = Math.max(k.session_usage_pct || 0, k.weekly_usage_pct || 0, 100 - (k.period_remaining_pct ?? 100));
+    return (k.exhausted ? 20000 : 0) + (k.suspended ? 10000 : 0) + slots * 1000 + quota;
+  };
+  return [...(keys || [])].sort((a, b) => urgency(b) - urgency(a) || String(a.label || '').localeCompare(String(b.label || '')));
+}
+
 function renderKeyStatus(keys) {
-  document.getElementById('key-status').innerHTML = (keys||[]).map(k => {
+  const sorted = sortAccountsByUrgency(keys);
+  const activeSlots = sorted.reduce((sum, k) => sum + (k.in_flight || 0), 0);
+  const totalSlots = sorted.reduce((sum, k) => sum + (k.max_concurrent || 0), 0);
+  const attention = sorted.filter(k => k.exhausted || k.suspended || (k.session_usage_pct || 0) >= 80 || (k.weekly_usage_pct || 0) >= 80).length;
+  const summary = document.getElementById('account-health-summary');
+  if (summary) summary.textContent = sorted.length ? `${activeSlots}/${totalSlots} slots · ${attention ? attention + ' need attention' : 'all healthy'}` : 'No accounts';
+  const container = document.getElementById('key-status');
+  if (!sorted.length) {
+    container.innerHTML = '<div class="card" style="color:var(--dim)">No account status available.</div>';
+    return;
+  }
+  container.innerHTML = sorted.map(k => {
     const slotPct=Math.round((k.in_flight/k.max_concurrent)*100), periodPct=Math.round((1-k.period_remaining_pct/100)*100);
     const sPct=k.session_usage_pct||0, wPct=k.weekly_usage_pct||0;
     const sEl=(k.session_elapsed_pct!=null&&k.session_elapsed_pct>=0)?k.session_elapsed_pct:-1;
@@ -708,8 +804,9 @@ function renderKeyStatus(keys) {
     const topModels = Object.entries(sModels).sort((a,b)=>(b[1].requests||0)-(a[1].requests||0)).slice(0,3);
     const modelBreakdown = topModels.length ? '<div class="key-row" style="margin-top:6px"><span class="kdim">Top models</span></div>' +
       topModels.map(([mid, md]) => `<div class="key-row" style="font-size:11px"><span class="kdim" style="font-family:monospace">${escHtml(mid)}</span><span>${md.requests||0} req</span></div>`).join('') : '';
+    const health = k.exhausted ? 'Exhausted' : k.suspended ? 'Suspended' : 'Healthy';
     return `<div class="key-card">
-      <div class="key-header"><span class="key-label ${cls}">${k.label}</span><span class="key-plan">${k.plan||'?'}</span></div>
+      <div class="key-header"><span class="key-label ${cls}">${escHtml(k.label)}</span><span><span class="${cls}" style="font-size:10px;margin-right:6px">● ${health}</span><span class="key-plan">${escHtml(k.plan||'?')}</span></span></div>
       <div class="key-row"><span class="kdim">Slots</span><span>${k.in_flight}/${k.max_concurrent}</span></div>${pctBar(slotPct,'var(--accent)')}
       <div class="key-row"><span class="kdim">Session</span><span>${sPct<0?'?':sPct.toFixed(1)}%${sEl>=0?' ('+sEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(sPct,sEl,'var(--yellow)')}
       <div class="key-row"><span class="kdim">Weekly</span><span>${wPct<0?'?':wPct.toFixed(1)}%${wEl>=0?' ('+wEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(wPct,wEl,'var(--purple)')}
@@ -1153,11 +1250,7 @@ async function fetchPeriodData(opts) {
   if(!opts.preserveFeed) fetches.push(fetchRecentCalls());
   const [totals,clients,models,daily,calls]=await Promise.all(fetches);
   const t=totals||{};
-  document.getElementById('totals').innerHTML=`
-    <div class="card"><div class="label">Total Calls</div><div class="value blue">${fmt(t.total_calls||0)}</div></div>
-    <div class="card"><div class="label">Tokens In</div><div class="value green">${fmt(t.total_tokens_in||0)}</div></div>
-    <div class="card"><div class="label">Tokens Out</div><div class="value purple">${fmt(t.total_tokens_out||0)}</div></div>
-    <div class="card"><div class="label">Total Tokens</div><div class="value yellow">${fmt(t.total_tokens||0)}</div></div>`;
+  renderKpis(t, range.label);
   const maxTok=Math.max(...(clients||[]).map(c=>c.tokens_total||0),1);
   document.querySelector('#client-table tbody').innerHTML=(clients||[]).map(c=>{const inW=Math.round((c.tokens_in/maxTok)*80),outW=Math.round((c.tokens_out/maxTok)*80); return `<tr><td>${c.client_id}</td><td>${fmt(c.requests)}</td><td>${fmt(c.tokens_in)}</td><td>${fmt(c.tokens_out)}</td><td>${fmt(c.tokens_total)}</td><td><div class="bars"><div class="bar in" style="width:${inW}px"></div><div class="bar out" style="width:${outW}px"></div></div></td></tr>`;}).join('');
   document.querySelector('#model-table tbody').innerHTML=(models||[]).map(m=>`<tr><td>${m.model}</td><td>${fmt(m.requests)}</td><td>${fmt(m.tokens_in)}</td><td>${fmt(m.tokens_out)}</td><td>${fmt(m.tokens_total)}</td><td>${Math.round(m.avg_latency_ms||0)}ms</td></tr>`).join('');

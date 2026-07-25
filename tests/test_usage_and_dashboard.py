@@ -36,6 +36,47 @@ def test_recent_calls_filters_by_client_and_model(tmp_path):
     assert [row["model"] for row in gemma] == ["gemma3:4b"]
 
 
+def test_totals_include_real_latency_and_error_rate(tmp_path):
+    db = proxy.UsageDB(str(tmp_path / "usage.db"))
+    rows = [
+        (1000.0, "2026-05-04", "hermes", "key-a", "glm-5.1", 10, 5, 100, 200, "sess-a"),
+        (1001.0, "2026-05-04", "hermes", "key-a", "glm-5.1", 20, 6, 200, 429, "sess-b"),
+        (1002.0, "2026-05-05", "openclaw", "key-b", "gemma3:4b", 30, 7, 300, -1, "sess-c"),
+    ]
+    db._conn.executemany(
+        "INSERT INTO usage (ts, day, client_id, upstream_key, model, tokens_in, tokens_out, latency_ms, status, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    db._conn.commit()
+
+    totals = db.totals()
+    assert totals == {
+        "total_calls": 3,
+        "total_tokens_in": 60,
+        "total_tokens_out": 18,
+        "total_tokens": 78,
+        "avg_latency_ms": 200.0,
+        "error_rate_pct": 66.7,
+    }
+
+    filtered = db.totals(start_date="2026-05-04", end_date="2026-05-04")
+    assert filtered["avg_latency_ms"] == 150.0
+    assert filtered["error_rate_pct"] == 50.0
+
+
+def test_empty_totals_include_zero_operational_metrics(tmp_path):
+    db = proxy.UsageDB(str(tmp_path / "usage.db"))
+
+    assert db.totals() == {
+        "total_calls": 0,
+        "total_tokens_in": 0,
+        "total_tokens_out": 0,
+        "total_tokens": 0,
+        "avg_latency_ms": 0.0,
+        "error_rate_pct": 0.0,
+    }
+
+
 def test_dashboard_script_has_no_five_second_polling_and_valid_syntax(tmp_path):
     html = proxy.DASHBOARD_PATH.read_text()
     assert "EventSource" in html
@@ -45,6 +86,9 @@ def test_dashboard_script_has_no_five_second_polling_and_valid_syntax(tmp_path):
     assert "schedulePeriodRefresh" in html
     assert "period-select" in html
     assert "last_month" in html
+    assert "function renderKpis(" in html
+    assert "function sortAccountsByUrgency(" in html
+    assert "account-health-summary" in html
 
     node = shutil.which("node")
     if not node:
