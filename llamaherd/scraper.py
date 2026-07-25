@@ -41,6 +41,7 @@ class UsageScraper:
             log.warning("cloudscraper or beautifulsoup4 not installed — usage scraping disabled")
             return None
 
+        scraper = None
         try:
             scraper = cloudscraper.create_scraper()
             scraper.cookies.set("__Secure-session", cookies["secure_session"], domain="ollama.com")
@@ -140,6 +141,9 @@ class UsageScraper:
         except Exception as e:
             log.warning(f"Usage scrape error for {key.label}: {e}")
             return None
+        finally:
+            if scraper is not None:
+                scraper.close()
 
     def scrape_all(self, keys: list[Any]) -> dict[str, dict]:
         """Scrape usage for all keys with cookies configured."""
