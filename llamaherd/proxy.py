@@ -2559,7 +2559,14 @@ async def admin_totals(start_date: str | None = None, end_date: str | None = Non
     """Totals across all clients/models. Optionally filter by date range."""
     if usage_db:
         return usage_db.totals(start_date=start_date, end_date=end_date)
-    return {"total_calls": 0, "total_tokens_in": 0, "total_tokens_out": 0, "total_tokens": 0}
+    return {
+        "total_calls": 0,
+        "total_tokens_in": 0,
+        "total_tokens_out": 0,
+        "total_tokens": 0,
+        "avg_latency_ms": None,
+        "error_rate_pct": None,
+    }
 
 
 @app.get("/admin/models", dependencies=[Depends(_verify_admin)])
