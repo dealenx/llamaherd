@@ -46,7 +46,7 @@ from .routing import (
     _convert_openai_to_ollama_body,
     _ollama_chunk_to_sse,
 )
-from .scraper import UsageScraper
+from .scraper import ActivityUsageRefresher, UsageScraper
 from .usage_db import UsageDB
 
 # ---------------------------------------------------------------------------
@@ -226,6 +226,7 @@ registry: Optional[ModelRegistry] = None
 usage_db: Optional[UsageDB] = None
 client_registry: Optional[ClientRegistry] = None
 usage_scraper: Optional[UsageScraper] = None
+usage_refresher: Optional[ActivityUsageRefresher] = None
 telegram_notifier: Optional[TelegramNotifier] = None
 upstream_http_client: Optional[httpx.AsyncClient] = None
 fallback_provider: Optional[FallbackProvider] = None
@@ -367,6 +368,12 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
                            provider: Optional[str] = None,
                            session_id: Optional[str] = None):
     """Record usage to DB and broadcast call + request_end events to SSE subscribers."""
+    # Internal Ollama call sites provide the full token so activity refresh can
+    # target the exact account even when tokens share a prefix. Redact it before
+    # persistence, events, or logs.
+    activity_key = manager.key_by_token(upstream_key) if provider == "ollama-cloud" and manager else None
+    if provider == "ollama-cloud":
+        upstream_key = upstream_key[:8]
     # End the live request first. Usage persistence is best-effort and must not
     # leave a completed request occupying the dashboard/in-flight registry.
     entry = _in_flight.pop(request_id, None) if request_id else None
@@ -415,6 +422,9 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
     except RuntimeError:
         pass  # No event loop — skip broadcast
 
+    if usage_refresher and activity_key is not None:
+        usage_refresher.schedule(activity_key)
+
 
 def _verify_admin(request: Request) -> None:
     """FastAPI dependency: require the admin token via a Bearer header."""
@@ -438,7 +448,7 @@ def _verify_admin_session(session_token: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, key_registry, registry, usage_db, client_registry, usage_scraper, telegram_notifier, upstream_http_client, fallback_provider, model_alias_manager, sticky
+    global manager, key_registry, registry, usage_db, client_registry, usage_scraper, usage_refresher, telegram_notifier, upstream_http_client, fallback_provider, model_alias_manager, sticky
     global upstream_url, retry_on_429, max_retries, queue_timeout, request_timeout
     global admin_token, NATIVE_BRIDGE_MODELS, reject_unknown_models
 
@@ -508,6 +518,7 @@ async def lifespan(app: FastAPI):
     sub_task = asyncio.create_task(_poll_subscriptions_loop(manager, sub_poll_interval))
     # Usage scraper (cookie-based ollama.com/settings)
     usage_scraper = UsageScraper(db_keys if db_keys else cfg["keys"])
+    scrape_results = {}
     # Scrape usage on startup (in thread pool to not block)
     loop = asyncio.get_event_loop()
     try:
@@ -516,9 +527,18 @@ async def lifespan(app: FastAPI):
             log.info(f"Initial usage scrape: {scrape_results}")
     except Exception as e:
         log.warning(f"Initial usage scrape failed: {e}")
-    # Start periodic usage scraping (every 30 min)
-    usage_scrape_interval = cfg.get("usage_scrape_interval", 1800)
-    usage_task = asyncio.create_task(_scrape_usage_loop(usage_scraper, manager, usage_scrape_interval))
+    active_manager = manager
+
+    async def broadcast_usage_update():
+        await broadcaster.broadcast("status", {"keys": active_manager.status()})
+
+    usage_refresher = ActivityUsageRefresher(
+        usage_scraper,
+        debounce_seconds=cfg.get("usage_activity_debounce", 30),
+        min_interval_seconds=cfg.get("usage_activity_min_interval", 300),
+        on_update=broadcast_usage_update,
+    )
+    usage_refresher.mark_scraped([key for key in manager.keys if key.label in scrape_results])
     # Telegram notifier (env-based, no UI)
     telegram_notifier = TelegramNotifier()
     telegram_task: Optional[asyncio.Task] = None
@@ -567,7 +587,9 @@ async def lifespan(app: FastAPI):
     yield
 
     sub_task.cancel()
-    usage_task.cancel()
+    if usage_refresher:
+        await usage_refresher.close()
+        usage_refresher = None
     if telegram_task is not None:
         telegram_task.cancel()
     sweep_task.cancel()
@@ -622,23 +644,6 @@ async def _refresh_fallback_metadata_loop(fp: 'FallbackProvider'):
             raise
         except Exception as e:
             log.warning(f"Fallback metadata refresh error: {e}")
-
-
-async def _scrape_usage_loop(scraper: UsageScraper, mgr: KeyManager, interval: int):
-    """Periodically scrape ollama.com/settings for usage data."""
-    loop = asyncio.get_event_loop()
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            result = await loop.run_in_executor(None, scraper.scrape_all, mgr.keys)
-            if result:
-                log.info(f"Usage scrape updated: {len(result)} keys")
-                # Broadcast updated status after usage scrape
-                await broadcaster.broadcast("status", {
-                    "keys": mgr.status(),
-                })
-        except Exception as e:
-            log.error(f"Usage scrape loop error: {e}")
 
 
 async def _telegram_notify_loop(notifier: TelegramNotifier, mgr: KeyManager, interval: int):
@@ -1138,7 +1143,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
                 await manager.release(key)
                 if sticky and session_id:
                     await sticky.clear_session(session_id)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+                _record_and_broadcast(client_id, key.token, model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
                 continue
@@ -1149,7 +1154,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
                 await manager.release(key)
                 if sticky and session_id:
                     await sticky.clear_session(session_id)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+                _record_and_broadcast(client_id, key.token, model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
                 continue
@@ -1159,7 +1164,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
             tokens_in = usage.get("prompt_tokens", 0)
             tokens_out = usage.get("completion_tokens", 0)
             await manager.release(key, tokens_out)
-            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+            _record_and_broadcast(client_id, key.token, model, tokens_in, tokens_out, elapsed_ms,
                                   resp.status_code, request_id=request_id, provider="ollama-cloud", session_id=session_id)
 
             log.info(f"{client_id} -> {model} via {key.label}: {tokens_in}+{tokens_out}tok {elapsed_ms}ms")
@@ -1183,7 +1188,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
             await manager.release(key)
             if sticky and session_id:
                 await sticky.clear_session(session_id)
-            _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, -1, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+            _record_and_broadcast(client_id, key.token, model, 0, 0, elapsed_ms, -1, request_id=request_id, provider="ollama-cloud", session_id=session_id)
             last_error = str(e)
             log.error(f"Proxy error for {model} (client={client_id}): {e}")
             prefer_key = None
@@ -1223,7 +1228,7 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
     async def finalize():
         elapsed_ms = int((time.time() - start) * 1000)
         await manager.release(key, tokens_out)
-        _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+        _record_and_broadcast(client_id, key.token, model, tokens_in, tokens_out, elapsed_ms,
                               final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
         usage_src = "usage" if usage_captured else "estimate"
         status_suffix = "" if final_status == 200 else f" status={final_status}"
@@ -1475,7 +1480,7 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
     async def finalize():
         elapsed_ms = int((time.time() - start) * 1000)
         await manager.release(key, tokens_out)
-        _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+        _record_and_broadcast(client_id, key.token, model, tokens_in, tokens_out, elapsed_ms,
                               final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
         usage_src = "usage" if usage_captured else "estimate"
         log.info(f"{client_id} -> {model} via {key.label}: ndjson {tokens_in}+{tokens_out}tok {elapsed_ms}ms ({usage_src})")
@@ -1649,7 +1654,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
                 await manager.release(key)
                 if sticky and session_id:
                     await sticky.clear_session(session_id)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+                _record_and_broadcast(client_id, key.token, model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
                 continue
@@ -1660,7 +1665,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
                 await manager.release(key)
                 if sticky and session_id:
                     await sticky.clear_session(session_id)
-                _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+                _record_and_broadcast(client_id, key.token, model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
                 continue
@@ -1670,7 +1675,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             tokens_in = resp_data.get("prompt_eval_count", 0) or 0
             tokens_out = resp_data.get("eval_count", 0) or 0
             await manager.release(key, tokens_out)
-            _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+            _record_and_broadcast(client_id, key.token, model, tokens_in, tokens_out, elapsed_ms,
                                   resp.status_code, request_id=request_id, provider="ollama-cloud", session_id=session_id)
 
             log.info(f"{client_id} -> {model} via {key.label}: {tokens_in}+{tokens_out}tok {elapsed_ms}ms (native)")
@@ -1694,7 +1699,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             await manager.release(key)
             if sticky and session_id:
                 await sticky.clear_session(session_id)
-            _record_and_broadcast(client_id, key.token[:8], model, 0, 0, elapsed_ms, -1, request_id=request_id, provider="ollama-cloud", session_id=session_id)
+            _record_and_broadcast(client_id, key.token, model, 0, 0, elapsed_ms, -1, request_id=request_id, provider="ollama-cloud", session_id=session_id)
             last_error = str(e)
             log.error(f"Native proxy error for {model} (client={client_id}): {e}")
             prefer_key = None
@@ -2102,7 +2107,7 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
     async def finalize():
         elapsed_ms = int((time.time() - start) * 1000)
         await manager.release(key, tokens_out)
-        _record_and_broadcast(client_id, key.token[:8], model, tokens_in, tokens_out, elapsed_ms,
+        _record_and_broadcast(client_id, key.token, model, tokens_in, tokens_out, elapsed_ms,
                               final_status, request_id=request_id, provider="ollama-cloud", session_id=session_id)
         usage_src = "usage" if usage_captured else "estimate"
         log.info(f"{client_id} -> {model} via {key.label}: bridge {tokens_in}+{tokens_out}tok {elapsed_ms}ms done={bridge_reason} ({usage_src})")
@@ -2945,6 +2950,8 @@ async def admin_delete_key(key_id: str):
     if not manager or not removed:
         raise HTTPException(status_code=404, detail="key not found")
     manager.keys.remove(removed)
+    if usage_refresher:
+        usage_refresher.cancel(removed)
     # Also clear cookies from the usage scraper so the deleted key stops
     # being scraped. Without this, an orphan entry sits in cookie_map
     # indefinitely and pollutes /admin/status output.
