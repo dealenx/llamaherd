@@ -105,9 +105,11 @@ usage_db: ~/llamaherd/usage.db   # SQLite database path
 sub_poll_interval: 21600      # 6 hours
 
 # --- Usage scraping ---
-# How often to scrape ollama.com/settings for usage data (seconds)
-# Requires cookies to be set for each key
-usage_scrape_interval: 1800  # 30 minutes
+# Refresh only the account that handled traffic. Bursts are debounced, and
+# each account is scraped at most once per minimum interval.
+# Requires cookies to be set for each key.
+usage_activity_debounce: 30
+usage_activity_min_interval: 300
 
 # --- Fallback provider (optional) ---
 # When configured, LlamaHerd can route requests to a secondary OpenAI-compatible

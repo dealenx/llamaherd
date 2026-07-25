@@ -46,7 +46,7 @@ from .routing import (
     _convert_openai_to_ollama_body,
     _ollama_chunk_to_sse,
 )
-from .scraper import UsageScraper
+from .scraper import ActivityUsageRefresher, UsageScraper
 from .usage_db import UsageDB
 
 # ---------------------------------------------------------------------------
@@ -226,6 +226,7 @@ registry: Optional[ModelRegistry] = None
 usage_db: Optional[UsageDB] = None
 client_registry: Optional[ClientRegistry] = None
 usage_scraper: Optional[UsageScraper] = None
+usage_refresher: Optional[ActivityUsageRefresher] = None
 telegram_notifier: Optional[TelegramNotifier] = None
 upstream_http_client: Optional[httpx.AsyncClient] = None
 fallback_provider: Optional[FallbackProvider] = None
@@ -415,6 +416,11 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
     except RuntimeError:
         pass  # No event loop — skip broadcast
 
+    if provider == "ollama-cloud" and usage_refresher and manager:
+        key = next((candidate for candidate in manager.keys if candidate.token[:8] == upstream_key), None)
+        if key is not None:
+            usage_refresher.schedule(key)
+
 
 def _verify_admin(request: Request) -> None:
     """FastAPI dependency: require the admin token via a Bearer header."""
@@ -438,7 +444,7 @@ def _verify_admin_session(session_token: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, key_registry, registry, usage_db, client_registry, usage_scraper, telegram_notifier, upstream_http_client, fallback_provider, model_alias_manager, sticky
+    global manager, key_registry, registry, usage_db, client_registry, usage_scraper, usage_refresher, telegram_notifier, upstream_http_client, fallback_provider, model_alias_manager, sticky
     global upstream_url, retry_on_429, max_retries, queue_timeout, request_timeout
     global admin_token, NATIVE_BRIDGE_MODELS, reject_unknown_models
 
@@ -508,6 +514,7 @@ async def lifespan(app: FastAPI):
     sub_task = asyncio.create_task(_poll_subscriptions_loop(manager, sub_poll_interval))
     # Usage scraper (cookie-based ollama.com/settings)
     usage_scraper = UsageScraper(db_keys if db_keys else cfg["keys"])
+    scrape_results = {}
     # Scrape usage on startup (in thread pool to not block)
     loop = asyncio.get_event_loop()
     try:
@@ -516,9 +523,18 @@ async def lifespan(app: FastAPI):
             log.info(f"Initial usage scrape: {scrape_results}")
     except Exception as e:
         log.warning(f"Initial usage scrape failed: {e}")
-    # Start periodic usage scraping (every 30 min)
-    usage_scrape_interval = cfg.get("usage_scrape_interval", 1800)
-    usage_task = asyncio.create_task(_scrape_usage_loop(usage_scraper, manager, usage_scrape_interval))
+    active_manager = manager
+
+    async def broadcast_usage_update():
+        await broadcaster.broadcast("status", {"keys": active_manager.status()})
+
+    usage_refresher = ActivityUsageRefresher(
+        usage_scraper,
+        debounce_seconds=cfg.get("usage_activity_debounce", 30),
+        min_interval_seconds=cfg.get("usage_activity_min_interval", 300),
+        on_update=broadcast_usage_update,
+    )
+    usage_refresher.mark_scraped(set(scrape_results))
     # Telegram notifier (env-based, no UI)
     telegram_notifier = TelegramNotifier()
     telegram_task: Optional[asyncio.Task] = None
@@ -567,7 +583,9 @@ async def lifespan(app: FastAPI):
     yield
 
     sub_task.cancel()
-    usage_task.cancel()
+    if usage_refresher:
+        await usage_refresher.close()
+        usage_refresher = None
     if telegram_task is not None:
         telegram_task.cancel()
     sweep_task.cancel()
@@ -622,23 +640,6 @@ async def _refresh_fallback_metadata_loop(fp: 'FallbackProvider'):
             raise
         except Exception as e:
             log.warning(f"Fallback metadata refresh error: {e}")
-
-
-async def _scrape_usage_loop(scraper: UsageScraper, mgr: KeyManager, interval: int):
-    """Periodically scrape ollama.com/settings for usage data."""
-    loop = asyncio.get_event_loop()
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            result = await loop.run_in_executor(None, scraper.scrape_all, mgr.keys)
-            if result:
-                log.info(f"Usage scrape updated: {len(result)} keys")
-                # Broadcast updated status after usage scrape
-                await broadcaster.broadcast("status", {
-                    "keys": mgr.status(),
-                })
-        except Exception as e:
-            log.error(f"Usage scrape loop error: {e}")
 
 
 async def _telegram_notify_loop(notifier: TelegramNotifier, mgr: KeyManager, interval: int):

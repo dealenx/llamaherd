@@ -357,7 +357,8 @@ See `config.example.yaml` for all options. Key settings:
 - **admin_token** — Secret for dashboard and admin API access
 - **usage_db** — SQLite database path for usage tracking
 - **health_check_interval** — Seconds between model discovery (default 300)
-- **usage_scrape_interval** — Seconds between usage scrapes (default 1800)
+- **usage_activity_debounce** — Delay after account activity before refreshing its usage (default 30 seconds)
+- **usage_activity_min_interval** — Minimum time between refreshes for the same active account (default 300 seconds)
 
 ## 🏗️ Architecture
 

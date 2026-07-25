@@ -1,5 +1,8 @@
+import asyncio
 import logging
 import re
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 
@@ -159,3 +162,78 @@ class UsageScraper:
                 key.weekly_models = data.get("weekly_models", {})
                 results[key.label] = data
         return results
+
+
+class ActivityUsageRefresher:
+    """Debounce per-account usage scrapes after upstream activity."""
+
+    def __init__(
+        self,
+        scraper: UsageScraper,
+        *,
+        debounce_seconds: float = 30,
+        min_interval_seconds: float = 300,
+        on_update: Callable[[], Awaitable[None]] | None = None,
+    ):
+        self.scraper = scraper
+        self.debounce_seconds = debounce_seconds
+        self.min_interval_seconds = min_interval_seconds
+        self.on_update = on_update
+        self._last_scraped: dict[str, float] = {}
+        self._pending: dict[str, asyncio.Task] = {}
+
+    def mark_scraped(self, labels: list[str] | tuple[str, ...] | set[str]) -> None:
+        """Record externally completed scrapes, such as the startup refresh."""
+        now = time.monotonic()
+        for label in labels:
+            self._last_scraped[label] = now
+
+    def schedule(self, key: Any) -> None:
+        """Schedule one bounded refresh for an account that handled a request."""
+        label = key.label
+        if label not in self.scraper.cookie_map or label in self._pending:
+            return
+        self._pending[label] = asyncio.create_task(
+            self._refresh_after_delay(key),
+            name=f"llamaherd-usage-refresh:{label}",
+        )
+
+    async def _refresh_after_delay(self, key: Any) -> None:
+        label = key.label
+        try:
+            elapsed = time.monotonic() - self._last_scraped.get(label, 0)
+            delay = max(self.debounce_seconds, self.min_interval_seconds - elapsed)
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(None, self.scraper.scrape_usage, key)
+            self._last_scraped[label] = time.monotonic()
+            if not data:
+                return
+
+            key.session_usage_pct = data["session_usage_pct"]
+            key.session_resets_at = data["session_resets_at"]
+            key.weekly_usage_pct = data["weekly_usage_pct"]
+            key.weekly_resets_at = data["weekly_resets_at"]
+            key.session_models = data.get("session_models", {})
+            key.weekly_models = data.get("weekly_models", {})
+            log.info("Activity-triggered usage scrape updated: %s", label)
+            if self.on_update:
+                await self.on_update()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Activity-triggered usage scrape failed: %s", label)
+        finally:
+            if self._pending.get(label) is asyncio.current_task():
+                self._pending.pop(label, None)
+
+    async def close(self) -> None:
+        """Cancel and reap pending refreshes during application shutdown."""
+        tasks = list(self._pending.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._pending.clear()
