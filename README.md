@@ -1,8 +1,12 @@
-# 🦙 LlamaHerd
+<p align="center">
+  <img src="assets/llamaherd-routing-banner.png" alt="LlamaHerd — One endpoint. Many llamas. Smarter routing." width="100%">
+</p>
 
-**One endpoint. Many llamas. Smarter routing.**
+<h1 align="center">🦙 LlamaHerd</h1>
 
-LlamaHerd is an agent-first proxy for Ollama Cloud: multi-key routing, usage tracking, client API keys, rate limits, and a live dashboard. It pools your subscriptions behind one OpenAI-compatible and native Ollama-compatible endpoint.
+<p align="center"><strong>One endpoint. Many llamas. Smarter routing.</strong></p>
+
+<p align="center">Agent-first multi-key proxy for Ollama Cloud: load balancing, usage tracking, client API keys, rate limits, and a live dashboard.</p>
 
 ```text
 clients --> [ LlamaHerd ] --> { Sub 1 | Sub 2 | Sub N }

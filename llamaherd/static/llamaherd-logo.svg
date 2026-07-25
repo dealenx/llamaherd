@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- LlamaHerd logo: stylized llama head with routing nodes -->
+  <rect width="64" height="64" rx="14" fill="#0D1117"/>
+  <!-- Llama silhouette (simplified, cream) -->
+  <path d="M20 14c0-2 1-4 3-4s3 2 3 4v6c0 2 1 3 3 3h6c2 0 3-1 3-3v-6c0-2 1-4 3-4s3 2 3 4v8c0 4-2 7-5 9l-2 12c0 2-2 4-4 4h-6c-2 0-4-2-4-4l-2-12c-3-2-5-5-5-9v-8z" fill="#F2D6A2"/>
+  <!-- Routing nodes (cyan/green accents) -->
+  <circle cx="14" cy="40" r="3" fill="#58A6FF"/>
+  <circle cx="50" cy="40" r="3" fill="#3FB950"/>
+  <circle cx="32" cy="54" r="3" fill="#58A6FF"/>
+  <!-- Route lines -->
+  <path d="M14 40L26 34M50 40L38 34M32 54L32 44" stroke="#58A6FF" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+</svg>

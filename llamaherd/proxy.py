@@ -25,6 +25,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone, timedelta
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -3172,9 +3173,20 @@ def main():
     port = cfg.get("port", 8399)
     log.setLevel(logging.INFO)
 
+    # Startup banner (stderr so it doesn't interfere with piped JSON)
+    from . import __tagline__
+    _banner = r"""
+    __    __                      __  __              __
+   / /   / /___ _____ ___  ____ _/ / / /__  _________/ /
+  / /   / / __ `/ __ `__ \/ __ `/ /_/ / _ \/ ___/ __  /
+ / /___/ / /_/ / / / / / / /_/ / __  /  __/ /  / /_/ /
+/_____/_/\__,_/_/ /_/ /_/\__,_/_/ /_/\___/_/   \__,_/
+""".strip("\n")
+    print(f"\n{_banner}\n\n  {__tagline__}\n  http://{host}:{port}/dashboard\n", file=sys.stderr)
+
     config = Config(app, host=host, port=port, log_level="info")
     server = Server(config)
-    log.info(f"Starting LlamaHerd on {host}:{port} — One endpoint. Many llamas. Smarter routing.")
+    log.info(f"LlamaHerd listening on {host}:{port}")
     server.run()
 
 

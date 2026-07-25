@@ -386,8 +386,23 @@ def _models_table(data):
 # ---- Branding command ----
 
 def cmd_banner(args):
-    print(BANNER)
-    print(f"\n{__tagline__}")
+    """Print the LlamaHerd ASCII banner with optional color."""
+    # ANSI colors — only emit if stdout is a TTY
+    use_color = sys.stdout.isatty()
+    if use_color:
+        cream = "\033[38;2;242;214;162m"
+        cyan = "\033[38;2;88;166;255m"
+        dim = "\033[38;2;139;148;158m"
+        reset = "\033[0m"
+        for line in BANNER.split("\n"):
+            # Color the slash-forward strokes cyan, the rest cream
+            print(f"{cream}{line}{reset}")
+        print(f"\n  {cyan}{__tagline__}{reset}")
+        print(f"  {dim}https://github.com/bennybuoy/llamaherd{reset}")
+    else:
+        print(BANNER)
+        print(f"\n{__tagline__}")
+        print("https://github.com/bennybuoy/llamaherd")
 
 
 def cmd_telegram_test(args):
@@ -444,6 +459,16 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="llamaherd",
         description=f"LlamaHerd — {__tagline__}",
+        epilog=(
+            "  _    _                 _  _            _ \n"
+            " | |  | |__ _ _ __  __ _| || |___ _ _ __| |\n"
+            " | |__| / _` | '  \\/ _` | __ / -_) '_/ _` |\n"
+            " |____|\\__,_|_|_|_\\__,_|_||_\\___|_| \\__,_|\n"
+            "\n"
+            "  One endpoint. Many llamas. Smarter routing.\n"
+            "  https://github.com/bennybuoy/llamaherd\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"llamaherd {__version__}")
     parser.add_argument("--config", "-c", default="config.yaml", help="Config file path")
