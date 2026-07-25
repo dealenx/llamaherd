@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LlamaHerd — Ollama Cloud Router</title>
-<link rel="icon" type="image/svg+xml" href="/static/llamaherd-logo.svg">
+<link rel="icon" type="image/png" href="/static/llamaherd-logo.png">
 <style>
 :root {
   --bg: #0d1117; --surface: #161b22; --border: #30363d;
@@ -16,10 +16,23 @@
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
        background: var(--bg); color: var(--text); padding: 20px; font-size: 14px; }
 h1 { font-size: 22px; margin-bottom: 4px; }
-.dash-header { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
-.dash-logo { width: 44px; height: 44px; border-radius: 10px; flex-shrink: 0; }
-.dash-title h1 { margin-bottom: 2px; }
-.brandline { color: #f2d6a2; font-size: 13px; margin-bottom: 0; }
+.brand-hero { min-height: clamp(150px, 22vw, 240px); margin-bottom: 14px; border: 1px solid var(--border);
+  border-radius: 12px; overflow: hidden; position: relative; display: flex; align-items: flex-end;
+  background: #05090d url('/static/llamaherd-hero.png') center / cover no-repeat; }
+.brand-hero::after { content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, rgba(5,9,13,.92) 0%, rgba(5,9,13,.55) 36%, rgba(5,9,13,.08) 70%); }
+.dash-header { position: relative; z-index: 1; display: flex; align-items: center; gap: 16px; padding: 18px 20px; }
+.dash-logo { width: 84px; height: 84px; border-radius: 12px; flex-shrink: 0; image-rendering: pixelated;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.14), 0 8px 28px rgba(0,0,0,.45); }
+.dash-title h1 { margin-bottom: 3px; font-size: 28px; text-shadow: 0 2px 12px #000; }
+.brandline { color: #f2d6a2; font-size: 14px; margin-bottom: 0; text-shadow: 0 1px 8px #000; }
+@media (max-width: 640px) {
+  .brand-hero { min-height: 140px; background-position: 58% center; }
+  .dash-header { padding: 14px; gap: 12px; }
+  .dash-logo { width: 68px; height: 68px; }
+  .dash-title h1 { font-size: 23px; }
+  .brandline { font-size: 12px; }
+}
 .subtitle { color: var(--dim); font-size: 13px; margin-bottom: 20px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 24px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
@@ -193,13 +206,15 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 </style>
 </head>
 <body>
-<div class="dash-header">
-  <img src="/static/llamaherd-logo.svg" alt="LlamaHerd" class="dash-logo" onerror="this.style.display='none'">
-  <div class="dash-title">
-    <h1>LlamaHerd</h1>
-    <p class="brandline">One endpoint. Many llamas. Smarter routing.</p>
+<section class="brand-hero" aria-label="LlamaHerd routing overview">
+  <div class="dash-header">
+    <img src="/static/llamaherd-logo.png" alt="LlamaHerd pixel llama mascot" class="dash-logo">
+    <div class="dash-title">
+      <h1>LlamaHerd</h1>
+      <p class="brandline">One endpoint. Many llamas. Smarter routing.</p>
+    </div>
   </div>
-</div>
+</section>
 <p class="subtitle">
   <span id="upstream-url"></span>
   <span class="sse-dot" id="sse-dot"></span>
