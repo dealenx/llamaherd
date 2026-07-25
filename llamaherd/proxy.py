@@ -534,7 +534,7 @@ async def lifespan(app: FastAPI):
         min_interval_seconds=cfg.get("usage_activity_min_interval", 300),
         on_update=broadcast_usage_update,
     )
-    usage_refresher.mark_scraped(set(scrape_results))
+    usage_refresher.mark_scraped([key for key in manager.keys if key.label in scrape_results])
     # Telegram notifier (env-based, no UI)
     telegram_notifier = TelegramNotifier()
     telegram_task: Optional[asyncio.Task] = None
@@ -2946,6 +2946,8 @@ async def admin_delete_key(key_id: str):
     if not manager or not removed:
         raise HTTPException(status_code=404, detail="key not found")
     manager.keys.remove(removed)
+    if usage_refresher:
+        usage_refresher.cancel(removed)
     # Also clear cookies from the usage scraper so the deleted key stops
     # being scraped. Without this, an orphan entry sits in cookie_map
     # indefinitely and pollutes /admin/status output.

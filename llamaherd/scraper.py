@@ -3,6 +3,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
+from functools import partial
 from typing import Any
 
 
@@ -29,11 +30,12 @@ class UsageScraper:
                     "stripe_mid": cookies.get("stripe_mid", ""),
                 }
 
-    def scrape_usage(self, key: Any) -> dict | None:
+    def scrape_usage(self, key: Any, *, cookies: dict | None = None) -> dict | None:
         """Scrape usage data for a single key. Returns dict or None."""
-        if key.label not in self.cookie_map:
+        if cookies is None:
+            cookies = self.cookie_map.get(key.label)
+        if cookies is None:
             return None
-        cookies = self.cookie_map[key.label]
         if not cookies.get("secure_session"):
             return None
 
@@ -182,33 +184,42 @@ class ActivityUsageRefresher:
         self._last_scraped: dict[str, float] = {}
         self._pending: dict[str, asyncio.Task] = {}
 
-    def mark_scraped(self, labels: list[str] | tuple[str, ...] | set[str]) -> None:
+    def mark_scraped(self, keys: list[Any]) -> None:
         """Record externally completed scrapes, such as the startup refresh."""
         now = time.monotonic()
-        for label in labels:
-            self._last_scraped[label] = now
+        for key in keys:
+            self._last_scraped[key.token] = now
 
     def schedule(self, key: Any) -> None:
         """Schedule one bounded refresh for an account that handled a request."""
+        identity = key.token
         label = key.label
-        if label not in self.scraper.cookie_map or label in self._pending:
+        cookies = self.scraper.cookie_map.get(label)
+        if cookies is None or identity in self._pending:
             return
-        self._pending[label] = asyncio.create_task(
-            self._refresh_after_delay(key),
+        self._pending[identity] = asyncio.create_task(
+            self._refresh_after_delay(key, label, dict(cookies)),
             name=f"llamaherd-usage-refresh:{label}",
         )
 
-    async def _refresh_after_delay(self, key: Any) -> None:
-        label = key.label
+    def cancel(self, key: Any) -> None:
+        """Cancel a pending refresh when its account is removed."""
+        task = self._pending.pop(key.token, None)
+        if task is not None:
+            task.cancel()
+
+    async def _refresh_after_delay(self, key: Any, label: str, cookies: dict) -> None:
+        identity = key.token
         try:
-            elapsed = time.monotonic() - self._last_scraped.get(label, 0)
+            elapsed = time.monotonic() - self._last_scraped.get(identity, 0)
             delay = max(self.debounce_seconds, self.min_interval_seconds - elapsed)
             if delay > 0:
                 await asyncio.sleep(delay)
 
             loop = asyncio.get_running_loop()
-            data = await loop.run_in_executor(None, self.scraper.scrape_usage, key)
-            self._last_scraped[label] = time.monotonic()
+            scrape = partial(self.scraper.scrape_usage, key, cookies=cookies)
+            data = await loop.run_in_executor(None, scrape)
+            self._last_scraped[identity] = time.monotonic()
             if not data:
                 return
 
@@ -226,8 +237,8 @@ class ActivityUsageRefresher:
         except Exception:
             log.exception("Activity-triggered usage scrape failed: %s", label)
         finally:
-            if self._pending.get(label) is asyncio.current_task():
-                self._pending.pop(label, None)
+            if self._pending.get(identity) is asyncio.current_task():
+                self._pending.pop(identity, None)
 
     async def close(self) -> None:
         """Cancel and reap pending refreshes during application shutdown."""

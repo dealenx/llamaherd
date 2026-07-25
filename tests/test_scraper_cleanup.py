@@ -56,8 +56,8 @@ def test_scrape_usage_closes_cloudscraper_on_early_return(monkeypatch):
 @pytest.mark.asyncio
 async def test_activity_refresh_scrapes_only_active_account_once():
     keys = [
-        SimpleNamespace(label="sub-1"),
-        SimpleNamespace(label="sub-2"),
+        SimpleNamespace(label="sub-1", token="token-1"),
+        SimpleNamespace(label="sub-2", token="token-2"),
     ]
     calls = []
     updates = []
@@ -67,7 +67,7 @@ async def test_activity_refresh_scrapes_only_active_account_once():
         for key in keys
     ])
 
-    def scrape_usage(key):
+    def scrape_usage(key, *, cookies=None):
         calls.append(key.label)
         return {
             "session_usage_pct": 12.5,
@@ -104,10 +104,10 @@ async def test_activity_refresh_scrapes_only_active_account_once():
 @pytest.mark.asyncio
 async def test_activity_refresh_ignores_account_without_cookie():
     scraper = UsageScraper([])
-    scraper.scrape_usage = lambda key: pytest.fail("unexpected scrape")
+    scraper.scrape_usage = lambda key, **kwargs: pytest.fail("unexpected scrape")
     refresher = ActivityUsageRefresher(scraper, debounce_seconds=0, min_interval_seconds=0)
 
-    refresher.schedule(SimpleNamespace(label="sub-1"))
+    refresher.schedule(SimpleNamespace(label="sub-1", token="token-1"))
     await asyncio.sleep(0)
 
     assert refresher._pending == {}
@@ -118,9 +118,9 @@ async def test_activity_refresh_close_cancels_delayed_tasks():
     scraper = UsageScraper([
         {"label": "sub-1", "cookies": {"secure_session": "cookie"}},
     ])
-    scraper.scrape_usage = lambda key: pytest.fail("unexpected scrape")
+    scraper.scrape_usage = lambda key, **kwargs: pytest.fail("unexpected scrape")
     refresher = ActivityUsageRefresher(scraper, debounce_seconds=60, min_interval_seconds=0)
-    refresher.schedule(SimpleNamespace(label="sub-1"))
+    refresher.schedule(SimpleNamespace(label="sub-1", token="token-1"))
 
     await refresher.close()
 
@@ -150,3 +150,70 @@ async def test_completed_ollama_request_schedules_its_account_only(monkeypatch):
     await asyncio.sleep(0)
 
     assert scheduled == ["sub-1"]
+
+
+@pytest.mark.asyncio
+async def test_account_rename_keeps_identity_and_cooldown(monkeypatch):
+    key = SimpleNamespace(label="old-label", token="stable-token")
+    scraper = UsageScraper([
+        {"label": "old-label", "cookies": {"secure_session": "cookie"}},
+    ])
+    calls = []
+    delays = []
+
+    def scrape_usage(key, *, cookies=None):
+        assert cookies is not None
+        calls.append((key.token, cookies["secure_session"]))
+        return None
+
+    async def record_sleep(delay):
+        delays.append(delay)
+
+    scraper.scrape_usage = scrape_usage
+    refresher = ActivityUsageRefresher(scraper, debounce_seconds=0, min_interval_seconds=300)
+    refresher.mark_scraped([key])
+    key.label = "new-label"
+    scraper.cookie_map["new-label"] = scraper.cookie_map.pop("old-label")
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    refresher.schedule(key)
+    await asyncio.gather(*list(refresher._pending.values()))
+
+    assert len(delays) == 1
+    assert delays[0] > 299
+    assert calls == [("stable-token", "cookie")]
+    assert refresher._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_account_rename_does_not_strand_pending_task():
+    key = SimpleNamespace(label="old-label", token="stable-token")
+    scraper = UsageScraper([
+        {"label": "old-label", "cookies": {"secure_session": "cookie"}},
+    ])
+    scraper.scrape_usage = lambda key, **kwargs: None
+    refresher = ActivityUsageRefresher(scraper, debounce_seconds=0, min_interval_seconds=0)
+    refresher.schedule(key)
+    key.label = "new-label"
+    await asyncio.gather(*list(refresher._pending.values()))
+
+    assert refresher._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_deleted_account_refresh_is_cancelled_before_label_reuse():
+    old_key = SimpleNamespace(label="shared-label", token="old-token")
+    scraper = UsageScraper([
+        {"label": "shared-label", "cookies": {"secure_session": "old-cookie"}},
+    ])
+    calls = []
+    scraper.scrape_usage = lambda key, **kwargs: calls.append(key.token)
+    refresher = ActivityUsageRefresher(scraper, debounce_seconds=60, min_interval_seconds=0)
+    refresher.schedule(old_key)
+
+    refresher.cancel(old_key)
+    scraper.cookie_map["shared-label"] = {"secure_session": "new-cookie"}
+    await asyncio.gather(*list(refresher._pending.values()), return_exceptions=True)
+
+    assert calls == []
+    assert refresher._pending == {}
