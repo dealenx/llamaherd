@@ -77,7 +77,8 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   .header-controls { gap: 10px; padding: 8px 10px; }
   .header-stat { min-width: 58px; }
   #fallback-control { margin-left: 0 !important; width: 100%; flex-wrap: wrap; }
-  #fb-priority { max-width: 100%; flex: 1 1 180px; }
+  .fallback-priority { width: 100%; min-width: 0; flex: 0 0 100%; }
+  #fb-priority { min-width: 0; max-width: 100%; flex: 1; box-sizing: border-box; }
   .kpi-strip { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
 }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 24px; }
@@ -293,12 +294,14 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     <span class="badge" id="fb-provider-badge">fallback</span>
     <span style="font-size:11px; color:var(--dim)" id="fb-model-count">0 mapped / 0 discovered</span>
     <button type="button" class="fb-map-toggle" id="fb-map-toggle">show map</button>
-    <label style="font-size:11px; color:var(--dim)">Priority:</label>
-    <select id="fb-priority" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:12px">
-      <option value="after">after (Ollama first)</option>
-      <option value="before">before (Fallback first)</option>
-      <option value="only">only (Fallback only)</option>
-    </select>
+    <span class="fallback-priority" style="display:flex; align-items:center; gap:6px;">
+      <label for="fb-priority" style="font-size:11px; color:var(--dim)">Priority:</label>
+      <select id="fb-priority" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:12px">
+        <option value="after">after (Ollama first)</option>
+        <option value="before">before (Fallback first)</option>
+        <option value="only">only (Fallback only)</option>
+      </select>
+    </span>
   </span>
 </div>
 </header>
