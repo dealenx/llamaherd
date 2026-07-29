@@ -5725,6 +5725,17 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .catalog-row .cr-mapped .cr-alias { color: var(--text); font-family: monospace; }
 .catalog-row .cr-action { text-align: right; }
 .catalog-empty { color: var(--dim); font-size: 12px; padding: 8px 0; }
+.subdetail-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+.subdetail-controls label { font-size: 12px; color: var(--dim); }
+.subdetail-controls select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 13px; }
+.subdetail-email { font-family: monospace; font-size: 11px; color: var(--dim); }
+.subdetail-empty { color: var(--dim); font-size: 14px; padding: 40px 0; text-align: center; }
+#subdetail-chart { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+.subdetail-model-bar { display: inline-block; height: 10px; background: var(--accent); border-radius: 2px; min-width: 2px; vertical-align: middle; }
+.subdetail-status-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; margin-right: 6px; margin-bottom: 4px; }
+.subdetail-status-200 { background: rgba(46,160,67,0.2); color: var(--green); }
+.subdetail-status-429 { background: rgba(187,128,9,0.2); color: var(--yellow); }
+.subdetail-status-err { background: rgba(248,81,73,0.2); color: var(--red); }
 </style>
 </head>
 <body>
@@ -5784,6 +5795,7 @@ tr:hover td { background: rgba(88,166,255,0.04); }
   <div class="tab" data-tab="subs">Subscriptions</div>
   <div class="tab" data-tab="quota">Quota Cost</div>
   <div class="tab" data-tab="costs">OpenRouter $</div>
+  <div class="tab" data-tab="subdetail">Sub Detail</div>
 </div>
 
 <div class="tab-panel active" id="panel-overview">
@@ -5909,6 +5921,51 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     <th>Model</th><th>Req</th><th>Tokens In</th><th>Tokens Out</th><th>Input $</th><th>Output $</th><th>Total $</th><th>$/1M In</th><th>$/1M Out</th>
   </tr></thead><tbody></tbody></table></div>
   <div id="costs-unpriced" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
+</div>
+
+<div class="tab-panel" id="panel-subdetail">
+  <div class="subdetail-controls">
+    <label>Subscription:</label>
+    <select id="subdetail-select"><option value="">Select...</option></select>
+    <span id="subdetail-email" class="subdetail-email"></span>
+    <span id="subdetail-plan" class="badge"></span>
+    <label style="margin-left:16px">Period:</label>
+    <select id="subdetail-period">
+      <option value="today">Today</option>
+      <option value="yesterday">Yesterday</option>
+      <option value="7d" selected>Last 7 days</option>
+      <option value="this_week">This Week</option>
+      <option value="this_month">This Month</option>
+      <option value="last_month">Last Month</option>
+    </select>
+    <button class="btn btn-sm" id="subdetail-refresh">🔄 Refresh</button>
+  </div>
+  <div id="subdetail-empty" class="subdetail-empty">Select a subscription to view detailed usage.</div>
+  <div id="subdetail-content" style="display:none">
+    <div id="subdetail-cards" class="grid"></div>
+    <div class="section">
+      <h2>Cost by Day</h2>
+      <div style="overflow-x:auto"><canvas id="subdetail-chart" width="700" height="200"></canvas></div>
+    </div>
+    <div class="section">
+      <h2>Models Breakdown</h2>
+      <div style="overflow-x:auto"><table id="subdetail-models-table"><thead><tr>
+        <th>Model</th><th>Requests</th><th>Tokens In</th><th>Tokens Out</th><th>Tokens Total</th><th>Share</th><th>$ Total</th>
+      </tr></thead><tbody></tbody></table></div>
+    </div>
+    <div style="display:flex;gap:24px;flex-wrap:wrap">
+      <div class="section" style="flex:1;min-width:300px">
+        <h2>Clients</h2>
+        <div style="overflow-x:auto"><table id="subdetail-clients-table"><thead><tr>
+          <th>Client</th><th>Requests</th><th>Tokens</th>
+        </tr></thead><tbody></tbody></table></div>
+      </div>
+      <div class="section" style="flex:1;min-width:200px">
+        <h2>Status</h2>
+        <div id="subdetail-status"></div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <div id="modal-root"></div>
@@ -7149,6 +7206,194 @@ async function loadCosts() {
   } catch (e) { console.error('Failed to load costs:', e); }
 }
 document.getElementById('costs-refresh').addEventListener('click', loadCosts);
+
+// --- Sub Detail ---
+
+function getSubDetailRange() {
+  const p = document.getElementById('subdetail-period').value;
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const yesterday = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
+  if (p === 'today') return { start: today, end: today };
+  if (p === 'yesterday') return { start: yesterday, end: yesterday };
+  if (p === '7d') {
+    const d = new Date(now.getTime() - 6 * 86400000);
+    return { start: d.toISOString().slice(0, 10), end: today };
+  }
+  if (p === 'this_week') {
+    const dow = (now.getDay() + 6) % 7;
+    const monday = new Date(now.getTime() - dow * 86400000);
+    return { start: monday.toISOString().slice(0, 10), end: today };
+  }
+  if (p === 'this_month') return { start: today.slice(0, 8) + '01', end: today };
+  if (p === 'last_month') {
+    const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const lmEnd = new Date(now.getFullYear(), now.getMonth(), 0);
+    return { start: lm.toISOString().slice(0, 10), end: lmEnd.toISOString().slice(0, 10) };
+  }
+  return { start: today, end: today };
+}
+
+async function populateSubDetailSelect() {
+  const sel = document.getElementById('subdetail-select');
+  if (sel.options.length > 1) return;
+  try {
+    const keys = await loadJSON('/admin/keys');
+    sel.innerHTML = '<option value="">Select...</option>' + keys.map((k, i) =>
+      `<option value="${escAttr(k.token_prefix||'')}">${escHtml(k.label)} (${escHtml(k.plan||'?')})</option>`
+    ).join('');
+    sel._keysData = keys;
+  } catch(e) { console.error('populateSubDetailSelect', e); }
+}
+
+async function loadSubDetail() {
+  const prefix = document.getElementById('subdetail-select').value;
+  if (!prefix) {
+    document.getElementById('subdetail-empty').style.display = '';
+    document.getElementById('subdetail-content').style.display = 'none';
+    return;
+  }
+  document.getElementById('subdetail-empty').style.display = 'none';
+  document.getElementById('subdetail-content').style.display = '';
+  const range = getSubDetailRange();
+  const qs = `start_date=${range.start}&end_date=${range.end}`;
+  try {
+    const [detail, costs] = await Promise.all([
+      loadJSON(`/admin/usage/by-key/${encodeURIComponent(prefix)}?${qs}`),
+      loadJSON(`/admin/usage/by-key-costs?${qs}&key=${encodeURIComponent(prefix)}`),
+    ]);
+    // Email + plan
+    const sel = document.getElementById('subdetail-select');
+    const keyData = (sel._keysData || []).find(k => (k.token_prefix||'') === prefix);
+    document.getElementById('subdetail-email').textContent = keyData ? (keyData.account_email || '') : (detail.account_email || '');
+    document.getElementById('subdetail-plan').textContent = detail.plan || (keyData ? keyData.plan : '') || '?';
+
+    // Summary cards
+    const totals = detail.totals || {};
+    const keyCosts = (costs.keys || [])[0] || {};
+    document.getElementById('subdetail-cards').innerHTML = `
+      <div class="card"><div class="label">Requests</div><div class="value blue">${fmt(totals.requests||0)}</div></div>
+      <div class="card"><div class="label">Tokens In</div><div class="value green">${fmt(totals.tokens_in||0)}</div></div>
+      <div class="card"><div class="label">Tokens Out</div><div class="value purple">${fmt(totals.tokens_out||0)}</div></div>
+      <div class="card"><div class="label">Total Tokens</div><div class="value yellow">${fmt(totals.tokens_total||0)}</div></div>
+      <div class="card"><div class="label">Est. Cost</div><div class="value" style="color:var(--green)">$${(keyCosts.total_cost_usd||0).toFixed(2)}</div></div>`;
+
+    // Bar chart for daily $ cost
+    drawSubDetailChart(detail.daily || [], keyCosts.models || []);
+
+    // Models table with share bars
+    const costByModel = {};
+    (keyCosts.models || []).forEach(m => { costByModel[m.model] = m; });
+    const maxTok = Math.max(...(detail.models||[]).map(m => m.tokens_total||0), 1);
+    document.querySelector('#subdetail-models-table tbody').innerHTML = (detail.models||[]).map(m => {
+      const c = costByModel[m.model] || {};
+      const cost = c.total_cost_usd ? `$${c.total_cost_usd.toFixed(2)}` : '-';
+      const barW = Math.round((m.tokens_total / maxTok) * 100);
+      return `<tr><td style="font-family:monospace">${escHtml(m.model)}</td><td>${m.requests}</td>
+        <td>${fmt(m.tokens_in||0)}</td><td>${fmt(m.tokens_out||0)}</td><td>${fmt(m.tokens_total||0)}</td>
+        <td><span class="subdetail-model-bar" style="width:${barW}%"></span> ${((m.tokens_total/maxTok)*100).toFixed(0)}%</td>
+        <td style="color:var(--green);font-weight:600">${cost}</td></tr>`;
+    }).join('');
+
+    // Clients table
+    document.querySelector('#subdetail-clients-table tbody').innerHTML = (detail.clients||[]).map(c =>
+      `<tr><td style="font-family:monospace">${escHtml(c.client_id)}</td><td>${c.requests}</td><td>${fmt(c.tokens_total||0)}</td></tr>`
+    ).join('');
+
+    // Status badges
+    document.getElementById('subdetail-status').innerHTML = (detail.status_counts||[]).map(s => {
+      const cls = s.status === 200 ? 'subdetail-status-200' : s.status === 429 ? 'subdetail-status-429' : 'subdetail-status-err';
+      return `<span class="subdetail-status-badge ${cls}">${s.status}: ${s.count}</span>`;
+    }).join('');
+
+  } catch(e) { console.error('loadSubDetail', e); }
+}
+
+function drawSubDetailChart(daily, costModels) {
+  const canvas = document.getElementById('subdetail-chart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const cw = canvas.width = 700 * dpr;
+  const ch = canvas.height = 200 * dpr;
+  canvas.style.width = '700px';
+  canvas.style.height = '200px';
+  ctx.scale(dpr, dpr);
+  const w = 700, h = 200;
+  ctx.clearRect(0, 0, cw, ch);
+
+  if (!daily.length) {
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No daily data for this period', w/2, h/2);
+    return;
+  }
+
+  // Compute $ per day from cost models
+  const costByDay = {};
+  // We don't have per-day $ from the API, so we estimate from tokens ratio
+  // Use detail.daily tokens_total + total cost to derive proportional daily cost
+  const totalTokens = daily.reduce((s, d) => s + (d.tokens_total||0), 0) || 1;
+  const totalCost = (costModels.reduce((s, m) => s + (m.total_cost_usd||0), 0)) || 0;
+  const dailyData = daily.slice().reverse(); // chronological order
+  const barVals = dailyData.map(d => (d.tokens_total||0) / totalTokens * totalCost);
+  const maxVal = Math.max(...barVals, 0.01);
+
+  const pad = { l: 50, r: 16, t: 16, b: 40 };
+  const chartW = w - pad.l - pad.r;
+  const chartH = h - pad.t - pad.b;
+  const barGap = 6;
+  const barW = Math.max(8, (chartW / dailyData.length) - barGap);
+
+  // Y axis grid
+  ctx.strokeStyle = '#30363d';
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + (chartH / 4) * i;
+    const val = maxVal * (1 - i/4);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    ctx.fillText('$' + val.toFixed(2), pad.l - 4, y + 3);
+  }
+
+  // Bars
+  const colors = ['#58a6ff', '#3fb950', '#bc8cff', '#d29922', '#f0883e', '#22c55e'];
+  dailyData.forEach((d, i) => {
+    const x = pad.l + i * (barW + barGap) + barGap/2;
+    const barH = (barVals[i] / maxVal) * chartH;
+    const y = pad.t + chartH - barH;
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fillRect(x, y, barW, barH);
+    // Day label
+    ctx.fillStyle = '#8b949e';
+    ctx.textAlign = 'center';
+    ctx.font = '9px sans-serif';
+    const dayLabel = (d.day||'').slice(5); // MM-DD
+    ctx.fillText(dayLabel, x + barW/2, h - pad.b + 14);
+    // $ label on top
+    if (barVals[i] > 0) {
+      ctx.fillStyle = '#c9d1d9';
+      ctx.font = '9px sans-serif';
+      ctx.fillText('$' + barVals[i].toFixed(2), x + barW/2, y - 3);
+    }
+  });
+
+  // X axis label
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('Est. $ cost by day (proportional to tokens)', pad.l, h - 2);
+}
+
+document.getElementById('subdetail-select').addEventListener('change', loadSubDetail);
+document.getElementById('subdetail-period').addEventListener('change', loadSubDetail);
+document.getElementById('subdetail-refresh').addEventListener('click', loadSubDetail);
+// Load sub detail data when tab is clicked
+document.querySelectorAll('.tab').forEach(t => {
+  if (t.dataset.tab === 'subdetail') t.addEventListener('click', () => { populateSubDetailSelect(); });
+});
 </script>
 </body>
 </html>"""
