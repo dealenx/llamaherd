@@ -262,6 +262,57 @@ def cmd_usage(args):
     _format_output(data, args.format)
 
 
+# ---- Usage by key command ----
+
+def cmd_usage_by_key(args):
+    params = {}
+    if args.days:
+        params["days"] = args.days
+    if args.start_date:
+        params["start_date"] = args.start_date
+    if args.end_date:
+        params["end_date"] = args.end_date
+    if args.costs:
+        data = _api(args, "GET", "/admin/usage/by-key-costs", params=params)
+        _format_output(data, args.format, _usage_by_key_costs_table)
+    else:
+        data = _api(args, "GET", "/admin/usage/by-key", params=params)
+        _format_output(data, args.format, _usage_by_key_table)
+
+
+def _usage_by_key_table(data):
+    if not data:
+        print("No usage by key.")
+        return
+    print(f"{'Key':<12} {'Label':<25} {'Plan':<15} {'Requests':>8} {'Tok In':>12} {'Tok Out':>10} {'Tok Total':>12}")
+    print("-" * 100)
+    for k in data:
+        print(f"{k.get('upstream_key',''):<12} {k.get('label',''):<25} {k.get('plan',''):<15} "
+              f"{k.get('requests',0):>8} {k.get('tokens_in',0):>12,} {k.get('tokens_out',0):>10,} "
+              f"{k.get('tokens_total',0):>12,}")
+
+
+def _usage_by_key_costs_table(data):
+    keys = data.get("keys", [])
+    if not keys:
+        print("No usage data.")
+        return
+    print(f"{'Label':<25} {'Plan':<15} {'Requests':>8} {'Tok In':>12} {'Tok Out':>10} {'In $':>8} {'Out $':>8} {'Total $':>8}")
+    print("-" * 100)
+    for k in keys:
+        print(f"{k.get('label',''):<25} {k.get('plan',''):<15} {k.get('requests',0):>8} "
+              f"{k.get('tokens_in',0):>12,} {k.get('tokens_out',0):>10,} "
+              f"{k.get('total_input_cost_usd',0):>8.2f} {k.get('total_output_cost_usd',0):>8.2f} "
+              f"{k.get('total_cost_usd',0):>8.2f}")
+    print("-" * 100)
+    print(f"{'TOTAL':<25} {'':<15} {'':>8} {'':>12} {'':>10} "
+          f"{data.get('total_input_cost_usd',0):>8.2f} {data.get('total_output_cost_usd',0):>8.2f} "
+          f"{data.get('total_cost_usd',0):>8.2f}")
+    unpriced = data.get("unpriced_models", [])
+    if unpriced:
+        print(f"\nUnpriced models: {', '.join(unpriced)}")
+
+
 # ---- Costs command ----
 
 def cmd_costs(args):
@@ -498,6 +549,14 @@ def build_parser():
     usage.add_argument("--client", default=None, help="Filter by client ID")
     usage.add_argument("--model", default=None, help="Filter by model")
     usage.set_defaults(func=cmd_usage)
+
+    # --- usage-by-key ---
+    ubk = sub.add_parser("usage-by-key", help="Show usage totals per upstream key (subscription)")
+    ubk.add_argument("--days", type=int, default=None, help="Last N days")
+    ubk.add_argument("--start-date", default=None, help="Start date (YYYY-MM-DD)")
+    ubk.add_argument("--end-date", default=None, help="End date (YYYY-MM-DD)")
+    ubk.add_argument("--costs", action="store_true", help="Show OpenRouter $ costs per key")
+    ubk.set_defaults(func=cmd_usage_by_key)
 
     # --- costs ---
     costs = sub.add_parser("costs", help="Show OpenRouter equivalent costs")

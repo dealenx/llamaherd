@@ -2073,6 +2073,224 @@ class UsageDB:
             "avg_latency_ms": round(r[5] or 0, 1),
         } for r in rows]
 
+    def by_upstream_key(self, days: int = 30, start_date: str = None,
+                        end_date: str = None) -> list[dict]:
+        """Aggregate usage per upstream key (Ollama Cloud subscription).
+
+        Groups by upstream_key (first 8 chars of token), excluding 'none'
+        (error paths with no key assigned).
+        """
+        where, params = self._date_range_where(days, start_date, end_date)
+        rows = self._conn.execute(f"""
+            SELECT upstream_key,
+                   COUNT(*) as requests,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   SUM(tokens_in + tokens_out) as tokens_total
+            FROM usage WHERE {where} AND status != -1 AND upstream_key != 'none'
+            GROUP BY upstream_key ORDER BY tokens_total DESC
+        """, params).fetchall()
+        log.debug(f"by_upstream_key: {len(rows)} keys, range={start_date or f'{days}d'}-{end_date or 'now'}")
+        return [{
+            "upstream_key": r[0],
+            "requests": r[1],
+            "tokens_in": r[2] or 0,
+            "tokens_out": r[3] or 0,
+            "tokens_total": r[4] or 0,
+        } for r in rows]
+
+    def upstream_key_costs(self, pricing: dict, days: int = 30,
+                           start_date: str = None, end_date: str = None,
+                           key_labels: dict = None) -> dict:
+        """Calculate per-key OpenRouter equivalent costs.
+
+        Groups by upstream_key × model, then aggregates cost per key.
+        Accepts key_labels dict (upstream_key -> {label, plan}) for enrichment.
+        """
+        where, params = self._date_range_where(days, start_date, end_date)
+        rows = self._conn.execute(f"""
+            SELECT upstream_key, model,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   COUNT(*) as requests
+            FROM usage WHERE {where} AND status != -1 AND upstream_key != 'none'
+            GROUP BY upstream_key, model
+            ORDER BY upstream_key, SUM(tokens_in + tokens_out) DESC
+        """, params).fetchall()
+
+        key_labels = key_labels or {}
+        keys_map: dict[str, dict] = {}
+        total_cost = 0.0
+        total_input_cost = 0.0
+        total_output_cost = 0.0
+        unpriced = []
+
+        for r in rows:
+            upstream_key = r[0]
+            model_raw = r[1]
+            tokens_in = r[2] or 0
+            tokens_out = r[3] or 0
+            requests = r[4] or 0
+
+            lookup_key = model_raw.replace(":cloud", "").replace(":cloud-", "-")
+            p = pricing.get(lookup_key) or pricing.get(model_raw)
+
+            if p:
+                in_cost = tokens_in / 1_000_000 * p.get("input_per_1m", 0)
+                out_cost = tokens_out / 1_000_000 * p.get("output_per_1m", 0)
+                cost = in_cost + out_cost
+            else:
+                in_cost = 0.0
+                out_cost = 0.0
+                cost = 0.0
+                if model_raw not in unpriced:
+                    unpriced.append(model_raw)
+
+            total_cost += cost
+            total_input_cost += in_cost
+            total_output_cost += out_cost
+
+            key_entry = keys_map.setdefault(upstream_key, {
+                "upstream_key": upstream_key,
+                "label": key_labels.get(upstream_key, {}).get("label", upstream_key),
+                "plan": key_labels.get(upstream_key, {}).get("plan", ""),
+                "account_email": key_labels.get(upstream_key, {}).get("account_email", ""),
+                "requests": 0,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "total_cost_usd": 0.0,
+                "total_input_cost_usd": 0.0,
+                "total_output_cost_usd": 0.0,
+                "models": [],
+            })
+            key_entry["requests"] += requests
+            key_entry["tokens_in"] += tokens_in
+            key_entry["tokens_out"] += tokens_out
+            key_entry["total_cost_usd"] += cost
+            key_entry["total_input_cost_usd"] += in_cost
+            key_entry["total_output_cost_usd"] += out_cost
+            key_entry["models"].append({
+                "model": model_raw,
+                "openrouter_id": p.get("openrouter_id", "") if p else "",
+                "requests": requests,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "input_cost_usd": round(in_cost, 4),
+                "output_cost_usd": round(out_cost, 4),
+                "total_cost_usd": round(cost, 4),
+                "input_per_1m": p.get("input_per_1m") if p else None,
+                "output_per_1m": p.get("output_per_1m") if p else None,
+            })
+
+        keys_list = list(keys_map.values())
+        for k in keys_list:
+            k["total_cost_usd"] = round(k["total_cost_usd"], 2)
+            k["total_input_cost_usd"] = round(k["total_input_cost_usd"], 2)
+            k["total_output_cost_usd"] = round(k["total_output_cost_usd"], 2)
+        keys_list.sort(key=lambda x: -x["total_cost_usd"])
+
+        log.debug(f"upstream_key_costs: {len(keys_list)} keys, total=${total_cost:.2f}")
+        return {
+            "keys": keys_list,
+            "total_cost_usd": round(total_cost, 2),
+            "total_input_cost_usd": round(total_input_cost, 2),
+            "total_output_cost_usd": round(total_output_cost, 2),
+            "unpriced_models": unpriced,
+        }
+
+    def upstream_key_detail(self, key_prefix: str, days: int = 30,
+                            start_date: str = None, end_date: str = None) -> dict:
+        """Detailed breakdown for a single upstream key.
+
+        Returns per-model, per-client, per-day, and per-status breakdowns.
+        """
+        where, params = self._date_range_where(days, start_date, end_date)
+        params_with_key = params + [key_prefix]
+
+        model_rows = self._conn.execute(f"""
+            SELECT model,
+                   COUNT(*) as requests,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   SUM(tokens_in + tokens_out) as tokens_total,
+                   AVG(latency_ms) as avg_latency_ms
+            FROM usage WHERE {where} AND upstream_key = ? AND status != -1
+            GROUP BY model ORDER BY tokens_total DESC
+        """, params_with_key).fetchall()
+
+        client_rows = self._conn.execute(f"""
+            SELECT client_id,
+                   COUNT(*) as requests,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   SUM(tokens_in + tokens_out) as tokens_total
+            FROM usage WHERE {where} AND upstream_key = ? AND status != -1
+            GROUP BY client_id ORDER BY tokens_total DESC
+        """, params_with_key).fetchall()
+
+        daily_rows = self._conn.execute(f"""
+            SELECT day,
+                   COUNT(*) as requests,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   SUM(tokens_in + tokens_out) as tokens_total
+            FROM usage WHERE {where} AND upstream_key = ? AND status != -1
+            GROUP BY day ORDER BY day DESC
+        """, params_with_key).fetchall()
+
+        status_rows = self._conn.execute(f"""
+            SELECT status, COUNT(*) as count
+            FROM usage WHERE {where} AND upstream_key = ?
+            GROUP BY status
+        """, params_with_key).fetchall()
+
+        models = [{
+            "model": r[0],
+            "requests": r[1],
+            "tokens_in": r[2] or 0,
+            "tokens_out": r[3] or 0,
+            "tokens_total": r[4] or 0,
+            "avg_latency_ms": round(r[5] or 0, 1),
+        } for r in model_rows]
+
+        clients = [{
+            "client_id": r[0],
+            "requests": r[1],
+            "tokens_in": r[2] or 0,
+            "tokens_out": r[3] or 0,
+            "tokens_total": r[4] or 0,
+        } for r in client_rows]
+
+        daily = [{
+            "day": r[0],
+            "requests": r[1],
+            "tokens_in": r[2] or 0,
+            "tokens_out": r[3] or 0,
+            "tokens_total": r[4] or 0,
+        } for r in daily_rows]
+
+        status_counts = [{"status": r[0], "count": r[1]} for r in status_rows]
+
+        total_requests = sum(m["requests"] for m in models)
+        total_tokens_in = sum(m["tokens_in"] for m in models)
+        total_tokens_out = sum(m["tokens_out"] for m in models)
+
+        log.debug(f"upstream_key_detail: key={key_prefix}, {len(models)} models, "
+                  f"{len(clients)} clients, {len(daily)} days")
+        return {
+            "upstream_key": key_prefix,
+            "models": models,
+            "clients": clients,
+            "daily": daily,
+            "status_counts": status_counts,
+            "totals": {
+                "requests": total_requests,
+                "tokens_in": total_tokens_in,
+                "tokens_out": total_tokens_out,
+                "tokens_total": total_tokens_in + total_tokens_out,
+            },
+        }
+
     def quota_coefficients(self, manager_keys: list, days: int = 7) -> dict:
         """Derive implied Ollama quota cost per token for each model.
 
@@ -4310,6 +4528,53 @@ async def admin_usage_by_model(days: int = 30, start_date: str = None, end_date:
     return []
 
 
+@app.get("/admin/usage/by-key", dependencies=[Depends(_verify_admin)])
+async def admin_usage_by_key(days: int = 30, start_date: str = None, end_date: str = None):
+    if usage_db:
+        rows = usage_db.by_upstream_key(days, start_date=start_date, end_date=end_date)
+        if manager:
+            for r in rows:
+                key = manager.key_by_token_prefix(r["upstream_key"])
+                r["label"] = key.label if key else r["upstream_key"]
+                r["plan"] = key.plan if key else ""
+        return rows
+    return []
+
+
+@app.get("/admin/usage/by-key-costs", dependencies=[Depends(_verify_admin)])
+async def admin_usage_by_key_costs(days: int = 30, start_date: str = None,
+                                   end_date: str = None, key: str = None):
+    if usage_db:
+        pricing = _load_openrouter_pricing()
+        key_labels = {}
+        if manager:
+            for k in manager.keys:
+                key_labels[k.token[:8]] = {"label": k.label, "plan": k.plan, "account_email": k.account_email}
+        result = usage_db.upstream_key_costs(pricing, days, start_date=start_date,
+                                             end_date=end_date, key_labels=key_labels)
+        if key:
+            result["keys"] = [k for k in result["keys"] if k["upstream_key"] == key]
+        return result
+    return {"keys": [], "total_cost_usd": 0, "total_input_cost_usd": 0,
+            "total_output_cost_usd": 0, "unpriced_models": []}
+
+
+@app.get("/admin/usage/by-key/{key_prefix}", dependencies=[Depends(_verify_admin)])
+async def admin_usage_by_key_detail(key_prefix: str, days: int = 30,
+                                    start_date: str = None, end_date: str = None):
+    if usage_db:
+        detail = usage_db.upstream_key_detail(key_prefix, days,
+                                              start_date=start_date, end_date=end_date)
+        if manager:
+            key = manager.key_by_token_prefix(key_prefix)
+            detail["label"] = key.label if key else key_prefix
+            detail["plan"] = key.plan if key else ""
+            detail["account_email"] = key.account_email if key else ""
+        return detail
+    return {"upstream_key": key_prefix, "models": [], "clients": [], "daily": [],
+            "status_counts": [], "totals": {}}
+
+
 # --- OpenRouter cost tracking ---
 
 _OPENROUTER_PRICING: Optional[dict] = None
@@ -5389,6 +5654,30 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .inflight-details .ifd-headers { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--border); }
 .inflight-details .ifd-headers .ifd-k { font-size: 11px; }
 .inflight-details .ifd-headers .ifd-v { font-size: 11px; color: var(--dim); }
+.key-card { cursor: pointer; }
+.key-card .key-caret { color: var(--dim); transition: transform .2s ease; font-size: 10px; }
+.key-card.expanded .key-caret { transform: rotate(90deg); }
+.key-drilldown { max-height: 0; overflow: hidden; transition: max-height 0.3s ease-out; }
+.key-card.expanded .key-drilldown { max-height: 800px; overflow-y: auto; }
+.key-drilldown-inner { padding: 8px 0 0 0; border-top: 1px solid var(--border); margin-top: 8px; }
+.key-drilldown h4 { font-size: 11px; color: var(--dim); margin: 10px 0 4px 0; text-transform: uppercase; letter-spacing: 0.5px; }
+.key-drilldown table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.key-drilldown th { text-align: left; color: var(--dim); padding: 4px 6px; border-bottom: 1px solid var(--border); font-weight: 500; }
+.key-drilldown td { padding: 3px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); }
+.key-drilldown .kd-loading { color: var(--dim); font-size: 12px; padding: 8px 0; }
+.key-drilldown .kd-empty { color: var(--dim); font-size: 12px; padding: 8px 0; }
+.key-drilldown .kd-cost { color: var(--green); font-weight: 600; }
+.key-drilldown .kd-daily-bar { display: inline-block; height: 12px; background: var(--accent); border-radius: 2px; min-width: 2px; vertical-align: middle; }
+.key-drilldown .kd-status-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; margin-right: 4px; }
+.key-drilldown .kd-status-200 { background: rgba(46,160,67,0.2); color: var(--green); }
+.key-drilldown .kd-status-429 { background: rgba(187,128,9,0.2); color: var(--yellow); }
+.key-drilldown .kd-status-err { background: rgba(248,81,73,0.2); color: var(--red); }
+.per-key-summary { margin-top: 16px; }
+.per-key-summary table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.per-key-summary th { text-align: left; color: var(--dim); padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.per-key-summary td { padding: 5px 8px; border-bottom: 1px solid rgba(255,255,255,0.03); }
+.per-key-summary tr { cursor: pointer; }
+.per-key-summary tr:hover { background: rgba(255,255,255,0.03); }
 .provider-badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px; margin-left: 6px; vertical-align: middle; }
 .provider-badge.oc { background: #173a23; color: #6fdc8c; }
 .provider-badge.nv { background: #14274d; color: #76b6ff; }
@@ -5500,6 +5789,13 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 <div class="tab-panel active" id="panel-overview">
   <div id="key-status" class="key-status"></div>
   <div id="totals" class="grid"></div>
+
+  <div class="section per-key-summary">
+    <h2>Per-Key Usage <span class="badge" id="badge-perkey">this month</span></h2>
+    <div style="overflow-x:auto"><table id="perkey-table"><thead><tr>
+      <th>Key</th><th>Account</th><th>Plan</th><th>Requests</th><th>Tokens In</th><th>Tokens Out</th><th>$ Total</th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>
 
   <div class="section">
     <h2>Per-Client Totals <span class="badge" id="badge-client">this month</span></h2>
@@ -5666,7 +5962,7 @@ function getDateRange() {
     default: return {start:iso(new Date(today.getFullYear(),today.getMonth(),1)),end:iso(today),label:'This month'};
   }
 }
-function updateBadges(l) { document.getElementById('badge-client').textContent=l; document.getElementById('badge-model').textContent=l; document.getElementById('badge-daily').textContent=l; }
+function updateBadges(l) { document.getElementById('badge-client').textContent=l; document.getElementById('badge-model').textContent=l; document.getElementById('badge-daily').textContent=l; const pk=document.getElementById('badge-perkey'); if(pk) pk.textContent=l; }
 
 // --- Tabs ---
 document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', function() {
@@ -5732,6 +6028,8 @@ function providerBadge(p) {
   return `<span class="provider-badge nv" title="${p}">NV</span>`;
 }
 const expandedInFlight = new Set();  // request_ids that are currently expanded
+const expandedKeys = new Set();  // key token_prefixes that are currently expanded
+const keyDetailLoaded = new Set();  // key token_prefixes whose detail data has been fetched
 function escAttr(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
 function escHtml(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 function renderInFlightDetails(r) {
@@ -5938,8 +6236,11 @@ function renderKeyStatus(keys) {
     const topModels = Object.entries(sModels).sort((a,b)=>(b[1].requests||0)-(a[1].requests||0)).slice(0,3);
     const modelBreakdown = topModels.length ? '<div class="key-row" style="margin-top:6px"><span class="kdim">Top models</span></div>' +
       topModels.map(([mid, md]) => `<div class="key-row" style="font-size:11px"><span class="kdim" style="font-family:monospace">${escHtml(mid)}</span><span>${md.requests||0} req</span></div>`).join('') : '';
-    return `<div class="key-card">
-      <div class="key-header"><span class="key-label ${cls}">${k.label}</span><span class="key-plan">${k.plan||'?'}</span></div>
+    const tp = escAttr(k.token_prefix||'');
+    const expanded = expandedKeys.has(tp) ? ' expanded' : '';
+    return `<div class="key-card${expanded}" id="keycard-${tp}" onclick="toggleKeyDetails('${tp}')">
+      <div class="key-header"><span class="key-label ${cls}"><span class="key-caret">▶</span> ${escHtml(k.label)}</span><span class="key-plan">${escHtml(k.plan||'?')}</span></div>
+      ${k.account_email ? `<div class="key-row" style="font-size:11px"><span class="kdim">Account</span><span style="color:var(--dim);font-family:monospace">${escHtml(k.account_email)}</span></div>` : ''}
       <div class="key-row"><span class="kdim">Slots</span><span>${k.in_flight}/${k.max_concurrent}</span></div>${pctBar(slotPct,'var(--accent)')}
       <div class="key-row"><span class="kdim">Session</span><span>${sPct<0?'?':sPct.toFixed(1)}%${sEl>=0?' ('+sEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(sPct,sEl,'var(--yellow)')}
       <div class="key-row"><span class="kdim">Weekly</span><span>${wPct<0?'?':wPct.toFixed(1)}%${wEl>=0?' ('+wEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(wPct,wEl,'var(--purple)')}
@@ -5947,8 +6248,117 @@ function renderKeyStatus(keys) {
       <div class="key-row"><span class="kdim">Requests</span><span>${k.total_requests}</span></div>
       <div class="key-row"><span class="kdim">429s</span><span>${k.total_429s}</span></div>
       ${modelBreakdown}
+      <div class="key-drilldown" id="key-drilldown-${tp}"></div>
     </div>`;
   }).join('');
+  // Re-expand any keys that were previously expanded
+  expandedKeys.forEach(tp => {
+    const dd = document.getElementById('key-drilldown-' + tp);
+    if (dd && keyDetailLoaded.has(tp)) {
+      const card = document.getElementById('keycard-' + tp);
+      if (card) card.classList.add('expanded');
+      dd.style.maxHeight = '800px';
+    }
+  });
+}
+
+function toggleKeyDetails(tokenPrefix) {
+  const card = document.getElementById('keycard-' + tokenPrefix);
+  const dd = document.getElementById('key-drilldown-' + tokenPrefix);
+  if (!card || !dd) return;
+  if (expandedKeys.has(tokenPrefix)) {
+    expandedKeys.delete(tokenPrefix);
+    card.classList.remove('expanded');
+    dd.style.maxHeight = '0';
+  } else {
+    expandedKeys.add(tokenPrefix);
+    card.classList.add('expanded');
+    dd.style.maxHeight = '800px';
+    if (!keyDetailLoaded.has(tokenPrefix)) {
+      loadKeyDetail(tokenPrefix);
+    }
+  }
+}
+
+function scrollToKeyCard(tokenPrefix) {
+  const card = document.getElementById('keycard-' + tokenPrefix);
+  if (!card) return;
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (!expandedKeys.has(tokenPrefix)) {
+    toggleKeyDetails(tokenPrefix);
+  }
+}
+
+async function loadKeyDetail(tokenPrefix) {
+  const dd = document.getElementById('key-drilldown-' + tokenPrefix);
+  if (!dd) return;
+  dd.innerHTML = '<div class="key-drilldown-inner"><div class="kd-loading">Loading usage details…</div></div>';
+  try {
+    const range = getDateRange();
+    const qs = `start_date=${range.start}&end_date=${range.end}`;
+    const [detail, costs] = await Promise.all([
+      loadJSON(`/admin/usage/by-key/${encodeURIComponent(tokenPrefix)}?${qs}`),
+      loadJSON(`/admin/usage/by-key-costs?${qs}&key=${encodeURIComponent(tokenPrefix)}`),
+    ]);
+    keyDetailLoaded.add(tokenPrefix);
+    console.log('Loaded key detail for', tokenPrefix, detail);
+
+    // Build model breakdown table with costs
+    const keyCosts = (costs.keys||[]).find(k => k.upstream_key === tokenPrefix);
+    const costModels = keyCosts ? (keyCosts.models||[]) : [];
+    const costByModel = {};
+    costModels.forEach(m => { costByModel[m.model] = m; });
+
+    const modelRows = (detail.models||[]).map(m => {
+      const c = costByModel[m.model] || {};
+      const inPrice = c.input_per_1m != null ? '$'+c.input_per_1m.toFixed(2) : '?';
+      const outPrice = c.output_per_1m != null ? '$'+c.output_per_1m.toFixed(2) : '?';
+      const totalCost = c.total_cost_usd ? `<span class="kd-cost">$${c.total_cost_usd.toFixed(2)}</span>` : '-';
+      return `<tr><td style="font-family:monospace">${escHtml(m.model)}</td><td>${m.requests}</td><td>${(m.tokens_in||0).toLocaleString()}</td><td>${(m.tokens_out||0).toLocaleString()}</td><td>${totalCost}</td><td style="color:var(--dim)">${inPrice}</td><td style="color:var(--dim)">${outPrice}</td></tr>`;
+    }).join('');
+
+    const clientRows = (detail.clients||[]).map(c =>
+      `<tr><td style="font-family:monospace">${escHtml(c.client_id)}</td><td>${c.requests}</td><td>${(c.tokens_in||0).toLocaleString()}</td><td>${(c.tokens_out||0).toLocaleString()}</td><td>${(c.tokens_total||0).toLocaleString()}</td></tr>`
+    ).join('');
+
+    // Daily mini bars
+    const dailyMax = Math.max(...(detail.daily||[]).map(d => d.tokens_total||0), 1);
+    const dailyRows = (detail.daily||[]).map(d => {
+      const barW = Math.round((d.tokens_total/dailyMax)*100);
+      return `<tr><td>${escHtml(d.day)}</td><td>${d.requests}</td><td>${(d.tokens_total||0).toLocaleString()}</td><td><span class="kd-daily-bar" style="width:${barW}%"></span></td></tr>`;
+    }).join('');
+
+    // Status badges
+    const statusBadges = (detail.status_counts||[]).map(s => {
+      const cls = s.status === 200 ? 'kd-status-200' : s.status === 429 ? 'kd-status-429' : 'kd-status-err';
+      return `<span class="kd-status-badge ${cls}">${s.status}: ${s.count}</span>`;
+    }).join('');
+
+    const totals = detail.totals || {};
+    const totalCost = keyCosts ? `<span class="kd-cost">$${keyCosts.total_cost_usd?.toFixed(2) || '0.00'}</span>` : '';
+
+    dd.innerHTML = `<div class="key-drilldown-inner">
+      <h4>Overview</h4>
+      <div style="font-size:12px;display:flex;gap:16px;flex-wrap:wrap">
+        ${detail.account_email ? `<span><span style="color:var(--dim)">Account:</span> <span style="font-family:monospace">${escHtml(detail.account_email)}</span></span>` : ''}
+        <span><span style="color:var(--dim)">Plan:</span> ${escHtml(detail.plan||'?')}</span>
+        <span><span style="color:var(--dim)">Requests:</span> ${totals.requests||0}</span>
+        <span><span style="color:var(--dim)">Tokens in:</span> ${(totals.tokens_in||0).toLocaleString()}</span>
+        <span><span style="color:var(--dim)">Tokens out:</span> ${(totals.tokens_out||0).toLocaleString()}</span>
+        <span><span style="color:var(--dim)">Est. cost:</span> ${totalCost}</span>
+      </div>
+      ${statusBadges ? `<div style="margin-top:6px">${statusBadges}</div>` : ''}
+      <h4>Models</h4>
+      ${modelRows ? `<table><thead><tr><th>Model</th><th>Req</th><th>Tok In</th><th>Tok Out</th><th>$ Total</th><th>$/1M in</th><th>$/1M out</th></tr></thead><tbody>${modelRows}</tbody></table>` : '<div class="kd-empty">No model usage in this period.</div>'}
+      <h4>Clients</h4>
+      ${clientRows ? `<table><thead><tr><th>Client</th><th>Req</th><th>Tok In</th><th>Tok Out</th><th>Tok Total</th></tr></thead><tbody>${clientRows}</tbody></table>` : '<div class="kd-empty">No client usage in this period.</div>'}
+      <h4>Daily</h4>
+      ${dailyRows ? `<table><thead><tr><th>Day</th><th>Req</th><th>Tokens</th><th></th></tr></thead><tbody>${dailyRows}</tbody></table>` : '<div class="kd-empty">No daily data in this period.</div>'}
+    </div>`;
+  } catch(e) {
+    dd.innerHTML = `<div class="key-drilldown-inner"><div class="kd-loading" style="color:var(--red)">Error loading details: ${escHtml(e.message)}</div></div>`;
+    console.error('Key detail load error', e);
+  }
 }
 
 // --- Test Model (inline "2+2" prompt) ---
@@ -6511,9 +6921,10 @@ async function fetchPeriodData(opts) {
     loadJSON(`/admin/usage/by-client?start_date=${range.start}&end_date=${range.end}`),
     loadJSON(`/admin/usage/by-model?start_date=${range.start}&end_date=${range.end}`),
     loadJSON(`/admin/usage/daily?start_date=${range.start}&end_date=${range.end}`),
+    loadJSON(`/admin/usage/by-key-costs?start_date=${range.start}&end_date=${range.end}`),
   ];
   if(!opts.preserveFeed) fetches.push(fetchRecentCalls());
-  const [totals,clients,models,daily,calls]=await Promise.all(fetches);
+  const [totals,clients,models,daily,keyCosts,calls]=await Promise.all(fetches);
   const t=totals||{};
   document.getElementById('totals').innerHTML=`
     <div class="card"><div class="label">Total Calls</div><div class="value blue">${fmt(t.total_calls||0)}</div></div>
@@ -6524,6 +6935,13 @@ async function fetchPeriodData(opts) {
   document.querySelector('#client-table tbody').innerHTML=(clients||[]).map(c=>{const inW=Math.round((c.tokens_in/maxTok)*80),outW=Math.round((c.tokens_out/maxTok)*80); return `<tr><td>${c.client_id}</td><td>${fmt(c.requests)}</td><td>${fmt(c.tokens_in)}</td><td>${fmt(c.tokens_out)}</td><td>${fmt(c.tokens_total)}</td><td><div class="bars"><div class="bar in" style="width:${inW}px"></div><div class="bar out" style="width:${outW}px"></div></div></td></tr>`;}).join('');
   document.querySelector('#model-table tbody').innerHTML=(models||[]).map(m=>`<tr><td>${m.model}</td><td>${fmt(m.requests)}</td><td>${fmt(m.tokens_in)}</td><td>${fmt(m.tokens_out)}</td><td>${fmt(m.tokens_total)}</td><td>${Math.round(m.avg_latency_ms||0)}ms</td></tr>`).join('');
   document.querySelector('#daily-table tbody').innerHTML=(daily||[]).map(d=>`<tr><td>${d.day}</td><td>${fmt(d.requests)}</td><td>${fmt(d.tokens_in)}</td><td>${fmt(d.tokens_out)}</td><td>${fmt(d.tokens_total)}</td></tr>`).join('');
+  // Per-key usage summary
+  const pkKeys = (keyCosts||{}).keys||[];
+  pkKeys.sort((a,b)=>(b.total_cost_usd||0)-(a.total_cost_usd||0));
+  document.querySelector('#perkey-table tbody').innerHTML=pkKeys.map(k=>{
+    const tp=escAttr(k.upstream_key||'');
+    return `<tr onclick="scrollToKeyCard('${tp}')"><td style="font-weight:600">${escHtml(k.label||k.upstream_key)}</td><td style="font-family:monospace;font-size:11px;color:var(--dim)">${escHtml(k.account_email||'')}</td><td>${escHtml(k.plan||'')}</td><td>${fmt(k.requests||0)}</td><td>${fmt(k.tokens_in||0)}</td><td>${fmt(k.tokens_out||0)}</td><td style="color:var(--green);font-weight:600">$${(k.total_cost_usd||0).toFixed(2)}</td></tr>`;
+  }).join('');
   if(!opts.preserveFeed) { feedCalls=calls||[]; renderFeed(feedCalls); }
   populateFilters(null,models);
 }

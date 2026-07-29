@@ -54,7 +54,7 @@ def test_dashboard_script_has_no_five_second_polling_and_valid_syntax(tmp_path):
     end = html.index("</script>", start)
     script = html[start:end]
     script_path = tmp_path / "dashboard.js"
-    script_path.write_text(script)
+    script_path.write_text(script, encoding="utf-8")
 
     result = subprocess.run([node, "--check", str(script_path)], text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
