@@ -1161,7 +1161,7 @@ class KeyManager:
         now = time.time()
         return [{
             "label": k.label,
-            "token_prefix": k.token[:8] + "...",
+            "token_prefix": k.token[:8],
             "in_flight": k.in_flight,
             "available_slots": k.available_slots,
             "max_concurrent": k.max_concurrent,
@@ -5270,7 +5270,7 @@ async def admin_list_keys():
             has_cookies = k.label in usage_scraper.cookie_map and bool(usage_scraper.cookie_map[k.label].get('secure_session'))
         result.append({
             "label": k.label,
-            "token_prefix": k.token[:8] + "...",
+            "token_prefix": k.token[:8],
             "max_concurrent": k.max_concurrent,
             "cycle_day": k.cycle_day,
             "plan": k.plan,
@@ -6724,7 +6724,7 @@ async function loadSubsPanel() {
           <button class="btn btn-sm btn-danger" onclick="deleteKey(${i},'${k.label}')">Remove</button>
         </div>
       </div>
-      <div class="km-row"><span>Token</span><span>${k.token_prefix}</span></div>
+      <div class="km-row"><span>Token</span><span>${k.token_prefix}...</span></div>
       <div class="km-row"><span>Plan</span><span>${k.plan||'?'}</span></div>
       <div class="km-row"><span>Max Concurrent</span><span>${k.max_concurrent}</span></div>
       <div class="km-row"><span>Cycle Day</span><span>${k.cycle_day}</span></div>
@@ -7414,7 +7414,7 @@ async def admin_quota_cost():
     for key in manager.keys:
         result_keys.append({
             "label": key.label,
-            "token_prefix": key.token[:8] + "...",
+            "token_prefix": key.token[:8],
             "session_usage_pct": key.session_usage_pct,
             "session_resets_at": key.session_resets_at,
             "weekly_usage_pct": key.weekly_usage_pct,
