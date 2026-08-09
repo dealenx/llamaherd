@@ -133,10 +133,15 @@ const keys = [
   {label:'m-sub', exhausted:false, suspended:false, max_concurrent:15, in_flight:0, session_usage_pct:10, weekly_usage_pct:10, period_remaining_pct:50},
 ];
 const orderBusy = sortAccountsStable(keys).map(k => k.label);
+// Capacity boundary: z at max_concurrent would be "At capacity" attention —
+// order must still be pure label, not attention-grouped.
+keys[0].in_flight = 15;
+keys[2].in_flight = 0;
+const orderAtCap = sortAccountsStable(keys).map(k => k.label);
 keys[0].in_flight = 0;
 keys[2].in_flight = 7;
 const orderIdle = sortAccountsStable(keys).map(k => k.label);
-console.log(JSON.stringify({cases, orderBusy, orderIdle}));
+console.log(JSON.stringify({cases, orderBusy, orderAtCap, orderIdle}));
 """
     result = subprocess.run([node, "-e", account_probe], text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
@@ -150,11 +155,11 @@ console.log(JSON.stringify({cases, orderBusy, orderIdle}));
     }
     assert all(health[name]["attention"] for name in ("capacity", "billing", "unknown"))
     assert not health["healthy"]["attention"]
-    # Attention first, then stable label order — unaffected by in_flight churn
-    # among healthy accounts.
+    # Pure static label order — unaffected by exhausted/capacity/in_flight churn.
     assert payload["orderBusy"] == ["a-sub", "m-sub", "z-sub"]
+    assert payload["orderAtCap"] == ["a-sub", "m-sub", "z-sub"]
     assert payload["orderIdle"] == ["a-sub", "m-sub", "z-sub"]
-    assert payload["orderBusy"] == payload["orderIdle"]
+    assert payload["orderBusy"] == payload["orderIdle"] == payload["orderAtCap"]
 
     fmt_source = script[script.index("function fmt(n)"):script.index("\nfunction fmtTs(")]
     latency_source = script[script.index("function fmtLatency("):script.index("\n\nfunction pctBarWithElapsed(")]

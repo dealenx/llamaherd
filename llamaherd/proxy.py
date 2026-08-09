@@ -1072,11 +1072,12 @@ async def _proxy_request(request: Request, path: str) -> Response:
 
     last_error = None
     start_emitted = False
+    skip_keys: set[str] = set()
     for attempt in range(max_retries + 1):
         key = None
         deadline = time.time() + queue_timeout
         while time.time() < deadline:
-            key = await manager.acquire(prefer_key=prefer_key, sticky_key=sticky_key)
+            key = await manager.acquire(prefer_key=prefer_key, sticky_key=sticky_key, exclude_keys=skip_keys)
             if key:
                 break
             await asyncio.sleep(0.5)
@@ -1146,6 +1147,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
                 _record_and_broadcast(client_id, key.token, model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
+                skip_keys.add(key.token)
                 continue
 
             if resp.status_code == 402:
@@ -1157,6 +1159,9 @@ async def _proxy_request(request: Request, path: str) -> Response:
                 _record_and_broadcast(client_id, key.token, model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
+                # Keep key globally available (402 is model-scoped) but do not
+                # re-select it for the rest of THIS request's retries.
+                skip_keys.add(key.token)
                 continue
 
             resp_data = resp.json() if resp.status_code == 200 else {}
@@ -1193,6 +1198,7 @@ async def _proxy_request(request: Request, path: str) -> Response:
             log.error(f"Proxy error for {model} (client={client_id}): {e}")
             prefer_key = None
             sticky_key = None
+            skip_keys.add(key.token)
             continue
 
     # Ollama exhausted retries — try fallback as a last resort.
@@ -1595,11 +1601,12 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
 
     last_error = None
     start_emitted = False
+    skip_keys: set[str] = set()
     for attempt in range(max_retries + 1):
         key = None
         deadline = time.time() + queue_timeout
         while time.time() < deadline:
-            key = await manager.acquire(prefer_key=prefer_key, sticky_key=sticky_key)
+            key = await manager.acquire(prefer_key=prefer_key, sticky_key=sticky_key, exclude_keys=skip_keys)
             if key:
                 break
             await asyncio.sleep(0.5)
@@ -1655,6 +1662,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
                 _record_and_broadcast(client_id, key.token, model, 0, 0, elapsed_ms, 429, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
+                skip_keys.add(key.token)
                 continue
 
             if resp.status_code == 402:
@@ -1666,6 +1674,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
                 _record_and_broadcast(client_id, key.token, model, 0, 0, elapsed_ms, 402, request_id=request_id, provider="ollama-cloud", session_id=session_id)
                 prefer_key = None
                 sticky_key = None
+                skip_keys.add(key.token)
                 continue
 
             # Extract usage from non-streaming response
@@ -1702,6 +1711,7 @@ async def _proxy_ndjson_request(request: Request, path: str) -> Response:
             log.error(f"Native proxy error for {model} (client={client_id}): {e}")
             prefer_key = None
             sticky_key = None
+            skip_keys.add(key.token)
             continue
 
     _record_and_broadcast(client_id, "none", model, 0, 0, 0, 502,
@@ -1938,11 +1948,12 @@ async def api_show(request: Request):
     prefer_key = registry.get_preferred_key(resolved_model) if registry else None
 
     last_error = None
+    skip_keys: set[str] = set()
     for attempt in range(max_retries + 1):
         key = None
         deadline = time.time() + queue_timeout
         while time.time() < deadline:
-            key = await manager.acquire(prefer_key=prefer_key)
+            key = await manager.acquire(prefer_key=prefer_key, exclude_keys=skip_keys)
             if key:
                 break
             await asyncio.sleep(0.5)
@@ -1971,6 +1982,7 @@ async def api_show(request: Request):
                 await manager.release(key)
                 log.warning(f"429 from {key.label} for /api/show model={model}")
                 prefer_key = None
+                skip_keys.add(key.token)
                 continue
 
             if resp.status_code == 402:
@@ -1978,6 +1990,7 @@ async def api_show(request: Request):
                 await manager.release(key)
                 log.warning(f"402 from {key.label} for /api/show model={model}")
                 prefer_key = None
+                skip_keys.add(key.token)
                 continue
 
             await manager.release(key)
@@ -2040,6 +2053,7 @@ async def api_show(request: Request):
             await manager.release(key)
             last_error = str(e)
             log.error(f"Native /api/show error for {model}: {e}")
+            skip_keys.add(key.token)
             continue
 
     return JSONResponse(

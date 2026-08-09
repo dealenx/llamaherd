@@ -799,17 +799,11 @@ function accountHealth(k) {
   return {label:'Healthy', cls:'status-ok', attention:false};
 }
 
-// Stable order only. Never sort by in_flight/usage — those change every
-// SSE tick and made the account-health rail jump around while reading.
-// Group: needs attention first, then healthy; within each group: label.
+// Pure static order by label. Health badges still update live; never let
+// in_flight / "at capacity" / quota flip the rail position on SSE ticks.
 function sortAccountsStable(keys) {
   const labelOf = k => String(k.label || k.account_email || k.token_prefix || '');
-  return [...(keys || [])].sort((a, b) => {
-    const aAtt = accountHealth(a).attention ? 0 : 1;
-    const bAtt = accountHealth(b).attention ? 0 : 1;
-    if (aAtt !== bAtt) return aAtt - bAtt;
-    return labelOf(a).localeCompare(labelOf(b));
-  });
+  return [...(keys || [])].sort((a, b) => labelOf(a).localeCompare(labelOf(b)));
 }
 
 function renderKeyStatus(keys) {

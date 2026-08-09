@@ -361,10 +361,22 @@ class KeyManager:
         # Temporary alternate onto a worse-weekly key: keep original sticky
         return not self._weekly_pct(new_key) > self._weekly_pct(prev) + self.STICKY_REBIND_WEEKLY_MARGIN
 
-    async def acquire(self, prefer_key: str | None = None, sticky_key: str | None = None) -> KeyState | None:
+    async def acquire(
+        self,
+        prefer_key: str | None = None,
+        sticky_key: str | None = None,
+        exclude_keys: set[str] | frozenset[str] | None = None,
+    ) -> KeyState | None:
+        """Pick a key with free capacity.
+
+        exclude_keys: tokens to skip for *this request only* (e.g. a key that
+        just returned 402 for the requested model). They stay globally healthy
+        so other models/requests can still use them.
+        """
+        excluded = exclude_keys or frozenset()
         async with self._lock:
             # Sticky key takes precedence for cache affinity (even if higher load)
-            if sticky_key:
+            if sticky_key and sticky_key not in excluded:
                 for k in self.keys:
                     if k.token == sticky_key and not k.suspended and k.available_slots > 0:
                         k.in_flight += 1
@@ -373,13 +385,16 @@ class KeyManager:
                 # Caller must use should_rebind_sticky() so temporary spills do not
                 # permanently re-pin onto an over-weekly sub.
 
-            if prefer_key:
+            if prefer_key and prefer_key not in excluded:
                 for k in self.keys:
                     if k.token == prefer_key and not k.suspended and k.available_slots > 0:
                         k.in_flight += 1
                         return k
 
-            candidates = [k for k in self.keys if not k.suspended and k.available_slots > 0]
+            candidates = [
+                k for k in self.keys
+                if not k.suspended and k.available_slots > 0 and k.token not in excluded
+            ]
             if not candidates:
                 return None
 
