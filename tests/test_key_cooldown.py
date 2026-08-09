@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from llamaherd.key_manager import KeyState
 from llamaherd.proxy import KeyManager
 
 
@@ -22,7 +23,8 @@ async def test_429_cooldown_is_short_transient_backoff():
 
 
 @pytest.mark.asyncio
-async def test_402_cooldown_remains_long_quota_exhaustion():
+async def test_402_does_not_cool_down_key():
+    """402 is model/plan entitlement (extra-credit models), not key death."""
     manager = KeyManager([
         {"token": "tok-1", "label": "key 1", "max_concurrent": 1},
     ])
@@ -30,6 +32,20 @@ async def test_402_cooldown_remains_long_quota_exhaustion():
 
     await manager.mark_402(key)
 
-    assert key.exhausted is True
+    assert key.exhausted is False
+    assert key.exhausted_until == 0.0
+    assert key.total_402s == 1
+    assert key.available_slots == 1
+    # A second 402 still must not park the key.
+    await manager.mark_402(key)
+    assert key.exhausted is False
+    assert key.total_402s == 2
+
+
+def test_mark_exhausted_caps_at_five_minutes():
+    """Nothing may park a key for hours/days — clamp absurd cooldowns."""
+    key = KeyState(token="tok-1", label="key 1", max_concurrent=1)
+    key.mark_exhausted(86400)
     remaining = key.exhausted_until - time.time()
-    assert remaining > 23 * 3600
+    assert 0 < remaining <= KeyState.MAX_COOLDOWN_SECONDS + 1
+    assert key.exhausted is True

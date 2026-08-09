@@ -20,7 +20,9 @@ class KeyState:
     total_requests: int = 0
     total_tokens: int = 0
     total_429s: int = 0
+    total_402s: int = 0
     last_429: float = 0.0
+    last_402: float = 0.0
     exhausted: bool = False
     exhausted_until: float = 0.0
     # Populated by /api/me subscription poll
@@ -46,7 +48,12 @@ class KeyState:
             self.exhausted = False
         return max(0, self.max_concurrent - self.in_flight)
 
-    def mark_exhausted(self, seconds: int = 3600):
+    # Hard ceiling on any key cooldown. Nothing — not 402, not a future caller —
+    # may park a healthy key for hours/days. Transient upstream backoff only.
+    MAX_COOLDOWN_SECONDS = 300
+
+    def mark_exhausted(self, seconds: int = 60):
+        seconds = max(0, min(int(seconds), self.MAX_COOLDOWN_SECONDS))
         self.exhausted = True
         self.exhausted_until = time.time() + seconds
         self.last_429 = time.time()
@@ -396,7 +403,13 @@ class KeyManager:
 
     async def mark_402(self, key: KeyState):
         async with self._lock:
-            key.mark_exhausted(86400)
+            # 402 is model/plan entitlement (e.g. extra-credit models like
+            # kimi-k3), NOT whole-key quota death. A previous 24h cooldown
+            # parked every healthy key after a single kimi-k3 402 and took
+            # glm/gemma offline for the day. Retry other keys for this
+            # request, but never cool the key down.
+            key.total_402s += 1
+            key.last_402 = time.time()
 
     def status(self) -> list[dict]:
         return [{
@@ -408,6 +421,7 @@ class KeyManager:
             "total_requests": k.total_requests,
             "total_tokens": k.total_tokens,
             "total_429s": k.total_429s,
+            "total_402s": k.total_402s,
             "exhausted": k.exhausted,
             "cycle_freshness": round(k.cycle_freshness, 4),
             "period_remaining_pct": round(k.period_remaining_pct, 1),
