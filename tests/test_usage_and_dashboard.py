@@ -100,7 +100,8 @@ def test_dashboard_script_has_no_five_second_polling_and_valid_syntax(tmp_path):
     assert "last_month" in html
     assert "function renderKpis(" in html
     assert "function accountHealth(" in html
-    assert "function sortAccountsByUrgency(" in html
+    assert "function sortAccountsStable(" in html
+    assert "sortAccountsByUrgency" not in html
     assert "account-health-summary" in html
     assert 'id="totals"' in html
     assert "recorded-call error rate" in html
@@ -126,11 +127,21 @@ const cases = {
   unknown: accountHealth({in_flight:0,max_concurrent:10,period_remaining_pct:50,session_usage_pct:null,weekly_usage_pct:null}),
   healthy: accountHealth({in_flight:0,max_concurrent:10,period_remaining_pct:50,session_usage_pct:10,weekly_usage_pct:10})
 };
-console.log(JSON.stringify(cases));
+const keys = [
+  {label:'z-sub', exhausted:false, suspended:false, max_concurrent:15, in_flight:14, session_usage_pct:10, weekly_usage_pct:10, period_remaining_pct:50},
+  {label:'a-sub', exhausted:true, suspended:false, max_concurrent:15, in_flight:0, session_usage_pct:10, weekly_usage_pct:10, period_remaining_pct:50},
+  {label:'m-sub', exhausted:false, suspended:false, max_concurrent:15, in_flight:0, session_usage_pct:10, weekly_usage_pct:10, period_remaining_pct:50},
+];
+const orderBusy = sortAccountsStable(keys).map(k => k.label);
+keys[0].in_flight = 0;
+keys[2].in_flight = 7;
+const orderIdle = sortAccountsStable(keys).map(k => k.label);
+console.log(JSON.stringify({cases, orderBusy, orderIdle}));
 """
     result = subprocess.run([node, "-e", account_probe], text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr
-    health = json.loads(result.stdout)
+    payload = json.loads(result.stdout)
+    health = payload["cases"]
     assert {name: value["label"] for name, value in health.items()} == {
         "capacity": "At capacity",
         "billing": "Low billing",
@@ -139,6 +150,11 @@ console.log(JSON.stringify(cases));
     }
     assert all(health[name]["attention"] for name in ("capacity", "billing", "unknown"))
     assert not health["healthy"]["attention"]
+    # Attention first, then stable label order — unaffected by in_flight churn
+    # among healthy accounts.
+    assert payload["orderBusy"] == ["a-sub", "m-sub", "z-sub"]
+    assert payload["orderIdle"] == ["a-sub", "m-sub", "z-sub"]
+    assert payload["orderBusy"] == payload["orderIdle"]
 
     fmt_source = script[script.index("function fmt(n)"):script.index("\nfunction fmtTs(")]
     latency_source = script[script.index("function fmtLatency("):script.index("\n\nfunction pctBarWithElapsed(")]

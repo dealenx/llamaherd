@@ -784,15 +784,6 @@ function updateStickyBadge(d) {
 }
 
 // --- Key Status ---
-function sortAccountsByUrgency(keys) {
-  const urgency = k => {
-    const slots = k.max_concurrent ? (k.in_flight || 0) / k.max_concurrent : 0;
-    const quota = Math.max(k.session_usage_pct || 0, k.weekly_usage_pct || 0, 100 - (k.period_remaining_pct ?? 100));
-    return (k.exhausted ? 20000 : 0) + (k.suspended ? 10000 : 0) + slots * 1000 + quota;
-  };
-  return [...(keys || [])].sort((a, b) => urgency(b) - urgency(a) || String(a.label || '').localeCompare(String(b.label || '')));
-}
-
 function accountHealth(k) {
   const known = v => typeof v === 'number' && Number.isFinite(v) && v >= 0;
   if (k.exhausted) return {label:'Exhausted', cls:'status-err', attention:true};
@@ -808,8 +799,21 @@ function accountHealth(k) {
   return {label:'Healthy', cls:'status-ok', attention:false};
 }
 
+// Stable order only. Never sort by in_flight/usage — those change every
+// SSE tick and made the account-health rail jump around while reading.
+// Group: needs attention first, then healthy; within each group: label.
+function sortAccountsStable(keys) {
+  const labelOf = k => String(k.label || k.account_email || k.token_prefix || '');
+  return [...(keys || [])].sort((a, b) => {
+    const aAtt = accountHealth(a).attention ? 0 : 1;
+    const bAtt = accountHealth(b).attention ? 0 : 1;
+    if (aAtt !== bAtt) return aAtt - bAtt;
+    return labelOf(a).localeCompare(labelOf(b));
+  });
+}
+
 function renderKeyStatus(keys) {
-  const sorted = sortAccountsByUrgency(keys);
+  const sorted = sortAccountsStable(keys);
   const activeSlots = sorted.reduce((sum, k) => sum + (k.in_flight || 0), 0);
   const totalSlots = sorted.reduce((sum, k) => sum + (k.max_concurrent || 0), 0);
   const attention = sorted.filter(k => accountHealth(k).attention).length;
