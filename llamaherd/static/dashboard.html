@@ -632,6 +632,7 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', funct
   document.getElementById('panel-'+this.dataset.tab).classList.add('active');
   if (this.dataset.tab === 'subdetail') populateSubDetailSelect();
   if (this.dataset.tab === 'models') loadModelsPanel();
+  if (this.dataset.tab === 'subs') { loadSubsPanel(); loadClients(); }
 }));
 
 // --- SSE ---
@@ -1806,7 +1807,8 @@ async function loadStatusInitial() {
   try {
     const d = await loadJSON('/admin/status');
     renderKeyStatus(d.keys || []);
-    if (d.upstream) document.getElementById('upstream-url').textContent = d.upstream;
+    const up = document.getElementById('upstream-url');
+    if (up && d.upstream) up.textContent = d.upstream;
     renderUpstreamFailover(d.upstream_failover || []);
     updateStickyBadge(d);
   } catch (e) { console.error('Initial status load failed', e); }
@@ -1817,6 +1819,8 @@ fetchPeriodData();
 loadFallbackStatus();
 loadInFlightInitial();
 loadStatusInitial();
+loadSubsPanel();
+loadClients();
 connectSSE();
 
 // --- Quota Cost (now usage pie charts) ---
