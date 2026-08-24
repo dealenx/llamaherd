@@ -1541,7 +1541,7 @@ async function loadSubsPanel() {
           <button class="btn btn-sm btn-danger" onclick="deleteKey('${k.key_id}','${k.label}')">Remove</button>
         </div>
       </div>
-      <div class="km-row"><span>Token</span><span>${k.token_prefix}</span></div>
+      <div class="km-row"><span>Token</span><span>${k.token_prefix}${k.token_prefix.length<=8?'...':''}</span></div>
       <div class="km-row"><span>Plan</span><span>${k.plan||'?'}</span></div>
       <div class="km-row"><span>Max Concurrent</span><span>${k.max_concurrent}</span></div>
       <div class="km-row"><span>Cycle Day</span><span>${k.cycle_day}</span></div>
