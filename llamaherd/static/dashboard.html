@@ -1801,10 +1801,21 @@ async function loadInFlightInitial() {
   } catch (e) { /* ignore */ }
 }
 
+async function loadStatusInitial() {
+  try {
+    const d = await loadJSON('/admin/status');
+    renderKeyStatus(d.keys || []);
+    if (d.upstream) document.getElementById('upstream-url').textContent = d.upstream;
+    renderUpstreamFailover(d.upstream_failover || []);
+    updateStickyBadge(d);
+  } catch (e) { console.error('Initial status load failed', e); }
+}
+
 // --- Init ---
 fetchPeriodData();
 loadFallbackStatus();
 loadInFlightInitial();
+loadStatusInitial();
 connectSSE();
 
 // --- Quota Cost (now usage pie charts) ---

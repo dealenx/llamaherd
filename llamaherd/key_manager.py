@@ -444,7 +444,8 @@ class KeyManager:
     def status(self) -> list[dict]:
         return [{
             "label": k.label,
-            "token_prefix": k.token[:8] + "...",
+            "token_prefix": k.token[:8],
+            "token_prefix_display": k.token[:8] + "...",
             "in_flight": k.in_flight,
             "available_slots": k.available_slots,
             "max_concurrent": k.max_concurrent,
