@@ -1,7 +1,7 @@
+# see https://github.com/microsoft/apm
+
 name: llamaherd
 version: 1.0.0
-description: APM project for llamaherd
-author: dealenx
 Which agent platforms to deploy to (uncomment to pin):
 targets:
   - copilot
