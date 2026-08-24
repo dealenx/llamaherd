@@ -2427,6 +2427,59 @@ async def admin_usage_by_key_detail(key_prefix: str, days: int = 30,
             "status_counts": [], "totals": {}}
 
 
+@app.get("/admin/models", dependencies=[Depends(_verify_admin)])
+async def admin_models():
+    """Return the model registry as a dashboard-friendly list.
+
+    Mirrors the OpenAI /v1/models schema with extra `available_on` and
+    `providers` fields so the dashboard can show which keys host each model.
+    """
+    if not registry:
+        return {"models": []}
+    models = []
+    for model_id in sorted(registry.models.keys()):
+        entry = registry._model_entry(model_id)
+        entry["available_on"] = len(registry.models.get(model_id, []))
+        # provider inference for dashboard badge
+        providers = set()
+        for p in (entry.get("providers") or []):
+            if p:
+                providers.add(p)
+        if not providers and "ollama" in (entry.get("owned_by") or "").lower():
+            providers.add("ollama")
+        entry["providers"] = sorted(providers)
+        models.append(entry)
+    return {"models": models}
+
+
+@app.get("/admin/usage/by-model", dependencies=[Depends(_verify_admin)])
+async def admin_usage_by_model(days: int = 30, start_date: str | None = None,
+                                end_date: str | None = None):
+    """Return per-model usage totals for the Models tab.
+
+    Aggregates requests, tokens, and average latency per model over the period.
+    """
+    if not usage_db:
+        return []
+    today = datetime.now(UTC).date()
+    start = datetime.fromisoformat(start_date).date() if start_date else (today - timedelta(days=days-1))
+    end = datetime.fromisoformat(end_date).date() if end_date else today
+    rows = usage_db.summary_by_model(start_date=start.isoformat(), end_date=end.isoformat())
+    result = []
+    for r in rows:
+        requests = r.get("requests", 0) or 0
+        tokens_total = (r.get("tokens_in", 0) or 0) + (r.get("tokens_out", 0) or 0)
+        result.append({
+            "model": r.get("model", ""),
+            "requests": requests,
+            "tokens_in": r.get("tokens_in", 0) or 0,
+            "tokens_out": r.get("tokens_out", 0) or 0,
+            "tokens_total": tokens_total,
+            "avg_latency_ms": r.get("avg_latency_ms", 0) or 0,
+        })
+    return result
+
+
 # --- OpenRouter cost tracking ---
 
 _OPENROUTER_PRICING: dict | None = None

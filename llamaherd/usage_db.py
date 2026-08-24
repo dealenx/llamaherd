@@ -167,6 +167,32 @@ class UsageDB:
             "tokens_total": r[4] or 0,
         } for r in rows]
 
+    def summary_by_model(self, days: int = 30, start_date: str | None = None,
+                         end_date: str | None = None) -> list[dict]:
+        """Aggregate usage per model over a date range.
+
+        Excludes internal/error rows with status=-1 or upstream_key='none'.
+        """
+        where, params = self._date_range_where(days, start_date, end_date)
+        rows = self._conn.execute(f"""
+            SELECT model,
+                   COUNT(*) as requests,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   SUM(tokens_in + tokens_out) as tokens_total,
+                   AVG(latency_ms) as avg_latency_ms
+            FROM usage WHERE {where} AND status != -1 AND upstream_key != 'none'
+            GROUP BY model ORDER BY tokens_total DESC
+        """, params).fetchall()
+        return [{
+            "model": r[0],
+            "requests": r[1] or 0,
+            "tokens_in": r[2] or 0,
+            "tokens_out": r[3] or 0,
+            "tokens_total": r[4] or 0,
+            "avg_latency_ms": round(r[5] or 0, 1),
+        } for r in rows]
+
     def upstream_key_costs(self, pricing: dict, days: int = 30,
                            start_date: str | None = None, end_date: str | None = None,
                            key_labels: dict | None = None) -> dict:

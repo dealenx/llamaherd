@@ -110,6 +110,10 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .key-card .key-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .key-card .key-label { font-weight: 600; font-size: 14px; }
 .key-card .key-plan { font-size: 11px; background: var(--border); padding: 2px 8px; border-radius: 10px; }
+.key-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 12px; margin: 2px 0; }
+.key-row .kdim { color: var(--dim); font-weight: 500; flex: 0 0 auto; }
+.key-row span:last-child { text-align: right; flex: 1 1 auto; }
+
 .key-drilldown { max-height: 0; overflow: hidden; transition: max-height 0.3s ease-out; }
 .key-card.expanded .key-drilldown { max-height: 800px; overflow-y: auto; }
 .key-drilldown-inner { padding: 8px 0 0 0; border-top: 1px solid var(--border); margin-top: 8px; }
