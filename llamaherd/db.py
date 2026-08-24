@@ -72,9 +72,9 @@ class _LibSQLHTTPCursor:
         if p is None:
             return {"type": "null"}
         if isinstance(p, bool):
-            return {"type": "integer", "value": 1 if p else 0}
+            return {"type": "integer", "value": str(1 if p else 0)}
         if isinstance(p, int):
-            return {"type": "integer", "value": p}
+            return {"type": "integer", "value": str(p)}
         if isinstance(p, float):
             return {"type": "float", "value": p}
         if isinstance(p, bytes):
