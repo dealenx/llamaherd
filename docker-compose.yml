@@ -55,7 +55,10 @@ services:
       - ./data/usage.db:/app/data/usage.db
       - ./data/proxy.db:/app/llamaherd/proxy.db
       - ./data/nvidia_model_cache.json:/app/llamaherd/nvidia_model_cache.json
-    command: ["llamaherd", "--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "8399", "serve"]
+    # LLAMAHERD_CONFIG is set in the Dockerfile so proxy.py resolves it at
+    # import time. The --config CLI flag is avoided because the upstream CLI
+    # sets the env var after proxy.py has already been imported.
+    command: ["llamaherd", "--host", "0.0.0.0", "--port", "8399", "serve"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8399/healthz', timeout=5).read()"]
       interval: 30s

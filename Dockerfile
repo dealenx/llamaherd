@@ -31,7 +31,12 @@ RUN mkdir -p /app/llamaherd /app/data \
 USER llamaherd
 EXPOSE 8399
 
+# Explicit config path. This is set as an env var (not via the --config CLI
+# flag) so that proxy.py sees it at module import time, before CONFIG_PATH is
+# resolved. The file is provided either by the COPY below or by a bind-mount.
+ENV LLAMAHERD_CONFIG=/app/config.yaml
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8399/healthz', timeout=3)"]
 
-CMD ["llamaherd", "--config", "/app/config.yaml", "serve"]
+CMD ["llamaherd", "serve"]
