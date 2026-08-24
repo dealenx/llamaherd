@@ -142,26 +142,219 @@ class UsageDB:
             "tokens_total": r[4] or 0,
         } for r in rows]
 
-    def by_model(self, days: int = 30, start_date: str | None = None, end_date: str | None = None) -> list[dict]:
+    def by_upstream_key(self, days: int = 30, start_date: str | None = None,
+                        end_date: str | None = None) -> list[dict]:
+        """Aggregate usage per upstream key (Ollama Cloud subscription).
+
+        Groups by upstream_key (first 8 chars of token), excluding 'none'
+        (error paths with no key assigned).
+        """
         where, params = self._date_range_where(days, start_date, end_date)
         rows = self._conn.execute(f"""
+            SELECT upstream_key,
+                   COUNT(*) as requests,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   SUM(tokens_in + tokens_out) as tokens_total
+            FROM usage WHERE {where} AND status != -1 AND upstream_key != 'none'
+            GROUP BY upstream_key ORDER BY tokens_total DESC
+        """, params).fetchall()
+        return [{
+            "upstream_key": r[0],
+            "requests": r[1],
+            "tokens_in": r[2] or 0,
+            "tokens_out": r[3] or 0,
+            "tokens_total": r[4] or 0,
+        } for r in rows]
+
+    def upstream_key_costs(self, pricing: dict, days: int = 30,
+                           start_date: str | None = None, end_date: str | None = None,
+                           key_labels: dict | None = None) -> dict:
+        """Calculate per-key OpenRouter equivalent costs.
+
+        Groups by upstream_key × model, then aggregates cost per key.
+        Accepts key_labels dict (upstream_key -> {label, plan}) for enrichment.
+        """
+        where, params = self._date_range_where(days, start_date, end_date)
+        rows = self._conn.execute(f"""
+            SELECT upstream_key, model,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   COUNT(*) as requests
+            FROM usage WHERE {where} AND status != -1 AND upstream_key != 'none'
+            GROUP BY upstream_key, model
+            ORDER BY upstream_key, SUM(tokens_in + tokens_out) DESC
+        """, params).fetchall()
+
+        key_labels = key_labels or {}
+        keys_map: dict[str, dict] = {}
+        total_cost = 0.0
+        total_input_cost = 0.0
+        total_output_cost = 0.0
+        unpriced = []
+
+        for r in rows:
+            upstream_key = r[0]
+            model_raw = r[1]
+            tokens_in = r[2] or 0
+            tokens_out = r[3] or 0
+            requests = r[4] or 0
+
+            lookup_key = model_raw.replace(":cloud", "").replace(":cloud-", "-")
+            p = pricing.get(lookup_key) or pricing.get(model_raw)
+
+            if p:
+                in_cost = tokens_in / 1_000_000 * p.get("input_per_1m", 0)
+                out_cost = tokens_out / 1_000_000 * p.get("output_per_1m", 0)
+                cost = in_cost + out_cost
+            else:
+                in_cost = 0.0
+                out_cost = 0.0
+                cost = 0.0
+                if model_raw not in unpriced:
+                    unpriced.append(model_raw)
+
+            total_cost += cost
+            total_input_cost += in_cost
+            total_output_cost += out_cost
+
+            key_entry = keys_map.setdefault(upstream_key, {
+                "upstream_key": upstream_key,
+                "label": key_labels.get(upstream_key, {}).get("label", upstream_key),
+                "plan": key_labels.get(upstream_key, {}).get("plan", ""),
+                "account_email": key_labels.get(upstream_key, {}).get("account_email", ""),
+                "requests": 0,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "total_cost_usd": 0.0,
+                "total_input_cost_usd": 0.0,
+                "total_output_cost_usd": 0.0,
+                "models": [],
+            })
+            key_entry["requests"] += requests
+            key_entry["tokens_in"] += tokens_in
+            key_entry["tokens_out"] += tokens_out
+            key_entry["total_cost_usd"] += cost
+            key_entry["total_input_cost_usd"] += in_cost
+            key_entry["total_output_cost_usd"] += out_cost
+            key_entry["models"].append({
+                "model": model_raw,
+                "openrouter_id": p.get("openrouter_id", "") if p else "",
+                "requests": requests,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "input_cost_usd": round(in_cost, 4),
+                "output_cost_usd": round(out_cost, 4),
+                "total_cost_usd": round(cost, 4),
+                "input_per_1m": p.get("input_per_1m") if p else None,
+                "output_per_1m": p.get("output_per_1m") if p else None,
+            })
+
+        keys_list = list(keys_map.values())
+        for k in keys_list:
+            k["total_cost_usd"] = round(k["total_cost_usd"], 2)
+            k["total_input_cost_usd"] = round(k["total_input_cost_usd"], 2)
+            k["total_output_cost_usd"] = round(k["total_output_cost_usd"], 2)
+        keys_list.sort(key=lambda x: -x["total_cost_usd"])
+
+        return {
+            "keys": keys_list,
+            "total_cost_usd": round(total_cost, 2),
+            "total_input_cost_usd": round(total_input_cost, 2),
+            "total_output_cost_usd": round(total_output_cost, 2),
+            "unpriced_models": unpriced,
+        }
+
+    def upstream_key_detail(self, key_prefix: str, days: int = 30,
+                            start_date: str | None = None, end_date: str | None = None) -> dict:
+        """Detailed breakdown for a single upstream key.
+
+        Returns per-model, per-client, per-day, and per-status breakdowns.
+        """
+        where, params = self._date_range_where(days, start_date, end_date)
+        params_with_key = params + [key_prefix]
+
+        model_rows = self._conn.execute(f"""
             SELECT model,
                    COUNT(*) as requests,
                    SUM(tokens_in) as tokens_in,
                    SUM(tokens_out) as tokens_out,
                    SUM(tokens_in + tokens_out) as tokens_total,
                    AVG(latency_ms) as avg_latency_ms
-            FROM usage WHERE {where} AND status != -1
+            FROM usage WHERE {where} AND upstream_key = ? AND status != -1
             GROUP BY model ORDER BY tokens_total DESC
-        """, params).fetchall()
-        return [{
+        """, params_with_key).fetchall()
+
+        client_rows = self._conn.execute(f"""
+            SELECT client_id,
+                   COUNT(*) as requests,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   SUM(tokens_in + tokens_out) as tokens_total
+            FROM usage WHERE {where} AND upstream_key = ? AND status != -1
+            GROUP BY client_id ORDER BY tokens_total DESC
+        """, params_with_key).fetchall()
+
+        daily_rows = self._conn.execute(f"""
+            SELECT day,
+                   COUNT(*) as requests,
+                   SUM(tokens_in) as tokens_in,
+                   SUM(tokens_out) as tokens_out,
+                   SUM(tokens_in + tokens_out) as tokens_total
+            FROM usage WHERE {where} AND upstream_key = ? AND status != -1
+            GROUP BY day ORDER BY day DESC
+        """, params_with_key).fetchall()
+
+        status_rows = self._conn.execute(f"""
+            SELECT status, COUNT(*) as count
+            FROM usage WHERE {where} AND upstream_key = ?
+            GROUP BY status
+        """, params_with_key).fetchall()
+
+        models = [{
             "model": r[0],
             "requests": r[1],
             "tokens_in": r[2] or 0,
             "tokens_out": r[3] or 0,
             "tokens_total": r[4] or 0,
             "avg_latency_ms": round(r[5] or 0, 1),
-        } for r in rows]
+        } for r in model_rows]
+
+        clients = [{
+            "client_id": r[0],
+            "requests": r[1],
+            "tokens_in": r[2] or 0,
+            "tokens_out": r[3] or 0,
+            "tokens_total": r[4] or 0,
+        } for r in client_rows]
+
+        daily = [{
+            "day": r[0],
+            "requests": r[1],
+            "tokens_in": r[2] or 0,
+            "tokens_out": r[3] or 0,
+            "tokens_total": r[4] or 0,
+        } for r in daily_rows]
+
+        status_counts = [{"status": r[0], "count": r[1]} for r in status_rows]
+
+        total_requests = sum(m["requests"] for m in models)
+        total_tokens_in = sum(m["tokens_in"] for m in models)
+        total_tokens_out = sum(m["tokens_out"] for m in models)
+
+        return {
+            "upstream_key": key_prefix,
+            "models": models,
+            "clients": clients,
+            "daily": daily,
+            "status_counts": status_counts,
+            "totals": {
+                "requests": total_requests,
+                "tokens_in": total_tokens_in,
+                "tokens_out": total_tokens_out,
+                "tokens_total": total_tokens_in + total_tokens_out,
+            },
+        }
 
     def quota_coefficients(self, manager_keys: list, days: int = 7) -> dict:
         """Derive implied Ollama quota cost per token for each model.

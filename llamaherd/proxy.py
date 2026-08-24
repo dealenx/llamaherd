@@ -97,6 +97,7 @@ DEFAULT_CONFIG = {
     "host": os.environ.get("LLAMAHERD_HOST", "127.0.0.1"),
     "port": int(os.environ.get("LLAMAHERD_PORT", "8399")),
     "upstream": "https://ollama.com/v1",
+    "upstream_failover": [],
     "admin_token": os.environ.get("LLAMAHERD_ADMIN_TOKEN", ""),
     "keys": [],
     "clients": [],
@@ -297,6 +298,7 @@ fallback_provider: FallbackProvider | None = None
 model_alias_manager: ModelAliasManager | None = None
 sticky: StickySessionManager | None = None
 upstream_url: str = ""
+upstream_failover: list[str] = []
 retry_on_429: bool = True
 max_retries: int = 2
 queue_timeout: int = 60
@@ -476,13 +478,13 @@ def _record_and_broadcast(client_id: str, upstream_key: str, model: str,
             if end_data is not None:
                 asyncio.ensure_future(broadcaster.broadcast("request_end", end_data))
             if manager:
-                asyncio.ensure_future(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url}))
+                asyncio.ensure_future(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url, "upstream_failover": upstream_failover}))
         else:
             loop.run_until_complete(broadcaster.broadcast("call", call_data))
             if end_data is not None:
                 loop.run_until_complete(broadcaster.broadcast("request_end", end_data))
             if manager:
-                loop.run_until_complete(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url}))
+                loop.run_until_complete(broadcaster.broadcast("status", {"keys": manager.status(), "upstream": upstream_url, "upstream_failover": upstream_failover}))
     except RuntimeError:
         pass  # No event loop — skip broadcast
 
@@ -513,7 +515,7 @@ def _verify_admin_session(session_token: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global manager, key_registry, registry, usage_db, client_registry, usage_scraper, usage_refresher, telegram_notifier, upstream_http_client, fallback_provider, model_alias_manager, sticky
-    global upstream_url, retry_on_429, max_retries, queue_timeout, request_timeout
+    global upstream_url, upstream_failover, retry_on_429, max_retries, queue_timeout, request_timeout
     global admin_token, NATIVE_BRIDGE_MODELS, reject_unknown_models
 
     cfg = load_config()
@@ -525,6 +527,10 @@ async def lifespan(app: FastAPI):
         cfg["host"] = os.environ["LLAMAHERD_HOST"]
     if os.environ.get("LLAMAHERD_PORT"):
         cfg["port"] = int(os.environ["LLAMAHERD_PORT"])
+    if os.environ.get("LLAMAHERD_UPSTREAM"):
+        cfg["upstream"] = os.environ["LLAMAHERD_UPSTREAM"]
+    if os.environ.get("LLAMAHERD_UPSTREAM_FAILOVER"):
+        cfg["upstream_failover"] = [u.strip() for u in os.environ["LLAMAHERD_UPSTREAM_FAILOVER"].split(",") if u.strip()]
     admin_token = cfg.get("admin_token", "")
     if not admin_token:
         log.warning("admin_token not set in config — admin endpoints will be inaccessible")
@@ -546,6 +552,7 @@ async def lifespan(app: FastAPI):
                                      auth_token=db_auth_token, auth_user=db_auth_user)
     sticky = StickySessionManager(ttl_seconds=cfg.get("sticky_ttl_seconds", 3600))
     upstream_url = cfg.get("upstream", "https://ollama.com/v1")
+    upstream_failover = cfg.get("upstream_failover", []) or []
     retry_on_429 = cfg.get("retry_on_429", True)
     max_retries = cfg.get("max_retries", 2)
     queue_timeout = cfg.get("queue_timeout", 60)
@@ -899,6 +906,56 @@ async def _cancellation_safe_stream(client: httpx.AsyncClient, method: str, url:
             raise exc_info[1].with_traceback(exc_info[2])
 
 
+@asynccontextmanager
+async def _cancellation_safe_stream_failover(client: httpx.AsyncClient, method: str, urls: list[str], **kwargs):
+    """Stream to the first reachable upstream URL, falling back on connection errors.
+
+    Tries each URL in order; on httpx.ConnectError/TimeoutException it closes the
+    failed stream and moves to the next target. Preserves the same cancellation-safe
+    cleanup semantics as _cancellation_safe_stream.
+    """
+    stream_context = None
+    response = None
+    exc_info = (None, None, None)
+    try:
+        for url in urls:
+            stream_context = client.stream(method, url, **kwargs)
+            try:
+                response = await stream_context.__aenter__()
+                break  # got a response — stop trying failover URLs
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                log.warning(f"Upstream {url} unreachable (stream): {e}")
+                await _await_cleanup(
+                    stream_context.__aexit__(None, None, None),
+                    label="failed upstream stream close",
+                )
+                stream_context = None
+                if url == urls[-1]:
+                    raise
+                continue
+        if response is None:
+            raise httpx.ConnectError("all upstreams unreachable")
+        yield response
+    except BaseException as exc:
+        exc_info = (type(exc), exc, exc.__traceback__)
+        raise
+    finally:
+        if stream_context is not None:
+            try:
+                await _await_cleanup(
+                    stream_context.__aexit__(*exc_info),
+                    label="upstream response close",
+                    preserve_cancellation=isinstance(exc_info[1], asyncio.CancelledError),
+                )
+            except BaseException as cleanup_exc:
+                if exc_info[1] is None:
+                    raise
+                if not isinstance(cleanup_exc, asyncio.CancelledError):
+                    log.exception("Upstream response close failed while preserving stream exit")
+        if exc_info[1] is not None:
+            raise exc_info[1].with_traceback(exc_info[2])
+
+
 STATIC_DIR = Path(__file__).parent / "static"
 DASHBOARD_PATH = STATIC_DIR / "dashboard.html"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -1193,11 +1250,23 @@ async def _proxy_request(request: Request, path: str) -> Response:
             if is_stream:
                 return await _proxy_stream(client_id, key, path, headers, body, model, start, request_id, session_id=session_id)
 
-            resp = await upstream_http_client.post(
-                f"{upstream_url}{path}",
-                content=body,
-                headers=headers,
-            )
+            targets = [upstream_url] + upstream_failover
+            resp = None
+            for up_url in targets:
+                try:
+                    resp = await upstream_http_client.post(
+                        f"{up_url}{path}",
+                        content=body,
+                        headers=headers,
+                    )
+                    break  # got a response — stop trying failover URLs
+                except (httpx.ConnectError, httpx.TimeoutException) as e:
+                    log.warning(f"Upstream {up_url} unreachable for {model}: {e}")
+                    if up_url == targets[-1]:
+                        raise  # last target — re-raise so outer except handles it
+                    continue
+            if resp is None:
+                raise httpx.ConnectError("all upstreams unreachable")
 
             elapsed_ms = int((time.time() - start) * 1000)
 
@@ -1308,8 +1377,8 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
     async def generate():
         nonlocal tokens_out, tokens_in, usage_captured, final_status
         try:
-            async with _cancellation_safe_stream(
-                upstream_http_client, "POST", f"{upstream_url}{path}",
+            async with _cancellation_safe_stream_failover(
+                upstream_http_client, "POST", [upstream_url] + upstream_failover,
                 content=body, headers=headers,
             ) as resp:
                     if resp.status_code == 429:
@@ -1522,15 +1591,16 @@ async def _proxy_fallback_stream(client_id: str, fp: FallbackProvider, url: str,
 # Proxy — Native Ollama API (NDJSON streaming)
 # ---------------------------------------------------------------------------
 
-def _native_api_upstream() -> str:
-    """Derive the native Ollama API upstream URL from the OpenAI upstream.
-
-    If upstream_url is 'https://ollama.com/v1', native API is 'https://ollama.com/api'.
-    """
-    base = upstream_url.rstrip("/")
-    if base.endswith("/v1"):
-        return base[:-3] + "/api"
-    return base + "/api"
+def _native_api_upstreams() -> list[str]:
+    """Native API URLs for the primary upstream plus all failover targets."""
+    out = []
+    for u in [upstream_url] + upstream_failover:
+        base = u.rstrip("/")
+        if base.endswith("/v1"):
+            out.append(base[:-3] + "/api")
+        else:
+            out.append(base + "/api")
+    return out
 
 
 async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
@@ -1543,7 +1613,7 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
     tokens_in = 0
     usage_captured = False
     final_status = 200
-    api_upstream = _native_api_upstream()
+    api_upstreams = _native_api_upstreams()
 
     async def finalize():
         elapsed_ms = int((time.time() - start) * 1000)
@@ -1558,8 +1628,8 @@ async def _proxy_ndjson_stream(client_id: str, key: 'KeyState', path: str,
     async def generate():
         nonlocal tokens_out, tokens_in, usage_captured, final_status
         try:
-            async with _cancellation_safe_stream(
-                upstream_http_client, "POST", f"{api_upstream}{path}",
+            async with _cancellation_safe_stream_failover(
+                upstream_http_client, "POST", [f"{u}{path}" for u in api_upstreams],
                 content=body, headers=headers,
             ) as resp:
                     if resp.status_code == 429:
@@ -2171,7 +2241,7 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
     NDJSON response is converted chunk-by-chunk to SSE format so the client
     (Hermes) sees a standard OpenAI-compatible stream.
     """
-    api_upstream = _native_api_upstream()
+    api_upstreams = _native_api_upstreams()
     chunk_id = f"chatcmpl-bridge-{uuid.uuid4().hex[:8]}"
     tokens_out = 0
     tokens_in = 0
@@ -2192,8 +2262,8 @@ async def _proxy_bridge_stream(client_id: str, key: 'KeyState', body: bytes,
     async def generate():
         nonlocal tokens_out, tokens_in, usage_captured, bridge_reason, final_status
         try:
-            async with _cancellation_safe_stream(
-                upstream_http_client, "POST", f"{api_upstream}/chat",
+            async with _cancellation_safe_stream_failover(
+                upstream_http_client, "POST", [f"{u}/chat" for u in api_upstreams],
                 content=body, headers={
                     "Authorization": f"Bearer {key.token}",
                     "Content-Type": "application/json",
@@ -2282,6 +2352,7 @@ async def admin_status():
         "models": len(registry.models) if registry else 0,
         "last_refresh": registry.last_refresh if registry else 0,
         "upstream": upstream_url,
+        "upstream_failover": upstream_failover,
         "clients": client_registry.clients if client_registry else [],
         "sticky_sessions": sticky.get_status() if sticky else {},
         "sticky_ttl_seconds": sticky.ttl if sticky else None,
@@ -2309,11 +2380,51 @@ async def admin_usage_by_client(days: int = 30, start_date: str | None = None, e
     return []
 
 
-@app.get("/admin/usage/by-model", dependencies=[Depends(_verify_admin)])
-async def admin_usage_by_model(days: int = 30, start_date: str | None = None, end_date: str | None = None):
+@app.get("/admin/usage/by-key", dependencies=[Depends(_verify_admin)])
+async def admin_usage_by_key(days: int = 30, start_date: str | None = None, end_date: str | None = None):
     if usage_db:
-        return usage_db.by_model(days, start_date=start_date, end_date=end_date)
+        rows = usage_db.by_upstream_key(days, start_date=start_date, end_date=end_date)
+        if manager:
+            for r in rows:
+                key = manager.key_by_token_prefix(r["upstream_key"])
+                r["label"] = key.label if key else r["upstream_key"]
+                r["plan"] = key.plan if key else ""
+        return rows
     return []
+
+
+@app.get("/admin/usage/by-key-costs", dependencies=[Depends(_verify_admin)])
+async def admin_usage_by_key_costs(days: int = 30, start_date: str | None = None,
+                                   end_date: str | None = None, key: str | None = None):
+    if usage_db:
+        pricing = _load_openrouter_pricing()
+        key_labels = {}
+        if manager:
+            for k in manager.keys:
+                key_labels[k.token[:8]] = {"label": k.label, "plan": k.plan, "account_email": k.account_email}
+        result = usage_db.upstream_key_costs(pricing, days, start_date=start_date,
+                                             end_date=end_date, key_labels=key_labels)
+        if key:
+            result["keys"] = [k for k in result["keys"] if k["upstream_key"] == key]
+        return result
+    return {"keys": [], "total_cost_usd": 0, "total_input_cost_usd": 0,
+            "total_output_cost_usd": 0, "unpriced_models": []}
+
+
+@app.get("/admin/usage/by-key/{key_prefix}", dependencies=[Depends(_verify_admin)])
+async def admin_usage_by_key_detail(key_prefix: str, days: int = 30,
+                                    start_date: str | None = None, end_date: str | None = None):
+    if usage_db:
+        detail = usage_db.upstream_key_detail(key_prefix, days,
+                                              start_date=start_date, end_date=end_date)
+        if manager:
+            key = manager.key_by_token_prefix(key_prefix)
+            detail["label"] = key.label if key else key_prefix
+            detail["plan"] = key.plan if key else ""
+            detail["account_email"] = key.account_email if key else ""
+        return detail
+    return {"upstream_key": key_prefix, "models": [], "clients": [], "daily": [],
+            "status_counts": [], "totals": {}}
 
 
 # --- OpenRouter cost tracking ---
@@ -2917,6 +3028,98 @@ async def admin_telegram_test():
             "interval": telegram_notifier.interval}
 
 
+@app.post("/admin/test-model", dependencies=[Depends(_verify_admin)])
+async def admin_test_model(request: Request):
+    """Send a test prompt to a model via the proxy's own /v1/chat/completions.
+
+    Uses the first registered client key for attribution. Returns the model
+    response, latency, and status so the dashboard can display it inline.
+    Body: {"model": "glm-5", "prompt": "2+2"}
+
+    Streams tokens back to the browser as SSE (Server-Sent Events) so the
+    dashboard can display them in real time. Each SSE event is a JSON object:
+      {"type":"token","content":"..."}    — a content delta
+      {"type":"done","status":200,"elapsed_ms":123,"usage":{...}}
+      {"type":"error","status":502,"error":"..."}
+    """
+    body = await request.json()
+    model = body.get("model")
+    prompt = body.get("prompt", "2+2")
+    if not model:
+        raise HTTPException(status_code=400, detail="model is required")
+    if not manager or not manager.keys:
+        raise HTTPException(status_code=503, detail="no upstream keys configured")
+    if not client_registry:
+        raise HTTPException(status_code=503, detail="client_registry not ready")
+
+    # Check if model exists in registry
+    if registry and registry.models:
+        model_exists = any(m == model or m.startswith(model + ":") for m in registry.models.keys())
+        if not model_exists:
+            return {"status": 404, "elapsed_ms": 0, "model": model, "prompt": prompt,
+                    "error": f"Model '{model}' not found in registry. It may not be available on any configured key."}
+
+    # Pick the first client token for internal attribution
+    clients_list = client_registry.clients
+    if not clients_list:
+        raise HTTPException(status_code=503, detail="no client keys registered")
+    client_token = clients_list[0]["token"]
+
+    async def stream_test():
+        start = time.time()
+        usage_data = None
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as cx:
+                async with cx.stream(
+                    "POST",
+                    f"http://{request.headers.get('host', '127.0.0.1:8399')}/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {client_token}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "user", "content": prompt}], "stream": True},
+                ) as r:
+                    if r.status_code >= 400:
+                        text = await r.aread()
+                        elapsed_ms = int((time.time() - start) * 1000)
+                        yield f"data: {json.dumps({'type': 'error', 'status': r.status_code, 'elapsed_ms': elapsed_ms, 'error': text.decode('utf-8', errors='replace')[:500]})}\n\n"
+                        return
+                    async for line in r.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            continue
+                        try:
+                            chunk = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = chunk.get("choices") or []
+                        if choices:
+                            delta = choices[0].get("delta") or {}
+                            content = delta.get("content")
+                            if content:
+                                yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                        chunk_usage = chunk.get("usage")
+                        if chunk_usage and chunk_usage.get("total_tokens", 0) > 0:
+                            usage_data = chunk_usage
+                    elapsed_ms = int((time.time() - start) * 1000)
+                    yield f"data: {json.dumps({'type': 'done', 'status': 200, 'elapsed_ms': elapsed_ms, 'usage': usage_data})}\n\n"
+        except httpx.TimeoutException:
+            elapsed_ms = int((time.time() - start) * 1000)
+            yield f"data: {json.dumps({'type': 'error', 'status': 504, 'elapsed_ms': elapsed_ms, 'error': 'Request timed out (120s). The model may be unavailable, overloaded, or loading.'})}\n\n"
+        except httpx.ConnectError as e:
+            elapsed_ms = int((time.time() - start) * 1000)
+            yield f"data: {json.dumps({'type': 'error', 'status': 502, 'elapsed_ms': elapsed_ms, 'error': f'Connection error: {e}'})}\n\n"
+        except Exception as e:
+            elapsed_ms = int((time.time() - start) * 1000)
+            yield f"data: {json.dumps({'type': 'error', 'status': 500, 'elapsed_ms': elapsed_ms, 'error': str(e)})}\n\n"
+
+    return StreamingResponse(stream_test(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Admin — Subscription (Upstream Key) Management
+# ---------------------------------------------------------------------------
+
+
 # ---------------------------------------------------------------------------
 # Admin — Subscription (Upstream Key) Management
 # ---------------------------------------------------------------------------
@@ -3077,6 +3280,7 @@ async def admin_events(request: Request, session_token: str = ""):
                 "models": len(registry.models) if registry else 0,
                 "last_refresh": registry.last_refresh if registry else 0,
                 "upstream": upstream_url,
+                "upstream_failover": upstream_failover,
                 "clients": client_registry.clients if client_registry else [],
             }
             yield f"event: status\ndata: {json.dumps(status_data)}\n\n"

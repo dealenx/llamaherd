@@ -110,8 +110,24 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .key-card .key-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .key-card .key-label { font-weight: 600; font-size: 14px; }
 .key-card .key-plan { font-size: 11px; background: var(--border); padding: 2px 8px; border-radius: 10px; }
-.key-card .key-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
-.key-card .key-row .kdim { color: var(--dim); }
+.key-drilldown { max-height: 0; overflow: hidden; transition: max-height 0.3s ease-out; }
+.key-card.expanded .key-drilldown { max-height: 800px; overflow-y: auto; }
+.key-drilldown-inner { padding: 8px 0 0 0; border-top: 1px solid var(--border); margin-top: 8px; }
+.key-drilldown h4 { font-size: 11px; color: var(--dim); margin: 10px 0 4px 0; text-transform: uppercase; letter-spacing: 0.5px; }
+.key-drilldown table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.key-drilldown th { text-align: left; color: var(--dim); padding: 4px 6px; border-bottom: 1px solid var(--border); font-weight: 500; }
+.key-drilldown td { padding: 3px 6px; border-bottom: 1px solid rgba(255,255,255,0.03); }
+.key-drilldown .kd-loading { color: var(--dim); font-size: 12px; padding: 8px 0; }
+.key-drilldown .kd-empty { color: var(--dim); font-size: 12px; padding: 8px 0; }
+.key-drilldown .kd-cost { color: var(--green); font-weight: 600; }
+.key-drilldown .kd-daily-bar { display: inline-block; height: 12px; background: var(--accent); border-radius: 2px; min-width: 2px; vertical-align: middle; }
+.key-drilldown .kd-status-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; margin-right: 4px; }
+.key-drilldown .kd-status-200 { background: rgba(46,160,67,0.2); color: var(--green); }
+.key-drilldown .kd-status-429 { background: rgba(187,128,9,0.2); color: var(--yellow); }
+.key-drilldown .kd-status-err { background: rgba(248,81,73,0.2); color: var(--red); }
+.key-caret { display: inline-block; transition: transform .2s; font-size: 10px; margin-right: 4px; }
+.key-card.expanded .key-caret { transform: rotate(90deg); }
+.pct-bar-wrap { width: 100%; height: 6px; background: var(--border); border-radius: 3px; margin-top: 4px; overflow: hidden; position: relative; }
 .pct-bar-wrap { width: 100%; height: 6px; background: var(--border); border-radius: 3px; margin-top: 4px; overflow: hidden; position: relative; }
 .pct-bar { height: 100%; border-radius: 3px; transition: width .3s, background .3s; }
 .pct-elapsed { position: absolute; top: 0; bottom: 0; width: 2px; border-left: 2px dashed rgba(255,255,255,0.8); background: none; transition: left .3s; z-index: 1; }
@@ -160,9 +176,36 @@ tr:hover td { background: rgba(88,166,255,0.04); }
 .model-chip .mc-meta { color: var(--dim); font-size: 11px; }
 .model-chip .mc-ctx { color: var(--purple); }
 .model-chip .mc-keys { color: var(--green); }
-.model-chip .mc-usage { margin-top: 4px; }
-.model-chip .mc-usage .bar { height: 4px; }
+.model-chip .mc-actions { margin-top: 8px; display: flex; gap: 6px; }
+.btn-test { background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 4px 10px;
+            font-size: 11px; cursor: pointer; transition: opacity .2s; }
+.btn-test:hover { opacity: 0.85; }
+.btn-test:disabled { opacity: 0.5; cursor: wait; }
+.btn-test .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #fff;
+                     border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite;
+                     vertical-align: middle; margin-right: 4px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.test-result { margin-top: 8px; font-size: 11px; padding: 8px; border-radius: 4px; background: var(--bg);
+               border: 1px solid var(--border); max-height: 200px; overflow-y: auto; word-break: break-word; }
+.test-result.ok { border-color: var(--green); }
+.test-result.err { border-color: var(--red); }
+.test-result.loading { border-color: var(--accent); }
+.test-result .tr-meta { color: var(--dim); margin-bottom: 4px; }
+.test-result .tr-content { font-family: monospace; white-space: pre-wrap; }
+.test-result .tr-loading { display: flex; align-items: center; gap: 8px; color: var(--dim); }
+.test-result .tr-loading .spinner { border-color: var(--accent); border-top-color: transparent; }
 .search-input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; font-size: 13px; width: 200px; }
+.subdetail-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+.subdetail-controls label { font-size: 12px; color: var(--dim); }
+.subdetail-controls select { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 13px; }
+.subdetail-email { font-family: monospace; font-size: 11px; color: var(--dim); }
+.subdetail-empty { color: var(--dim); font-size: 14px; padding: 40px 0; text-align: center; }
+#subdetail-chart { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+.subdetail-model-bar { display: inline-block; height: 10px; background: var(--accent); border-radius: 2px; min-width: 2px; vertical-align: middle; }
+.subdetail-status-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; margin-right: 6px; margin-bottom: 4px; }
+.subdetail-status-200 { background: rgba(46,160,67,0.2); color: var(--green); }
+.subdetail-status-429 { background: rgba(187,128,9,0.2); color: var(--yellow); }
+.subdetail-status-err { background: rgba(248,81,73,0.2); color: var(--red); }
 .key-mgmt { margin-top: 12px; }
 .key-mgmt-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 10px; }
 .key-mgmt-card .km-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
@@ -271,7 +314,7 @@ tr:hover td { background: rgba(88,166,255,0.04); }
     </div>
     <div class="header-controls">
       <span class="live-state"><span class="sse-dot" id="sse-dot"></span><span id="sse-label">connecting...</span></span>
-      <span class="header-stat"><span class="header-stat-label">Endpoint</span><span class="header-stat-value" id="upstream-url">—</span></span>
+      <span class="header-stat"><span class="header-stat-label">Failover</span><span class="header-stat-value" id="upstream-failover" style="display:none">—</span></span>
       <span class="header-stat date-range">
         <span><span class="header-stat-label">Period</span>
           <select id="period-select">
@@ -335,6 +378,7 @@ tr:hover td { background: rgba(88,166,255,0.04); }
   <div class="tab" data-tab="subs">Accounts</div>
   <div class="tab" data-tab="quota">Quota Cost</div>
   <div class="tab" data-tab="costs">OpenRouter $</div>
+  <div class="tab" data-tab="subdetail">Sub Detail</div>
 </div>
 
 <div class="tab-panel active" id="panel-overview">
@@ -451,6 +495,51 @@ tr:hover td { background: rgba(88,166,255,0.04); }
   </tr></thead><tbody></tbody></table></div>
   <div id="costs-unpriced" style="font-size:11px;color:var(--dim);margin-top:8px"></div>
 </div>
+
+<div class="tab-panel" id="panel-subdetail">
+  <div class="subdetail-controls">
+    <label>Subscription:</label>
+    <select id="subdetail-select"><option value="">Select...</option></select>
+    <span id="subdetail-email" class="subdetail-email"></span>
+    <span id="subdetail-plan" class="badge"></span>
+    <label style="margin-left:16px">Period:</label>
+    <select id="subdetail-period">
+      <option value="today">Today</option>
+      <option value="yesterday">Yesterday</option>
+      <option value="7d" selected>Last 7 days</option>
+      <option value="this_week">This Week</option>
+      <option value="this_month">This Month</option>
+      <option value="last_month">Last Month</option>
+    </select>
+    <button class="btn btn-sm" id="subdetail-refresh">🔄 Refresh</button>
+  </div>
+  <div id="subdetail-empty" class="subdetail-empty">Select a subscription to view detailed usage.</div>
+  <div id="subdetail-content" style="display:none">
+    <div id="subdetail-cards" class="grid"></div>
+    <div class="section">
+      <h2>Cost by Day</h2>
+      <div style="overflow-x:auto"><canvas id="subdetail-chart" width="700" height="200"></canvas></div>
+    </div>
+    <div class="section">
+      <h2>Models Breakdown</h2>
+      <div style="overflow-x:auto"><table id="subdetail-models-table"><thead><tr>
+        <th>Model</th><th>Requests</th><th>Tokens In</th><th>Tokens Out</th><th>Tokens Total</th><th>Share</th><th>$ Total</th>
+      </tr></thead><tbody></tbody></table></div>
+    </div>
+    <div style="display:flex;gap:24px;flex-wrap:wrap">
+      <div class="section" style="flex:1;min-width:300px">
+        <h2>Clients</h2>
+        <div style="overflow-x:auto"><table id="subdetail-clients-table"><thead><tr>
+          <th>Client</th><th>Requests</th><th>Tokens</th>
+        </tr></thead><tbody></tbody></table></div>
+      </div>
+      <div class="section" style="flex:1;min-width:200px">
+        <h2>Status</h2>
+        <div id="subdetail-status"></div>
+      </div>
+    </div>
+  </div>
+</div>
 </main>
 
 <aside class="account-health-rail" aria-label="Account health">
@@ -536,8 +625,7 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', funct
   document.querySelectorAll('.tab-panel').forEach(x=>x.classList.remove('active'));
   this.classList.add('active');
   document.getElementById('panel-'+this.dataset.tab).classList.add('active');
-  if (this.dataset.tab === 'models') loadModelsPanel();
-  if (this.dataset.tab === 'subs') { loadSubsPanel(); loadClients(); }
+  if (this.dataset.tab === 'subdetail') populateSubDetailSelect();
 }));
 
 // --- SSE ---
@@ -553,7 +641,7 @@ async function connectSSE() {
   }
   eventSource.onopen = () => { reconnectDelay=1000; document.getElementById('sse-dot').className='sse-dot ok'; document.getElementById('sse-label').textContent='live'; };
   eventSource.onerror = () => { document.getElementById('sse-dot').className='sse-dot off'; document.getElementById('sse-label').textContent='reconnecting...'; eventSource.close(); setTimeout(connectSSE,reconnectDelay); reconnectDelay=Math.min(reconnectDelay*2,30000); };
-  eventSource.addEventListener('status', e => { const d=JSON.parse(e.data); renderKeyStatus(d.keys||[]); document.getElementById('upstream-url').textContent=d.upstream||''; updateStickyBadge(d); });
+  eventSource.addEventListener('status', e => { const d=JSON.parse(e.data); renderKeyStatus(d.keys||[]); document.getElementById('upstream-url').textContent=d.upstream||''; renderUpstreamFailover(d.upstream_failover||[]); updateStickyBadge(d); });
   eventSource.addEventListener('models', e => updateModelInfo(JSON.parse(e.data)));
   eventSource.onmessage = e => {
     try {
@@ -561,12 +649,23 @@ async function connectSSE() {
       if(m.type==='call') { if(callInCurrentRange(m.data)) schedulePeriodRefresh(); }
       else if(m.type==='request_start') { addInFlight(m.data); }
       else if(m.type==='request_end') { addCallToFeed(m.data); removeInFlight(m.data); }
-      else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; updateStickyBadge(d); }
+      else if(m.type==='status') { const d=m.data||{}; renderKeyStatus(d.keys||[]); if(d.upstream) document.getElementById('upstream-url').textContent=d.upstream; renderUpstreamFailover(d.upstream_failover||[]); updateStickyBadge(d); }
       else if(m.type==='models') updateModelInfo(m.data||{});
       else if(m.type==='fallback_priority') { const sel=document.getElementById('fb-priority'); if(m.data && m.data.priority) sel.value = m.data.priority; }
       else if(m.type==='fallback_map_update') { loadFallbackStatus(); if (catalogLoaded) loadCatalog(true); }
     } catch(err){}
   };
+}
+
+function renderUpstreamFailover(list) {
+  const el = document.getElementById('upstream-failover');
+  if (!el) return;
+  if (list && list.length) {
+    el.textContent = list.join(', ');
+    el.style.display = '';
+  } else {
+    el.style.display = 'none';
+  }
 }
 
 // --- In-Flight Panel ---
@@ -806,6 +905,98 @@ function sortAccountsStable(keys) {
   return [...(keys || [])].sort((a, b) => labelOf(a).localeCompare(labelOf(b)));
 }
 
+const expandedKeys = new Set();  // key token_prefixes that are currently expanded
+const keyDetailLoaded = new Set();  // key token_prefixes whose detail data has been fetched
+
+function toggleKeyDetails(tokenPrefix) {
+  const card = document.getElementById('keycard-' + tokenPrefix);
+  const dd = document.getElementById('key-drilldown-' + tokenPrefix);
+  if (!card || !dd) return;
+  if (expandedKeys.has(tokenPrefix)) {
+    expandedKeys.delete(tokenPrefix);
+    card.classList.remove('expanded');
+    dd.style.maxHeight = '0';
+  } else {
+    expandedKeys.add(tokenPrefix);
+    card.classList.add('expanded');
+    dd.style.maxHeight = '800px';
+    if (!keyDetailLoaded.has(tokenPrefix)) {
+      loadKeyDetail(tokenPrefix);
+    }
+  }
+}
+
+async function loadKeyDetail(tokenPrefix) {
+  const dd = document.getElementById('key-drilldown-' + tokenPrefix);
+  if (!dd) return;
+  dd.innerHTML = '<div class="key-drilldown-inner"><div class="kd-loading">Loading usage details…</div></div>';
+  try {
+    const range = getDateRange();
+    const qs = `start_date=${range.start}&end_date=${range.end}`;
+    const [detail, costs] = await Promise.all([
+      loadJSON(`/admin/usage/by-key/${encodeURIComponent(tokenPrefix)}?${qs}`),
+      loadJSON(`/admin/usage/by-key-costs?${qs}&key=${encodeURIComponent(tokenPrefix)}`),
+    ]);
+    keyDetailLoaded.add(tokenPrefix);
+
+    // Build model breakdown table with costs
+    const keyCosts = (costs.keys||[]).find(k => k.upstream_key === tokenPrefix);
+    const costModels = keyCosts ? (keyCosts.models||[]) : [];
+    const costByModel = {};
+    costModels.forEach(m => { costByModel[m.model] = m; });
+
+    const modelRows = (detail.models||[]).map(m => {
+      const c = costByModel[m.model] || {};
+      const inPrice = c.input_per_1m != null ? '$'+c.input_per_1m.toFixed(2) : '?';
+      const outPrice = c.output_per_1m != null ? '$'+c.output_per_1m.toFixed(2) : '?';
+      const totalCost = c.total_cost_usd ? `<span class="kd-cost">$${c.total_cost_usd.toFixed(2)}</span>` : '-';
+      return `<tr><td style="font-family:monospace">${escHtml(m.model)}</td><td>${m.requests}</td><td>${(m.tokens_in||0).toLocaleString()}</td><td>${(m.tokens_out||0).toLocaleString()}</td><td>${totalCost}</td><td style="color:var(--dim)">${inPrice}</td><td style="color:var(--dim)">${outPrice}</td></tr>`;
+    }).join('');
+
+    const clientRows = (detail.clients||[]).map(c =>
+      `<tr><td style="font-family:monospace">${escHtml(c.client_id)}</td><td>${c.requests}</td><td>${(c.tokens_in||0).toLocaleString()}</td><td>${(c.tokens_out||0).toLocaleString()}</td><td>${(c.tokens_total||0).toLocaleString()}</td></tr>`
+    ).join('');
+
+    // Daily mini bars
+    const dailyMax = Math.max(...(detail.daily||[]).map(d => d.tokens_total||0), 1);
+    const dailyRows = (detail.daily||[]).map(d => {
+      const barW = Math.round((d.tokens_total/dailyMax)*100);
+      return `<tr><td>${escHtml(d.day)}</td><td>${d.requests}</td><td>${(d.tokens_total||0).toLocaleString()}</td><td><span class="kd-daily-bar" style="width:${barW}%"></span></td></tr>`;
+    }).join('');
+
+    // Status badges
+    const statusBadges = (detail.status_counts||[]).map(s => {
+      const cls = s.status === 200 ? 'kd-status-200' : s.status === 429 ? 'kd-status-429' : 'kd-status-err';
+      return `<span class="kd-status-badge ${cls}">${s.status}: ${s.count}</span>`;
+    }).join('');
+
+    const totals = detail.totals || {};
+    const totalCost = keyCosts ? `<span class="kd-cost">$${(keyCosts.total_cost_usd||0).toFixed(2)}</span>` : '';
+
+    dd.innerHTML = `<div class="key-drilldown-inner">
+      <h4>Overview</h4>
+      <div style="font-size:12px;display:flex;gap:16px;flex-wrap:wrap">
+        ${detail.account_email ? `<span><span style="color:var(--dim)">Account:</span> <span style="font-family:monospace">${escHtml(detail.account_email)}</span></span>` : ''}
+        <span><span style="color:var(--dim)">Plan:</span> ${escHtml(detail.plan||'?')}</span>
+        <span><span style="color:var(--dim)">Requests:</span> ${totals.requests||0}</span>
+        <span><span style="color:var(--dim)">Tokens in:</span> ${(totals.tokens_in||0).toLocaleString()}</span>
+        <span><span style="color:var(--dim)">Tokens out:</span> ${(totals.tokens_out||0).toLocaleString()}</span>
+        <span><span style="color:var(--dim)">Est. cost:</span> ${totalCost}</span>
+      </div>
+      ${statusBadges ? `<div style="margin-top:6px">${statusBadges}</div>` : ''}
+      <h4>Models</h4>
+      ${modelRows ? `<table><thead><tr><th>Model</th><th>Req</th><th>Tok In</th><th>Tok Out</th><th>$ Total</th><th>$/1M in</th><th>$/1M out</th></tr></thead><tbody>${modelRows}</tbody></table>` : '<div class="kd-empty">No model usage in this period.</div>'}
+      <h4>Clients</h4>
+      ${clientRows ? `<table><thead><tr><th>Client</th><th>Req</th><th>Tok In</th><th>Tok Out</th><th>Tok Total</th></tr></thead><tbody>${clientRows}</tbody></table>` : '<div class="kd-empty">No client usage in this period.</div>'}
+      <h4>Daily</h4>
+      ${dailyRows ? `<table><thead><tr><th>Day</th><th>Req</th><th>Tokens</th><th></th></tr></thead><tbody>${dailyRows}</tbody></table>` : '<div class="kd-empty">No daily data in this period.</div>'}
+    </div>`;
+  } catch(e) {
+    dd.innerHTML = `<div class="key-drilldown-inner"><div class="kd-loading" style="color:var(--red)">Error loading details: ${escHtml(e.message)}</div></div>`;
+    console.error('Key detail load error', e);
+  }
+}
+
 function renderKeyStatus(keys) {
   const sorted = sortAccountsStable(keys);
   const activeSlots = sorted.reduce((sum, k) => sum + (k.in_flight || 0), 0);
@@ -831,8 +1022,11 @@ function renderKeyStatus(keys) {
     const topModels = Object.entries(sModels).sort((a,b)=>(b[1].requests||0)-(a[1].requests||0)).slice(0,3);
     const modelBreakdown = topModels.length ? '<div class="key-row" style="margin-top:6px"><span class="kdim">Top models</span></div>' +
       topModels.map(([mid, md]) => `<div class="key-row" style="font-size:11px"><span class="kdim" style="font-family:monospace">${escHtml(mid)}</span><span>${md.requests||0} req</span></div>`).join('') : '';
-    return `<div class="key-card">
-      <div class="key-header"><span class="key-label ${cls}">${escHtml(k.label)}</span><span><span class="${cls}" style="font-size:10px;margin-right:6px">● ${health.label}</span><span class="key-plan">${escHtml(k.plan||'?')}</span></span></div>
+    const tp = escAttr(k.token_prefix||'');
+    const expanded = expandedKeys.has(tp) ? ' expanded' : '';
+    return `<div class="key-card${expanded}" id="keycard-${tp}" onclick="toggleKeyDetails('${tp}')">
+      <div class="key-header"><span class="key-label ${cls}"><span class="key-caret">▶</span> ${escHtml(k.label)}</span><span><span class="${cls}" style="font-size:10px;margin-right:6px">● ${health.label}</span><span class="key-plan">${escHtml(k.plan||'?')}</span></span></div>
+      ${k.account_email ? `<div class="key-row" style="font-size:11px"><span class="kdim">Account</span><span style="color:var(--dim);font-family:monospace">${escHtml(k.account_email)}</span></div>` : ''}
       <div class="key-row"><span class="kdim">Slots</span><span>${k.in_flight}/${k.max_concurrent}</span></div>${pctBar(slotPct,'var(--accent)')}
       <div class="key-row"><span class="kdim">Session</span><span>${sPct<0?'?':sPct.toFixed(1)+'%'}${sEl>=0?' ('+sEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(sPct,sEl,'var(--yellow)')}
       <div class="key-row"><span class="kdim">Weekly</span><span>${wPct<0?'?':wPct.toFixed(1)+'%'}${wEl>=0?' ('+wEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(wPct,wEl,'var(--purple)')}
@@ -840,8 +1034,18 @@ function renderKeyStatus(keys) {
       <div class="key-row"><span class="kdim">Requests</span><span>${k.total_requests}</span></div>
       <div class="key-row"><span class="kdim">429s</span><span>${k.total_429s}</span></div>
       ${modelBreakdown}
+      <div class="key-drilldown" id="key-drilldown-${tp}"></div>
     </div>`;
   }).join('');
+  // Re-expand any keys that were previously expanded
+  expandedKeys.forEach(tp => {
+    const dd = document.getElementById('key-drilldown-' + tp);
+    if (dd && keyDetailLoaded.has(tp)) {
+      const card = document.getElementById('keycard-' + tp);
+      if (card) card.classList.add('expanded');
+      dd.style.maxHeight = '800px';
+    }
+  });
 }
 
 // --- Call Feed ---
@@ -879,11 +1083,295 @@ function renderModelsGrid() {
     const metaBits = [ctxStr, keyStr, m.family||'', params, updated].filter(Boolean).join(' · ');
     const usageLine = u ? `<div class="mc-usage">${fmt(u.requests)} calls · ${fmt(u.tokens_total)} tokens · ${Math.round(u.avg_latency_ms||0)}ms</div>` : '<div class="mc-usage" style="color:var(--dim)">No usage (7d)</div>';
     const provBadge = providerBadge((m.providers||[]).join(','));
-    return `<div class="model-chip"><div class="mc-name">${m.id}${provBadge}</div><div class="mc-meta">${metaBits}</div><div class="mc-meta">${caps}</div>${usageLine}</div>`;
+    const testBtn = `<div class="mc-actions"><button class="btn-test" onclick="testModel('${escHtml(m.id)}', this)">Test “2+2”</button></div><div class="test-result" id="${_testDivId(m.id)}" style="display:none"></div>`;
+    return `<div class="model-chip"><div class="mc-name">${m.id}${provBadge}</div><div class="mc-meta">${metaBits}</div><div class="mc-meta">${caps}</div>${usageLine}${testBtn}</div>`;
   }).join('');
 }
 document.getElementById('model-search').addEventListener('input', renderModelsGrid);
 document.getElementById('model-sort').addEventListener('change', renderModelsGrid);
+
+// --- Test Model (inline "2+2" prompt) ---
+function _testDivId(modelId) {
+  // Generate a safe DOM element ID from a model name (may contain dots, colons, etc.)
+  return 'test-' + modelId.replace(/[^a-zA-Z0-9_-]/g, '-');
+}
+async function testModel(modelId, btn) {
+  const resultDiv = document.getElementById(_testDivId(modelId));
+  if (!resultDiv) return;
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  // Show loading state immediately
+  resultDiv.style.display = 'block';
+  resultDiv.className = 'test-result loading';
+  resultDiv.innerHTML = '<div class="tr-loading"><span class="spinner"></span>Sending test prompt "2+2" to ' + escHtml(modelId) + '...</div>';
+  btn.innerHTML = '<span class="spinner"></span>Testing...';
+  // Track elapsed time for UX
+  const startTime = Date.now();
+  const timerInterval = setInterval(() => {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const ld = resultDiv.querySelector('.tr-loading');
+    if (ld) ld.innerHTML = '<span class="spinner"></span>Sending test prompt "2+2" to ' + escHtml(modelId) + '... (' + elapsed + 's)';
+  }, 200);
+  try {
+    const resp = await fetch(API + '/admin/test-model', {
+      method: 'POST',
+      headers: adminHeaders(),
+      body: JSON.stringify({ model: modelId, prompt: '2+2' }),
+    });
+    clearInterval(timerInterval);
+    const contentType = resp.headers.get('content-type') || '';
+    // Non-streaming fallback (e.g. 404 model-not-found returns JSON)
+    if (!contentType.includes('text/event-stream')) {
+      const r = await resp.json();
+      const cls = r.status === 200 ? 'ok' : 'err';
+      resultDiv.className = 'test-result ' + cls;
+      let content = r.error || JSON.stringify(r.response, null, 2).slice(0, 500);
+      const metaParts = ['Status ' + r.status, r.elapsed_ms + 'ms', escHtml(modelId)];
+      resultDiv.innerHTML = '<div class="tr-meta">' + metaParts.join(' · ') + '</div><div class="tr-content">' + escHtml(content) + '</div>';
+      return;
+    }
+    // Streaming: read SSE tokens in real time
+    resultDiv.className = 'test-result ok';
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let content = '';
+    let metaParts = [escHtml(modelId)];
+    let finalStatus = 200;
+    let finalError = null;
+    resultDiv.innerHTML = '<div class="tr-meta">Streaming…</div><div class="tr-content"></div>';
+    const contentEl = resultDiv.querySelector('.tr-content');
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload) continue;
+        try {
+          const ev = JSON.parse(payload);
+          if (ev.type === 'token') {
+            content += ev.content;
+            contentEl.textContent = content;
+          } else if (ev.type === 'done') {
+            finalStatus = ev.status;
+            const elapsed = ev.elapsed_ms + 'ms';
+            const tokInfo = ev.usage ? ' · tokens: ' + ev.usage.total_tokens + ' (in:' + ev.usage.prompt_tokens + ' out:' + ev.usage.completion_tokens + ')' : '';
+            metaParts = ['Status ' + ev.status, elapsed, escHtml(modelId) + tokInfo];
+          } else if (ev.type === 'error') {
+            finalStatus = ev.status;
+            finalError = ev.error;
+          }
+        } catch (e) { /* ignore malformed */ }
+      }
+    }
+    if (finalError) {
+      resultDiv.className = 'test-result err';
+      resultDiv.innerHTML = '<div class="tr-meta">' + metaParts.join(' · ') + '</div><div class="tr-content">' + escHtml(finalError) + '</div>';
+    } else {
+      resultDiv.innerHTML = '<div class="tr-meta">' + metaParts.join(' · ') + '</div><div class="tr-content">' + escHtml(content || '(empty response)') + '</div>';
+    }
+  } catch (e) {
+    clearInterval(timerInterval);
+    resultDiv.className = 'test-result err';
+    let errMsg = e.message;
+    if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
+      errMsg = 'Network error — the proxy may be down or the request timed out (browser fetch limit).';
+    } else if (e.message.includes('JSON')) {
+      errMsg = 'Server returned an invalid response. The proxy may have crashed or the model is not available.';
+    }
+    resultDiv.innerHTML = '<div class="tr-meta">Request failed</div><div class="tr-content">' + escHtml(errMsg) + '</div>';
+  } finally {
+    clearInterval(timerInterval);
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+// --- Sub Detail (per-subscription usage analysis) ---
+function getSubDetailRange() {
+  const p = document.getElementById('subdetail-period').value;
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const yesterday = new Date(now.getTime() - 86400000).toISOString().slice(0, 10);
+  if (p === 'today') return { start: today, end: today };
+  if (p === 'yesterday') return { start: yesterday, end: yesterday };
+  if (p === '7d') {
+    const d = new Date(now.getTime() - 6 * 86400000);
+    return { start: d.toISOString().slice(0, 10), end: today };
+  }
+  if (p === 'this_week') {
+    const dow = (now.getDay() + 6) % 7;
+    const monday = new Date(now.getTime() - dow * 86400000);
+    return { start: monday.toISOString().slice(0, 10), end: today };
+  }
+  if (p === 'this_month') return { start: today.slice(0, 8) + '01', end: today };
+  if (p === 'last_month') {
+    const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const lmEnd = new Date(now.getFullYear(), now.getMonth(), 0);
+    return { start: lm.toISOString().slice(0, 10), end: lmEnd.toISOString().slice(0, 10) };
+  }
+  return { start: today, end: today };
+}
+
+async function populateSubDetailSelect() {
+  const sel = document.getElementById('subdetail-select');
+  if (sel.options.length > 1) return;
+  try {
+    const keys = await loadJSON('/admin/keys');
+    sel.innerHTML = '<option value="">Select...</option>' + keys.map((k, i) =>
+      `<option value="${escAttr(k.token_prefix||'')}">${escHtml(k.label)} (${escHtml(k.plan||'?')})</option>`
+    ).join('');
+    sel._keysData = keys;
+  } catch(e) { console.error('populateSubDetailSelect', e); }
+}
+
+async function loadSubDetail() {
+  const prefix = document.getElementById('subdetail-select').value;
+  if (!prefix) {
+    document.getElementById('subdetail-empty').style.display = '';
+    document.getElementById('subdetail-content').style.display = 'none';
+    return;
+  }
+  document.getElementById('subdetail-empty').style.display = 'none';
+  document.getElementById('subdetail-content').style.display = '';
+  const range = getSubDetailRange();
+  const qs = `start_date=${range.start}&end_date=${range.end}`;
+  try {
+    const [detail, costs] = await Promise.all([
+      loadJSON(`/admin/usage/by-key/${encodeURIComponent(prefix)}?${qs}`),
+      loadJSON(`/admin/usage/by-key-costs?${qs}&key=${encodeURIComponent(prefix)}`),
+    ]);
+    // Email + plan
+    const sel = document.getElementById('subdetail-select');
+    const keyData = (sel._keysData || []).find(k => (k.token_prefix||'') === prefix);
+    document.getElementById('subdetail-email').textContent = keyData ? (keyData.account_email || '') : (detail.account_email || '');
+    document.getElementById('subdetail-plan').textContent = detail.plan || (keyData ? keyData.plan : '') || '?';
+
+    // Summary cards
+    const totals = detail.totals || {};
+    const keyCosts = (costs.keys || [])[0] || {};
+    document.getElementById('subdetail-cards').innerHTML = `
+      <div class="card"><div class="label">Requests</div><div class="value blue">${fmt(totals.requests||0)}</div></div>
+      <div class="card"><div class="label">Tokens In</div><div class="value green">${fmt(totals.tokens_in||0)}</div></div>
+      <div class="card"><div class="label">Tokens Out</div><div class="value purple">${fmt(totals.tokens_out||0)}</div></div>
+      <div class="card"><div class="label">Total Tokens</div><div class="value yellow">${fmt(totals.tokens_total||0)}</div></div>
+      <div class="card"><div class="label">Est. Cost</div><div class="value" style="color:var(--green)">$${(keyCosts.total_cost_usd||0).toFixed(2)}</div></div>`;
+
+    // Bar chart for daily $ cost
+    drawSubDetailChart(detail.daily || [], keyCosts.models || []);
+
+    // Models table with share bars
+    const costByModel = {};
+    (keyCosts.models || []).forEach(m => { costByModel[m.model] = m; });
+    const maxTok = Math.max(...(detail.models||[]).map(m => m.tokens_total||0), 1);
+    document.querySelector('#subdetail-models-table tbody').innerHTML = (detail.models||[]).map(m => {
+      const c = costByModel[m.model] || {};
+      const cost = c.total_cost_usd ? `$${c.total_cost_usd.toFixed(2)}` : '-';
+      const barW = Math.round((m.tokens_total / maxTok) * 100);
+      return `<tr><td style="font-family:monospace">${escHtml(m.model)}</td><td>${m.requests}</td>
+        <td>${fmt(m.tokens_in||0)}</td><td>${fmt(m.tokens_out||0)}</td><td>${fmt(m.tokens_total||0)}</td>
+        <td><span class="subdetail-model-bar" style="width:${barW}%"></span> ${((m.tokens_total/maxTok)*100).toFixed(0)}%</td>
+        <td style="color:var(--green);font-weight:600">${cost}</td></tr>`;
+    }).join('');
+
+    // Clients table
+    document.querySelector('#subdetail-clients-table tbody').innerHTML = (detail.clients||[]).map(c =>
+      `<tr><td style="font-family:monospace">${escHtml(c.client_id)}</td><td>${c.requests}</td><td>${fmt(c.tokens_total||0)}</td></tr>`
+    ).join('');
+
+    // Status badges
+    document.getElementById('subdetail-status').innerHTML = (detail.status_counts||[]).map(s => {
+      const cls = s.status === 200 ? 'subdetail-status-200' : s.status === 429 ? 'subdetail-status-429' : 'subdetail-status-err';
+      return `<span class="subdetail-status-badge ${cls}">${s.status}: ${s.count}</span>`;
+    }).join('');
+
+  } catch(e) { console.error('loadSubDetail', e); }
+}
+
+function drawSubDetailChart(daily, costModels) {
+  const canvas = document.getElementById('subdetail-chart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const cw = canvas.width = 700 * dpr;
+  const ch = canvas.height = 200 * dpr;
+  canvas.style.width = '700px';
+  canvas.style.height = '200px';
+  ctx.scale(dpr, dpr);
+  const w = 700, h = 200;
+  ctx.clearRect(0, 0, cw, ch);
+
+  if (!daily.length) {
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No daily data for this period', w/2, h/2);
+    return;
+  }
+
+  // Compute $ per day from cost models
+  const totalTokens = daily.reduce((s, d) => s + (d.tokens_total||0), 0) || 1;
+  const totalCost = (costModels.reduce((s, m) => s + (m.total_cost_usd||0), 0)) || 0;
+  const dailyData = daily.slice().reverse(); // chronological order
+  const barVals = dailyData.map(d => (d.tokens_total||0) / totalTokens * totalCost);
+  const maxVal = Math.max(...barVals, 0.01);
+
+  const pad = { l: 50, r: 16, t: 16, b: 40 };
+  const chartW = w - pad.l - pad.r;
+  const chartH = h - pad.t - pad.b;
+  const barGap = 6;
+  const barW = Math.max(8, (chartW / dailyData.length) - barGap);
+
+  // Y axis grid
+  ctx.strokeStyle = '#30363d';
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + (chartH / 4) * i;
+    const val = maxVal * (1 - i/4);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    ctx.fillText('$' + val.toFixed(2), pad.l - 4, y + 3);
+  }
+
+  // Bars
+  const colors = ['#58a6ff', '#3fb950', '#bc8cff', '#d29922', '#f0883e', '#22c55e'];
+  dailyData.forEach((d, i) => {
+    const x = pad.l + i * (barW + barGap) + barGap/2;
+    const barH = (barVals[i] / maxVal) * chartH;
+    const y = pad.t + chartH - barH;
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fillRect(x, y, barW, barH);
+    // Day label
+    ctx.fillStyle = '#8b949e';
+    ctx.textAlign = 'center';
+    ctx.font = '9px sans-serif';
+    const dayLabel = (d.day||'').slice(5); // MM-DD
+    ctx.fillText(dayLabel, x + barW/2, h - pad.b + 14);
+    // $ label on top
+    if (barVals[i] > 0) {
+      ctx.fillStyle = '#c9d1d9';
+      ctx.font = '9px sans-serif';
+      ctx.fillText('$' + barVals[i].toFixed(2), x + barW/2, y - 3);
+    }
+  });
+
+  // X axis label
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('Est. $ cost by day (proportional to tokens)', pad.l, h - 2);
+}
+
+document.getElementById('subdetail-select').addEventListener('change', loadSubDetail);
+document.getElementById('subdetail-period').addEventListener('change', loadSubDetail);
+document.getElementById('subdetail-refresh').addEventListener('click', loadSubDetail);
+
+// --- NVIDIA Build Catalog ---
 
 // --- NVIDIA Build Catalog ---
 let catalogData = null;          // { catalog: [...], by_org: {...}, count, enabled }
