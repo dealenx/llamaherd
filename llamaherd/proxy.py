@@ -66,45 +66,43 @@ for _env_candidate in (
         load_dotenv(_env_candidate, override=False)
         break
 
-# Config file resolution, matching the upstream-monolith/deployment-friendly
-# order used before the modular split:
-#   1. LLAMAHERD_CONFIG env var (explicit — recommended for Docker/K8s/Dokploy)
+# Config is OPTIONAL. LlamaHerd resolves CONFIG_PATH from, in order:
+#   1. LLAMAHERD_CONFIG env var
 #   2. <cwd>/config.yaml
-#   3. /app/config.yaml (standard Docker WORKDIR)
-#   4. Package dir/config.yaml (installed alongside the module)
-# Config is OPTIONAL — if no config.yaml is found, LlamaHerd uses defaults
-# and loads keys/clients from the database.
+#   3. /app/config.yaml (Docker WORKDIR)
+#   4. Package dir/config.yaml
+# If none exists, load_config() returns {} and all settings come from
+# env overrides + database defaults. This keeps the proxy booting even with
+# no config file mounted at all.
 _cfg_env = os.environ.get("LLAMAHERD_CONFIG")
-_config_candidates = [
-    _cfg_env,
-    str(Path.cwd() / "config.yaml"),
-    "/app/config.yaml",
-    str(Path(__file__).parent / "config.yaml"),
-]
 CONFIG_PATH: Path | None = None
-for _c in _config_candidates:
+for _c in (_cfg_env, str(Path.cwd() / "config.yaml"), "/app/config.yaml",
+           str(Path(__file__).parent / "config.yaml")):
     if _c and Path(_c).is_file():
         CONFIG_PATH = Path(_c)
         break
-# If LLAMAHERD_CONFIG is set explicitly but file doesn't exist, keep it so
-# load_config() can create a minimal default there.
 if CONFIG_PATH is None and _cfg_env:
+    # Env pointed at a path that doesn't exist yet — keep it so load_config
+    # can report it, but it still won't crash.
     CONFIG_PATH = Path(_cfg_env)
 
-def load_config() -> dict:
-    """Load config from CONFIG_PATH. If the file is missing, return an empty dict.
 
-    Config is OPTIONAL — all keys/clients are stored in the database and persist
-    across restarts. The config file is only needed for:
-    - Overriding defaults (host, port, upstream URL, admin_token)
-    - Seeding keys/clients on first run (when DB is empty)
-    - Fallback provider configuration
+def load_config() -> dict:
+    """Return config dict from CONFIG_PATH, or {} if the file is missing.
+
+    Never raises — config is fully optional. Keys, clients, and credentials
+    are stored in the database and env overrides; the YAML file only seeds
+    defaults on first run.
     """
     if CONFIG_PATH is None or not CONFIG_PATH.is_file():
-        log.info("No config.yaml found — using defaults. Keys and clients will be loaded from DB.")
+        log.info("No config.yaml found — using defaults (keys/clients loaded from DB).")
         return {}
-    with open(CONFIG_PATH) as f:
-        cfg = yaml.safe_load(f)
+    try:
+        with open(CONFIG_PATH) as f:
+            cfg = yaml.safe_load(f)
+    except OSError:
+        log.warning(f"Could not read {CONFIG_PATH} — using defaults.")
+        return {}
     return cfg if isinstance(cfg, dict) else {}
 
 # ---------------------------------------------------------------------------
