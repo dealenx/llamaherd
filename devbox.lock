@@ -1,0 +1,60 @@
+{
+  "lockfile_version": "1",
+  "packages": {
+    "github:NixOS/nixpkgs/nixpkgs-unstable": {
+      "last_modified": "2026-08-19T20:44:59Z",
+      "resolved": "github:NixOS/nixpkgs/07e1d92cdc0ed416cfa11ff3ca40d17e61cfba7a?lastModified=1787172299&narHash=sha256-PShzS87awOlE5XWkxUGBd%2F58%2FF%2BAtE2ZMgFffKj4r8s%3D"
+    },
+    "github:dealenx/nix-apm": {
+      "last_modified": "2026-08-20T17:59:17Z",
+      "resolved": "github:dealenx/nix-apm/45f5bfd4866ad768cb32defb6b0ef94b7079b3f2?lastModified=1787248757&narHash=sha256-2bjYJ1Ii%2F0%2BridbVJm5hyXmvvOBjih%2FHTVLuNzQxfkI%3D"
+    },
+    "python@3.11": {
+      "last_modified": "2026-08-14T06:48:10Z",
+      "plugin_version": "0.0.5",
+      "resolved": "github:NixOS/nixpkgs/f2b17eb1b90f6a359082035b4538d4c63017aec3#python311",
+      "source": "devbox-search",
+      "version": "3.11.16",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/lia1kdjyrrjs58n48hljzy92ksa9ysw1-python3-3.11.16",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/lia1kdjyrrjs58n48hljzy92ksa9ysw1-python3-3.11.16"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/22m9xyj83w2icmhx30nf9drygvrilqxy-python3-3.11.16",
+              "default": true
+            },
+            {
+              "name": "debug",
+              "path": "/nix/store/y5yjmvwi6zbi29lvq6lp7lzx29x1igar-python3-3.11.16-debug"
+            }
+          ],
+          "store_path": "/nix/store/22m9xyj83w2icmhx30nf9drygvrilqxy-python3-3.11.16"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/ndwmzp2j0ncszq2qanrxw1wcz2xhj3zm-python3-3.11.16",
+              "default": true
+            },
+            {
+              "name": "debug",
+              "path": "/nix/store/jriwixlpf400fxxyg7nzh5bz7iwr9cj8-python3-3.11.16-debug"
+            }
+          ],
+          "store_path": "/nix/store/ndwmzp2j0ncszq2qanrxw1wcz2xhj3zm-python3-3.11.16"
+        }
+      }
+    }
+  }
+}

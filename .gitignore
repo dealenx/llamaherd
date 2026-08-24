@@ -15,7 +15,7 @@ __pycache__/
 dist/
 build/
 .eggs/
-
+.agents/
 # IDE
 .vscode/
 .idea/
@@ -33,3 +33,7 @@ venv/
 nvidia_model_cache.json
 llamaherd.log
 uv.lock
+
+
+# APM dependencies
+apm_modules/
