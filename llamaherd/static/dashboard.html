@@ -890,6 +890,7 @@ function updateStickyBadge(d) {
 // --- Key Status ---
 function accountHealth(k) {
   const known = v => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  if (k.auto_disabled_reason) return {label:'Disabled (' + k.auto_disabled_reason + ')', cls:'status-err', attention:true};
   if (k.exhausted) return {label:'Exhausted', cls:'status-err', attention:true};
   if (k.suspended) return {label:'Suspended', cls:'status-warn', attention:true};
   if (k.max_concurrent > 0 && (k.in_flight || 0) >= k.max_concurrent) return {label:'At capacity', cls:'status-err', attention:true};
@@ -1032,6 +1033,7 @@ function renderKeyStatus(keys) {
     return `<div class="key-card${expanded}" id="keycard-${tp}" onclick="toggleKeyDetails('${tp}')">
       <div class="key-header"><span class="key-label ${cls}"><span class="key-caret">▶</span> ${escHtml(k.label)}</span><span><span class="${cls}" style="font-size:10px;margin-right:6px">● ${health.label}</span><span class="key-plan">${escHtml(k.plan||'?')}</span></span></div>
       ${k.account_email ? `<div class="key-row" style="font-size:11px"><span class="kdim">Account</span><span style="color:var(--dim);font-family:monospace">${escHtml(k.account_email)}</span></div>` : ''}
+      ${k.auto_disabled_reason ? `<div class="key-row" style="font-size:11px;background:var(--surface);border-radius:4px;padding:4px 6px"><span class="kdim">Disabled</span><span style="color:var(--red)">${escHtml(k.auto_disabled_reason)}</span></div>` : ''}
       <div class="key-row"><span class="kdim">Slots</span><span>${k.in_flight}/${k.max_concurrent}</span></div>${pctBar(slotPct,'var(--accent)')}
       <div class="key-row"><span class="kdim">Session</span><span>${sPct<0?'?':sPct.toFixed(1)+'%'}${sEl>=0?' ('+sEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(sPct,sEl,'var(--yellow)')}
       <div class="key-row"><span class="kdim">Weekly</span><span>${wPct<0?'?':wPct.toFixed(1)+'%'}${wEl>=0?' ('+wEl.toFixed(0)+'% elapsed)':''}</span></div>${pctBarWithElapsed(wPct,wEl,'var(--purple)')}

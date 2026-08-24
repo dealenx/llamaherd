@@ -32,6 +32,7 @@ class KeyState:
     suspended: bool = False
     account_email: str = ""
     account_id: str = ""
+    auto_disabled_reason: str | None = None
     # Populated by cookie-based settings scrape
     session_usage_pct: float = -1.0  # -1 = unknown
     session_resets_at: str | None = None
@@ -42,6 +43,8 @@ class KeyState:
 
     @property
     def available_slots(self) -> int:
+        if self.auto_disabled_reason:
+            return 0
         if self.exhausted and time.time() < self.exhausted_until:
             return 0
         if self.exhausted and time.time() >= self.exhausted_until:
@@ -247,7 +250,19 @@ class KeyManager:
                         key.account_email = data.get("Email", "")
                         key.account_id = data.get("ID", "")
                         key.suspended = data.get("SuspendedAt", {}).get("Valid", False)
-                        
+
+                        # Auto-disable accounts that are not on a paid plan.
+                        paid_plans = {"pro", "max", "enterprise"}
+                        plan_lower = (key.plan or "").lower()
+                        if plan_lower and plan_lower not in paid_plans:
+                            if not key.auto_disabled_reason:
+                                key.auto_disabled_reason = f"plan:{key.plan}"
+                                log.warning(f"Auto-disabled {key.label}: plan={key.plan}")
+                        else:
+                            if key.auto_disabled_reason and key.auto_disabled_reason.startswith("plan:"):
+                                log.info(f"Auto-re-enabled {key.label}: plan={key.plan}")
+                                key.auto_disabled_reason = None
+
                         period_start = data.get("SubscriptionPeriodStart", {})
                         period_end = data.get("SubscriptionPeriodEnd", {})
                         if period_start.get("Valid"):
@@ -378,7 +393,7 @@ class KeyManager:
             # Sticky key takes precedence for cache affinity (even if higher load)
             if sticky_key and sticky_key not in excluded:
                 for k in self.keys:
-                    if k.token == sticky_key and not k.suspended and k.available_slots > 0:
+                    if k.token == sticky_key and not k.suspended and not k.auto_disabled_reason and k.available_slots > 0:
                         k.in_flight += 1
                         return k
                 # Sticky key exhausted or unavailable — fall through to free select.
@@ -387,13 +402,13 @@ class KeyManager:
 
             if prefer_key and prefer_key not in excluded:
                 for k in self.keys:
-                    if k.token == prefer_key and not k.suspended and k.available_slots > 0:
+                    if k.token == prefer_key and not k.suspended and not k.auto_disabled_reason and k.available_slots > 0:
                         k.in_flight += 1
                         return k
 
             candidates = [
                 k for k in self.keys
-                if not k.suspended and k.available_slots > 0 and k.token not in excluded
+                if not k.suspended and not k.auto_disabled_reason and k.available_slots > 0 and k.token not in excluded
             ]
             if not candidates:
                 return None
@@ -438,6 +453,7 @@ class KeyManager:
             "total_429s": k.total_429s,
             "total_402s": k.total_402s,
             "exhausted": k.exhausted,
+            "auto_disabled_reason": k.auto_disabled_reason,
             "cycle_freshness": round(k.cycle_freshness, 4),
             "period_remaining_pct": round(k.period_remaining_pct, 1),
             "plan": k.plan,
