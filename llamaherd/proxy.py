@@ -1378,7 +1378,7 @@ async def _proxy_stream(client_id: str, key: KeyState, path: str,
         nonlocal tokens_out, tokens_in, usage_captured, final_status
         try:
             async with _cancellation_safe_stream_failover(
-                upstream_http_client, "POST", [upstream_url] + upstream_failover,
+                upstream_http_client, "POST", [f"{u}{path}" for u in [upstream_url] + upstream_failover],
                 content=body, headers=headers,
             ) as resp:
                     if resp.status_code == 429:
