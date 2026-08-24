@@ -580,10 +580,10 @@ def main():
     args = parser.parse_args()
 
     if args.command == "serve":
-        # Import and start the proxy server
+        # Set env overrides BEFORE importing proxy.py so CONFIG_PATH is resolved
+        # correctly at module import time.
         import os
 
-        from .proxy import main as proxy_main
         if args.config:
             os.environ["LLAMAHERD_CONFIG"] = args.config
         if args.admin_token:
@@ -592,6 +592,8 @@ def main():
             os.environ["LLAMAHERD_HOST"] = args.host
         if args.port:
             os.environ["LLAMAHERD_PORT"] = str(args.port)
+
+        from .proxy import main as proxy_main
         proxy_main()
     elif hasattr(args, "func"):
         args.func(args)

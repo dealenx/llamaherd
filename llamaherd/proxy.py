@@ -66,11 +66,46 @@ for _env_candidate in (
         load_dotenv(_env_candidate, override=False)
         break
 
-CONFIG_PATH = Path(os.environ.get("LLAMAHERD_CONFIG", str(Path(__file__).parent / "config.yaml")))
+# Config file resolution, matching the upstream-monolith/deployment-friendly
+# order used before the modular split:
+#   1. LLAMAHERD_CONFIG env var (explicit — recommended for Docker/K8s/Dokploy)
+#   2. <cwd>/config.yaml
+#   3. /app/config.yaml (standard Docker WORKDIR)
+#   4. Package dir/config.yaml (installed alongside the module)
+# Config is OPTIONAL — if no config.yaml is found, LlamaHerd uses defaults
+# and loads keys/clients from the database.
+_cfg_env = os.environ.get("LLAMAHERD_CONFIG")
+_config_candidates = [
+    _cfg_env,
+    str(Path.cwd() / "config.yaml"),
+    "/app/config.yaml",
+    str(Path(__file__).parent / "config.yaml"),
+]
+CONFIG_PATH: Path | None = None
+for _c in _config_candidates:
+    if _c and Path(_c).is_file():
+        CONFIG_PATH = Path(_c)
+        break
+# If LLAMAHERD_CONFIG is set explicitly but file doesn't exist, keep it so
+# load_config() can create a minimal default there.
+if CONFIG_PATH is None and _cfg_env:
+    CONFIG_PATH = Path(_cfg_env)
 
 def load_config() -> dict:
+    """Load config from CONFIG_PATH. If the file is missing, return an empty dict.
+
+    Config is OPTIONAL — all keys/clients are stored in the database and persist
+    across restarts. The config file is only needed for:
+    - Overriding defaults (host, port, upstream URL, admin_token)
+    - Seeding keys/clients on first run (when DB is empty)
+    - Fallback provider configuration
+    """
+    if CONFIG_PATH is None or not CONFIG_PATH.is_file():
+        log.info("No config.yaml found — using defaults. Keys and clients will be loaded from DB.")
+        return {}
     with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    return cfg if isinstance(cfg, dict) else {}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -2273,7 +2308,8 @@ def _load_openrouter_pricing() -> dict:
     global _OPENROUTER_PRICING
     if _OPENROUTER_PRICING is not None:
         return _OPENROUTER_PRICING
-    pricing_path = CONFIG_PATH.parent / "openrouter_pricing.yaml"
+    pricing_dir = (CONFIG_PATH.parent if CONFIG_PATH else Path(__file__).parent)
+    pricing_path = pricing_dir / "openrouter_pricing.yaml"
     if pricing_path.exists():
         with open(pricing_path) as f:
             data = yaml.safe_load(f)
@@ -2300,7 +2336,8 @@ def _rebuild_pricing_aliases():
 
 def _save_pricing_yaml(pricing: dict):
     """Write pricing data back to YAML file, preserving header comments."""
-    pricing_path = CONFIG_PATH.parent / "openrouter_pricing.yaml"
+    pricing_dir = (CONFIG_PATH.parent if CONFIG_PATH else Path(__file__).parent)
+    pricing_path = pricing_dir / "openrouter_pricing.yaml"
     header = [
         "# OpenRouter equivalent pricing for LlamaHerd models",
         "# All prices in USD per 1M tokens",
