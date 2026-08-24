@@ -630,6 +630,7 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', funct
   this.classList.add('active');
   document.getElementById('panel-'+this.dataset.tab).classList.add('active');
   if (this.dataset.tab === 'subdetail') populateSubDetailSelect();
+  if (this.dataset.tab === 'models') loadModelsPanel();
 }));
 
 // --- SSE ---
